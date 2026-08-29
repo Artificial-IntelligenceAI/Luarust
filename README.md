@@ -58,6 +58,21 @@ The two lists have to be the same length. Three names and two values is an error
 it names the one that went without — Luarust will not invent a value you did not
 write.
 
+## Printing
+
+`print` takes its items in brackets, juxtaposed rather than separated by anything:
+
+```luarust
+var.local.b16 ['x'] = ['1000'];
+print["x is equal to " 'x' \n];
+```
+
+Double quotes are text. **Single quotes are a name** — `'x'` is the variable, not the
+letter x. That is how a value gets read back out of one.
+
+`\n` is written as a bare token outside the quotes, and nothing is inserted on your
+behalf: no separator between items, and no line ending unless you write one.
+
 ## Scope
 
 Every declaration carries one of four, and the first three mean what they usually mean:
