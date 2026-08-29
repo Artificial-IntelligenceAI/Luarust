@@ -327,12 +327,67 @@ impl<const N: usize> Uint<N> {
         (quot, rem)
     }
 
+    /// A value with the low `k` bits set and nothing else.
+    pub fn low_mask(k: u32) -> Self {
+        if k == 0 {
+            return Self::ZERO;
+        }
+        if k >= Self::BITS {
+            return Self::MAX;
+        }
+        Self::from_u64(1).shl(k).wrapping_sub(Self::from_u64(1))
+    }
+
     /// Reinterpret at a different width: zero-extending when widening, truncating when narrowing.
     pub fn resize<const M: usize>(self) -> Uint<M> {
         let mut out = [0u64; M];
         let k = if N < M { N } else { M };
         out[..k].copy_from_slice(&self.limbs[..k]);
         Uint { limbs: out }
+    }
+}
+
+impl<const N: usize> core::ops::BitAnd for Uint<N> {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        let mut out = [0u64; N];
+        for i in 0..N {
+            out[i] = self.limbs[i] & rhs.limbs[i];
+        }
+        Self { limbs: out }
+    }
+}
+
+impl<const N: usize> core::ops::BitOr for Uint<N> {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        let mut out = [0u64; N];
+        for i in 0..N {
+            out[i] = self.limbs[i] | rhs.limbs[i];
+        }
+        Self { limbs: out }
+    }
+}
+
+impl<const N: usize> core::ops::BitXor for Uint<N> {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self {
+        let mut out = [0u64; N];
+        for i in 0..N {
+            out[i] = self.limbs[i] ^ rhs.limbs[i];
+        }
+        Self { limbs: out }
+    }
+}
+
+impl<const N: usize> core::ops::Not for Uint<N> {
+    type Output = Self;
+    fn not(self) -> Self {
+        let mut out = [0u64; N];
+        for i in 0..N {
+            out[i] = !self.limbs[i];
+        }
+        Self { limbs: out }
     }
 }
 
@@ -590,6 +645,35 @@ mod tests {
                 a.cmp(&b)
             );
         }
+    }
+
+    #[test]
+    fn bitwise_ops_match_u128() {
+        let mut rng = Rng::new(11);
+        for _ in 0..10_000 {
+            let a = ((rng.next() as u128) << 64) | rng.next() as u128;
+            let b = ((rng.next() as u128) << 64) | rng.next() as u128;
+            let (ua, ub) = (Uint::<2>::from_u128(a), Uint::<2>::from_u128(b));
+            assert_eq!((ua & ub).low128(), a & b);
+            assert_eq!((ua | ub).low128(), a | b);
+            assert_eq!((ua ^ ub).low128(), a ^ b);
+            assert_eq!((!ua).low128(), !a);
+        }
+    }
+
+    #[test]
+    fn low_mask_matches_u128() {
+        for k in 0..=128u32 {
+            let want = if k == 0 {
+                0
+            } else if k >= 128 {
+                u128::MAX
+            } else {
+                (1u128 << k) - 1
+            };
+            assert_eq!(Uint::<2>::low_mask(k).low128(), want, "k = {k}");
+        }
+        assert_eq!(Uint::<4>::low_mask(200).bit_len(), 200);
     }
 
     #[test]

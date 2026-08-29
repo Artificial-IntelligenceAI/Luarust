@@ -16,6 +16,8 @@
 //!
 //! The crate has no dependencies, including no `libm` and no bignum crate.
 
+pub mod binary;
 pub mod uint;
 
+pub use binary::{Class, Format, Round, Unpacked};
 pub use uint::Uint;
