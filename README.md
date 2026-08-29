@@ -73,6 +73,20 @@ letter x. That is how a value gets read back out of one.
 `\n` is written as a bare token outside the quotes, and nothing is inserted on your
 behalf: no separator between items, and no line ending unless you write one.
 
+A number prints as the value that is actually stored, not as the text that was written
+to make it. `b16` carries eleven bits of significand, and most decimals are not in it:
+
+```luarust
+var.local.b16 ['a'] = ['0.1'];
+print['a' \n];                 -- 0.0999755859375
+```
+
+That *is* `b16 '0.1'` — the nearest `b16` to a tenth, exactly. Luarust will not print a
+tidier number than the one it is holding.
+
+Arithmetic never happens inline, in a print list or anywhere else. It goes inside
+`math { }`.
+
 ## Scope
 
 Every declaration carries one of four, and the first three mean what they usually mean:
