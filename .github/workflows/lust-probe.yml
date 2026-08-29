@@ -39,13 +39,7 @@ jobs:
           cat > hello.lust <<'EOF'
           println("hello from lust")
           EOF
-          cp hello.lust hello.lu; cp hello.lust hello.ls
-          BIN=$(command -v lust || command -v lust-rs)
-          echo "=== binary: $BIN ==="
-          for f in hello.lust hello.lu hello.ls; do
-            echo "--- run $f ---"; $BIN run "$f" 2>&1 | head -20
-            echo "--- bare  $f ---"; $BIN "$f" 2>&1 | head -20
-          done
+          lust hello.lust
           exit 0
 
       - name: Typed program
@@ -59,8 +53,8 @@ jobs:
           local x: int = 41
           println("sum = " .. tostring(add(x, 1)))
           EOF
-          BIN=$(command -v lust || command -v lust-rs)
-          $BIN run typed.lust 2>&1 | head -30 || $BIN typed.lust 2>&1 | head -30
+          lust typed.lust
+          echo "=== exit: $? ==="
           exit 0
 
       - name: What a broken program says
@@ -70,30 +64,48 @@ jobs:
           local x: int = "not a number"
           println(y)
           EOF
-          BIN=$(command -v lust || command -v lust-rs)
-          $BIN run broken.lust 2>&1 | head -40 || $BIN broken.lust 2>&1 | head -40
+          echo "--- source ---"; cat -n broken.lust
+          echo "--- lust says ---"; lust broken.lust
+          echo "=== exit: $? ==="
+          exit 0
+
+      - name: Disassembly
+        run: |
+          set +e
+          cat > loop.lust <<'EOF'
+          local sum: int = 0
+          for i = 1, 10 do
+              sum = (sum + i) % 1000000007
+          end
+          println(tostring(sum))
+          EOF
+          lust --disassemble loop.lust 2>&1 | head -50
           exit 0
 
       - name: Hot loop, the benchmark Luarus already has numbers for
         run: |
           set +e
           sudo apt-get install -y -qq lua5.4 luajit >/dev/null 2>&1
-          cat > bench.lust <<'EOF'
+          mk(){ cat > bench.lust <<EOF
           local sum: int = 0
-          for i = 1, 100000000 do
+          for i = 1, $1 do
               sum = (sum + i) % 1000000007
           end
           println(tostring(sum))
           EOF
-          cat > bench.lua <<'EOF'
+          cat > bench.lua <<EOF
           local sum = 0
-          for i = 1, 100000000 do
+          for i = 1, $1 do
               sum = (sum + i) % 1000000007
           end
           print(sum)
           EOF
-          BIN=$(command -v lust || command -v lust-rs)
-          echo "=== lust ==="; time ( $BIN run bench.lust 2>&1 | tail -3 || $BIN bench.lust 2>&1 | tail -3 )
-          echo "=== lua5.4 ==="; command -v lua5.4 && time lua5.4 bench.lua
-          echo "=== luajit ==="; command -v luajit && time luajit bench.lua
+          }
+          for N in 10000000 100000000; do
+            echo "################ N = $N ################"
+            mk $N
+            echo "--- lust ---";    time timeout 600 lust bench.lust
+            echo "--- lua5.4 ---";  time timeout 600 lua5.4 bench.lua
+            echo "--- luajit ---";  time timeout 600 luajit bench.lua
+          done
           exit 0
