@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/luarust-num"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["Tankun Sriket"]
+repository = "https://github.com/Artificial-IntelligenceAI/Luarust"
+
+[profile.release]
+opt-level = 3
+debug = true
