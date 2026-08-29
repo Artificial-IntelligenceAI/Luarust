@@ -22,7 +22,7 @@ jobs:
           - { os: windows-latest, name: windows-x86_64 }
           - { os: macos-latest,   name: macos-arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain
         run: rustc --version && cargo --version && rustc --print cfg | grep target_arch
@@ -39,6 +39,6 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup component add clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
