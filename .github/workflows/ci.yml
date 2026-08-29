@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    # Luarust is developed on an arm64 Mac, so x86-64 is hardware the code has
+    # otherwise never run on. ubuntu and windows are x86-64; macos is arm64.
+    name: test / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  name: linux-x86_64 }
+          - { os: windows-latest, name: windows-x86_64 }
+          - { os: macos-latest,   name: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustc --version && cargo --version && rustc --print cfg | grep target_arch
+
+      # Debug first: the soft-float carries debug_assert!s about how wide an
+      # intermediate is allowed to get, and release compiles them out.
+      - name: Test (debug, with debug_assert! active)
+        run: cargo test --workspace --all-targets
+
+      - name: Test (release)
+        run: cargo test --workspace --all-targets --release
+
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
