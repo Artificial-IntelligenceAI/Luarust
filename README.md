@@ -54,6 +54,10 @@ Nothing in common at all:
 var [local.str 'name', local.b16 'x', local.str '❔'] = ['Tankun', '1000', 'idk'];
 ```
 
+The two lists have to be the same length. Three names and two values is an error, and
+it names the one that went without — Luarust will not invent a value you did not
+write.
+
 ## Scope
 
 Every declaration carries one of three, and they mean what they usually mean:
@@ -63,6 +67,23 @@ var.local.str  ['name'] = ['Tankun'];   -- the block it is written in, and no fu
 var.global.str ['name'] = ['Tankun'];   -- the whole program
 var.public.str ['name'] = ['Tankun'];   -- and exported, so importers can see it too
 ```
+
+Leave it out and the variable is **restricted**, which means it exists, it holds its
+value, and nothing is allowed to touch it. The declaration compiles. Every use of it
+does not.
+
+```luarust
+var.str ['name'] = ['Tankun'];   -- declared, and unusable
+```
+
+This is a joke, and it is also the default, so if you would rather hear about it where
+you wrote it than where you used it, say so at the top of the file:
+
+```luarust
+defaults.no-visibility-stated.error;
+```
+
+and a declaration that states no visibility becomes an error on the spot.
 
 ## Types
 
