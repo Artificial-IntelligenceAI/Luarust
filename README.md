@@ -87,6 +87,20 @@ defaults.no-visibility-stated.error;
 
 and a declaration that states no visibility becomes an error on the spot.
 
+## The project file
+
+A Luarust source file is `.rust`. Settings for a whole project live beside them in a
+`luarust.toml`:
+
+```toml
+[defaults]
+no-visibility-stated = "error"
+```
+
+Anything under `[defaults]` applies to every file in the project, so a preference you
+hold everywhere is written once. A `defaults.` line at the top of a file still wins for
+that file — whatever a file says about itself is the last word on it.
+
 ## Types
 
 ```
