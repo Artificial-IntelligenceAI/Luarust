@@ -90,7 +90,7 @@ and a declaration that states no visibility becomes an error on the spot.
 ## The project file
 
 A Luarust source file is `.rust`. Settings for a whole project live beside them in a
-`luarust.toml`:
+`lust.toml`:
 
 ```toml
 [defaults]
