@@ -18,6 +18,10 @@
 //! `Uint<1>` for `b16` and `b32`, `Uint<2>` for `b64`, `Uint<4>` for `b128`,
 //! `Uint<8>` for `b256`.
 
+pub mod arith;
+
+pub use arith::{Comparison, add, compare, div, mul, neg, sqrt, sub};
+
 use crate::uint::Uint;
 
 /// The rounding-direction attributes of IEEE 754.
@@ -129,10 +133,11 @@ impl Format {
 
     /// The narrowest [`Uint`] width, in 64-bit limbs, that this format's arithmetic needs.
     ///
-    /// Products of two significands take `2p` bits and the rounding step wants a few
-    /// below that, so the rule is `2p + 3` bits rounded up to a limb.
+    /// Square root sets the bound: to get `p + 3` bits of root it squares the room,
+    /// so the rule is `2(p + 3)` bits rounded up to a limb. Multiplication needs `2p`
+    /// and division `2p + 3`, both of which fit inside that.
     pub const fn work_limbs(self) -> usize {
-        (2 * self.precision as usize + 3).div_ceil(64)
+        (2 * (self.precision as usize + 3)).div_ceil(64)
     }
 }
 
@@ -214,6 +219,16 @@ pub fn zero<const W: usize>(fmt: Format, sign: bool) -> Uint<W> {
 /// Signed infinity.
 pub fn infinity<const W: usize>(fmt: Format, sign: bool) -> Uint<W> {
     pack(fmt, Unpacked { sign, class: Class::Infinite, sig: Uint::ZERO, exp: 0 })
+}
+
+/// Make a NaN quiet, keeping its payload and sign. Anything else is returned unchanged.
+pub fn quiet<const W: usize>(fmt: Format, bits: Uint<W>) -> Uint<W> {
+    let mut v = unpack(fmt, bits);
+    if v.class != Class::Nan {
+        return bits;
+    }
+    v.sig.set_bit(fmt.stored_sig_bits() - 1);
+    pack(fmt, v)
 }
 
 /// The default quiet NaN: positive, with only the quiet bit set.

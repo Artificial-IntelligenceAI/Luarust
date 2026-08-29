@@ -327,6 +327,38 @@ impl<const N: usize> Uint<N> {
         (quot, rem)
     }
 
+    /// Floor of the square root, and whether it came out exact.
+    ///
+    /// Digit-by-digit binary square root: at each step the next bit of the root is set
+    /// if the running remainder can pay for it. That makes it the same shape as the
+    /// long division above, and exact for the same reason — no approximation is ever
+    /// formed, so `floor` is the true floor and the leftover remainder is the true one.
+    pub fn isqrt(self) -> (Self, bool) {
+        if self.is_zero() {
+            return (Self::ZERO, true);
+        }
+        let mut num = self;
+        let mut root = Self::ZERO;
+        // The highest power of four at or below the value: bits come off two at a time.
+        let mut pos = (self.bit_len() - 1) & !1;
+        loop {
+            let mut bit = Self::ZERO;
+            bit.set_bit(pos);
+            match root.checked_add(bit) {
+                Some(trial) if num >= trial => {
+                    num = num.wrapping_sub(trial);
+                    root = root.shr(1).wrapping_add(bit);
+                }
+                _ => root = root.shr(1),
+            }
+            if pos == 0 {
+                break;
+            }
+            pos -= 2;
+        }
+        (root, num.is_zero())
+    }
+
     /// A value with the low `k` bits set and nothing else.
     pub fn low_mask(k: u32) -> Self {
         if k == 0 {
@@ -645,6 +677,54 @@ mod tests {
                 a.cmp(&b)
             );
         }
+    }
+
+    #[test]
+    fn isqrt_matches_u128() {
+        let mut rng = Rng::new(12);
+        for _ in 0..20_000 {
+            let v = ((rng.next() as u128) << 64) | rng.next() as u128;
+            let (root, exact) = Uint::<2>::from_u128(v).div_rem(Uint::from_u64(1)).0.isqrt();
+            let r = root.low128();
+            assert!(r * r <= v, "{v}: root {r} too large");
+            assert!(r.checked_add(1).is_none_or(|n| n.checked_mul(n).is_none_or(|s| s > v)));
+            assert_eq!(exact, r * r == v);
+        }
+    }
+
+    #[test]
+    fn isqrt_of_perfect_squares_is_exact() {
+        let mut rng = Rng::new(13);
+        for _ in 0..10_000 {
+            let r = rng.next() >> 1;
+            let (lo, hi) = Uint::<2>::from_u64(r).mul_wide(Uint::from_u64(r));
+            assert!(hi.is_zero());
+            let (root, exact) = lo.isqrt();
+            assert_eq!(root.low64(), r);
+            assert!(exact);
+            // And one more than a perfect square is never exact, for r > 0.
+            if r > 0 {
+                let (root, exact) = lo.wrapping_add(Uint::from_u64(1)).isqrt();
+                assert_eq!(root.low64(), r);
+                assert!(!exact);
+            }
+        }
+        assert_eq!(Uint::<1>::ZERO.isqrt(), (Uint::ZERO, true));
+        assert_eq!(Uint::<1>::from_u64(1).isqrt(), (Uint::from_u64(1), true));
+    }
+
+    #[test]
+    fn isqrt_holds_at_the_widest_width() {
+        // 2^400 has an exact root, 2^200; the values on either side of it do not.
+        let mut v = Uint::<8>::ZERO;
+        v.set_bit(400);
+        let (root, exact) = v.isqrt();
+        assert!(exact);
+        assert_eq!(root.bit_len(), 201);
+        assert!(root.bit(200));
+        let (root2, exact2) = v.wrapping_sub(Uint::from_u64(1)).isqrt();
+        assert!(!exact2);
+        assert_eq!(root2, root.wrapping_sub(Uint::from_u64(1)));
     }
 
     #[test]
