@@ -41,7 +41,14 @@ scope and a type:
 var.local.str ['name', 'name 2', 'name 3'] = ['Tankun', 'Ada', 'Jensen Huang'];
 ```
 
-And when they don't share them, each name brings its own:
+Whatever they have in common hoists onto `var`, and whatever they don't goes inline.
+Same scope, different types:
+
+```luarust
+var.local [str 'a', b16 'b'] = ['hello', '1000'];
+```
+
+Nothing in common at all:
 
 ```luarust
 var [local.str 'name', local.b16 'x', local.str '❔'] = ['Tankun', '1000', 'idk'];
@@ -49,12 +56,12 @@ var [local.str 'name', local.b16 'x', local.str '❔'] = ['Tankun', '1000', 'idk
 
 ## Scope
 
-Every declaration carries one of three:
+Every declaration carries one of three, and they mean what they usually mean:
 
 ```luarust
-var.local.str  ['name'] = ['Tankun'];
-var.global.str ['name'] = ['Tankun'];
-var.public.str ['name'] = ['Tankun'];
+var.local.str  ['name'] = ['Tankun'];   -- the block it is written in, and no further
+var.global.str ['name'] = ['Tankun'];   -- the whole program
+var.public.str ['name'] = ['Tankun'];   -- and exported, so importers can see it too
 ```
 
 ## Types
