@@ -60,17 +60,19 @@ write.
 
 ## Scope
 
-Every declaration carries one of three, and they mean what they usually mean:
+Every declaration carries one of four, and the first three mean what they usually mean:
 
 ```luarust
-var.local.str  ['name'] = ['Tankun'];   -- the block it is written in, and no further
-var.global.str ['name'] = ['Tankun'];   -- the whole program
-var.public.str ['name'] = ['Tankun'];   -- and exported, so importers can see it too
+var.local.str      ['name'] = ['Tankun'];   -- the block it is written in, and no further
+var.global.str     ['name'] = ['Tankun'];   -- the whole program
+var.public.str     ['name'] = ['Tankun'];   -- and exported, so importers see it too
+var.restricted.str ['name'] = ['Tankun'];   -- nobody, anywhere, on purpose
 ```
 
-Leave it out and the variable is **restricted**, which means it exists, it holds its
-value, and nothing is allowed to touch it. The declaration compiles. Every use of it
-does not.
+**`restricted`** means the variable exists, it holds its value, and nothing is allowed
+to touch it. The declaration compiles. Every use of it does not.
+
+You can say it out loud, as above. It is also what you get by saying nothing:
 
 ```luarust
 var.str ['name'] = ['Tankun'];   -- declared, and unusable
