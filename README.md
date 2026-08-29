@@ -84,8 +84,37 @@ print['a' \n];                 -- 0.0999755859375
 That *is* `b16 '0.1'` — the nearest `b16` to a tenth, exactly. Luarust will not print a
 tidier number than the one it is holding.
 
-Arithmetic never happens inline, in a print list or anywhere else. It goes inside
-`math { }`.
+## Arithmetic
+
+Arithmetic happens inside `math { }` and nowhere else. A math block stands where a
+value stands:
+
+```luarust
+var.local.b16 ['x', 'y'] = ['3', '4'];
+var.local.b16 ['z']      = [math { 'x' + 'y' }];
+print['z' \n];                                     -- 7
+```
+
+Single quotes mean here what they mean in a print list: `'x'` is the variable.
+
+Grouping is `( )`, because `[ ]` and `{ }` are both spoken for:
+
+```luarust
+var.local.b16 ['w'] = [math { ('x' + 'y') * 'x' }];   -- 21
+```
+
+That is five kinds of bracket, and the reason it works is that no two of them ever
+mean the same thing:
+
+| | |
+| --- | --- |
+| `[ ]` | a list — of names, of values, or of things to print |
+| `{ }` | a math block |
+| `( )` | grouping, inside one |
+| `' '` | a name — or a literal, where a value is expected |
+| `" "` | text |
+
+You never have to work out which sense a bracket is being used in. It only has one.
 
 ## Scope
 
