@@ -1,0 +1,99 @@
+# Not part of CI. A one-off, manually triggered look at lust-rs, an unrelated
+# Lua-in-Rust language whose JIT is x86-64 only -- which is why this runs here
+# rather than on anyone's arm64 Mac. Nothing in Luarust depends on it.
+name: lust probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: try lust-rs on x86-64 linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Machine
+        run: uname -m && nproc && rustc --version
+
+      - name: Install lust-rs
+        run: |
+          set +e
+          time cargo install lust-rs
+          echo "=== install exit: $? ==="
+          ls -la ~/.cargo/bin/
+          exit 0
+
+      - name: Version and help
+        run: |
+          set +e
+          for b in lust lust-rs lustc; do
+            if command -v $b >/dev/null; then
+              echo "=== $b --version ==="; $b --version
+              echo "=== $b --help ==="; $b --help
+            fi
+          done
+          exit 0
+
+      - name: Hello world
+        run: |
+          set +e
+          cat > hello.lust <<'EOF'
+          println("hello from lust")
+          EOF
+          cp hello.lust hello.lu; cp hello.lust hello.ls
+          BIN=$(command -v lust || command -v lust-rs)
+          echo "=== binary: $BIN ==="
+          for f in hello.lust hello.lu hello.ls; do
+            echo "--- run $f ---"; $BIN run "$f" 2>&1 | head -20
+            echo "--- bare  $f ---"; $BIN "$f" 2>&1 | head -20
+          done
+          exit 0
+
+      - name: Typed program
+        run: |
+          set +e
+          cat > typed.lust <<'EOF'
+          function add(a: int, b: int): int
+              return a + b
+          end
+
+          local x: int = 41
+          println("sum = " .. tostring(add(x, 1)))
+          EOF
+          BIN=$(command -v lust || command -v lust-rs)
+          $BIN run typed.lust 2>&1 | head -30 || $BIN typed.lust 2>&1 | head -30
+          exit 0
+
+      - name: What a broken program says
+        run: |
+          set +e
+          cat > broken.lust <<'EOF'
+          local x: int = "not a number"
+          println(y)
+          EOF
+          BIN=$(command -v lust || command -v lust-rs)
+          $BIN run broken.lust 2>&1 | head -40 || $BIN broken.lust 2>&1 | head -40
+          exit 0
+
+      - name: Hot loop, the benchmark Luarus already has numbers for
+        run: |
+          set +e
+          sudo apt-get install -y -qq lua5.4 luajit >/dev/null 2>&1
+          cat > bench.lust <<'EOF'
+          local sum: int = 0
+          for i = 1, 100000000 do
+              sum = (sum + i) % 1000000007
+          end
+          println(tostring(sum))
+          EOF
+          cat > bench.lua <<'EOF'
+          local sum = 0
+          for i = 1, 100000000 do
+              sum = (sum + i) % 1000000007
+          end
+          print(sum)
+          EOF
+          BIN=$(command -v lust || command -v lust-rs)
+          echo "=== lust ==="; time ( $BIN run bench.lust 2>&1 | tail -3 || $BIN bench.lust 2>&1 | tail -3 )
+          echo "=== lua5.4 ==="; command -v lua5.4 && time lua5.4 bench.lua
+          echo "=== luajit ==="; command -v luajit && time luajit bench.lua
+          exit 0
