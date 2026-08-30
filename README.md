@@ -265,18 +265,39 @@ that file — whatever a file says about itself is the last word on it.
 b16  b32  b64  b128  b256     IEEE 754 binary floats
 d32  d64  d128                IEEE 754 decimal floats
 er                            exact rational, unbounded
+i   ui                        integers, signed and unsigned, 64-bit
 bool                          true or false
 str                           text
 ```
 
-**There is no integer type.** Every number in Luarust is a floating-point number, and
-`er` is an exact rational — a numerator over a denominator, both unbounded, so it
-neither rounds nor overflows.
+Luarust is a floating-point language that happens to contain two integers, rather than
+the other way round. `i` and `ui` are there because counting and indexing want them.
+Everything else numeric is a float, and `er` is an exact rational — a numerator over a
+denominator, both unbounded, so it neither rounds nor overflows.
 
 The binary formats are the real IEEE 754 ones rather than approximations of them:
 `b16` is true half precision, and `b256` carries 237 bits of significand, which almost
 nothing else on earth implements. The decimal formats are the ones where `0.1` is
 exactly `0.1` and money keeps its cents.
 
-Two of those eleven — `b32` and `b64` — are formats the hardware knows. The rest
-Luarust computes itself, to the rounding the standard requires.
+Two of the eleven float types — `b32` and `b64` — are formats the hardware knows. The
+rest Luarust computes itself, to the rounding the standard requires.
+
+### Overflow
+
+A float never overflows into an error. IEEE 754 answers with ±infinity, which is a value
+like any other, and Luarust hands it to you.
+
+An integer wraps. Add one to the largest `ui` and it is zero again. If you would rather
+be told about it, say so:
+
+```luarust
+defaults.overflow.trap;
+```
+
+or once for the whole project:
+
+```toml
+[defaults]
+overflow = "trap"
+```
