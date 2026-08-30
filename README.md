@@ -140,6 +140,19 @@ Grouping is `( )`, because `[ ]` and `{ }` are both spoken for:
 var.local.b16 ['w'] = [math { ('x' + 'y') * 'x' }];   -- 21
 ```
 
+Most operators have more than one spelling, and they all mean exactly the same thing:
+
+| | | |
+| --- | --- | --- |
+| add | `+` | |
+| subtract | `-` | |
+| multiply | `*` | `x` |
+| raise to a power | `**` | `xx` |
+| divide | `/` | `÷` or `div` |
+
+Words work as operators here because a name is always quoted. `'x'` is a variable and a
+bare `x` cannot be one, so there is nothing for `math { 'a' x 'b' }` to be confused with.
+
 That is five kinds of bracket, and the reason it works is that no two of them ever
 mean the same thing:
 
