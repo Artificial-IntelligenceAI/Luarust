@@ -212,8 +212,11 @@ impl Writer {
         // are, so `math { 1 < 2 }` has no type in reach and does not compile -- which is
         // the language being consistent, and is also why this cannot just write two
         // literals and hope.
-        if ty == Ty::Bool && self.rng.below(2) == 0 {
-            if let Some(known) = self.pick_numeric() {
+        if ty == Ty::Bool
+            && self.rng.below(2) == 0
+            && let Some(known) = self.pick_numeric()
+        {
+            {
                 let op = match self.rng.below(3) {
                     0 => "<",
                     1 => ">",
