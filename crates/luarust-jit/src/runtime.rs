@@ -5,13 +5,25 @@
 //! functions the interpreter and the VM use. That is not a shortcut: it is what keeps the
 //! three paths giving the same answers instead of nearly the same ones.
 
-use luarust_check::value::{Overflow, Value, binary_op, compare, format_of};
+use luarust_check::value::{Overflow, Value, binary_op, compare, format_of, negate};
 use luarust_num::binary::{self, Comparison, Round};
 use luarust_parse::ast::{BinOp, Ty};
 use std::cell::RefCell;
 use std::time::Instant;
 
 thread_local! {
+    /// Values compiled code cannot hold.
+    ///
+    /// A `b256` is sixty-four bytes of significand and a `str` is a string; neither fits
+    /// in a register, and the machine has no instructions for either. So they stay on this
+    /// side, in numbered cells, and compiled code carries the *number* — which is known
+    /// when it is compiled, so it costs nothing at all to carry.
+    ///
+    /// Everything done to them is a call. That is not a compromise: the arithmetic was
+    /// always going to be a call, because `b128` and `b256` have no hardware anywhere and
+    /// their answers have to come from the same place the other two execution paths get
+    /// theirs.
+    static CELLS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     /// What the running program has printed. Collected rather than streamed, because a
     /// callback cannot easily be handed the caller's writer.
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -19,10 +31,88 @@ thread_local! {
     static STARTED: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 
-/// Begin a run: forget the last one's output and restart the clock.
-pub fn begin() {
+/// Begin a run: forget the last one's output, restart the clock, and lay out the cells.
+pub fn begin(cells: Vec<Value>) {
     OUTPUT.with(|out| out.borrow_mut().clear());
     STARTED.with(|at| *at.borrow_mut() = Some(Instant::now()));
+    CELLS.with(|table| *table.borrow_mut() = cells);
+}
+
+fn cell(index: u64) -> Value {
+    CELLS.with(|table| table.borrow()[index as usize].clone())
+}
+
+fn put(index: u64, value: Value) {
+    CELLS.with(|table| table.borrow_mut()[index as usize] = value);
+}
+
+/// Copy one cell into another.
+pub extern "C" fn cell_move(dst: u64, src: u64) {
+    let value = cell(src);
+    put(dst, value);
+}
+
+/// Arithmetic on two cells, into a third. Reading happens before writing, so the
+/// destination may be one of the sources.
+pub extern "C" fn cell_binary(op: u32, dst: u64, a: u64, b: u64, trapping: u32) -> i64 {
+    let overflow = if trapping == 0 { Overflow::Wrap } else { Overflow::Trap };
+    let (x, y) = (cell(a), cell(b));
+    match binary_op(unop(op), &x, &y, overflow) {
+        Ok(value) => {
+            put(dst, value);
+            OK
+        }
+        Err(fault) => fault_code(&fault),
+    }
+}
+
+/// Negate a cell into another.
+pub extern "C" fn cell_neg(dst: u64, src: u64, trapping: u32) -> i64 {
+    let overflow = if trapping == 0 { Overflow::Wrap } else { Overflow::Trap };
+    match negate(&cell(src), overflow) {
+        Ok(value) => {
+            put(dst, value);
+            OK
+        }
+        Err(fault) => fault_code(&fault),
+    }
+}
+
+/// How two cells order, the way every other execution path orders them.
+pub extern "C" fn cell_compare(a: u64, b: u64) -> i32 {
+    match compare(&cell(a), &cell(b)) {
+        Comparison::Less => 0,
+        Comparison::Equal => 1,
+        Comparison::Greater => 2,
+        Comparison::Unordered => 3,
+    }
+}
+
+/// Print a cell, the way every other execution path prints one.
+pub extern "C" fn print_cell(index: u64) {
+    let text = cell(index).to_string();
+    OUTPUT.with(|out| out.borrow_mut().extend_from_slice(text.as_bytes()));
+}
+
+/// Read the clock into a cell, in whichever float format it was asked for.
+pub extern "C" fn cell_time_now(dst: u64, tag: u32) {
+    let ty = untag(tag);
+    let seconds = STARTED.with(|at| {
+        at.borrow().map(|started| started.elapsed().as_secs_f64()).unwrap_or(0.0)
+    });
+    let fmt = format_of(ty).expect("the clock is read as a float");
+    let bits = binary::from_decimal::<8>(fmt, Round::TiesToEven, &format!("{seconds:.9}"))
+        .expect("nine decimal places is a number");
+    put(dst, Value::float(ty, bits));
+}
+
+fn fault_code(fault: &luarust_check::value::Fault) -> i64 {
+    match fault.code {
+        "R0002" => DIVIDE_BY_ZERO,
+        "R0003" => REMAINDER_BY_ZERO,
+        "R0005" => DOES_NOT_FIT,
+        _ => OTHER,
+    }
 }
 
 /// Everything the run printed.
@@ -44,12 +134,16 @@ pub fn tag_of(ty: Ty) -> u32 {
         Ty::B16 => 8,
         Ty::B32 => 9,
         Ty::B64 => 10,
+        Ty::Bool => 19,
+        Ty::Str => 20,
         _ => u32::MAX,
     }
 }
 
 fn untag(tag: u32) -> Ty {
     match tag {
+        19 => Ty::Bool,
+        20 => Ty::Str,
         0 => Ty::I8,
         1 => Ty::I16,
         2 => Ty::I32,
@@ -167,11 +261,6 @@ pub unsafe extern "C" fn fallback(
             OK
         }
         Ok(_) => OTHER,
-        Err(fault) => match fault.code {
-            "R0002" => DIVIDE_BY_ZERO,
-            "R0003" => REMAINDER_BY_ZERO,
-            "R0005" => DOES_NOT_FIT,
-            _ => OTHER,
-        },
+        Err(fault) => fault_code(&fault),
     }
 }

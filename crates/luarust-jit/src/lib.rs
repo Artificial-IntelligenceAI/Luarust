@@ -39,54 +39,17 @@ pub struct Declined {
 
 /// Whether the JIT will take a program at all.
 ///
-/// Cheap, and answered before any LLVM machinery is built, so a caller can fall back
-/// without having paid for a context.
-pub fn accepts(program: &Checked) -> Result<(), Declined> {
-    fn ty_ok(ty: Ty) -> bool {
-        ty.is_integer() || matches!(ty, Ty::B16 | Ty::B32 | Ty::B64)
-    }
-    fn expr(e: &Expr) -> Result<(), Declined> {
-        if !ty_ok(e.ty()) {
-            return Err(Declined { because: format!("`{}` is not compiled yet", e.ty().word()) });
-        }
-        match e {
-            Expr::Binary { lhs, rhs, .. } => expr(lhs).and_then(|()| expr(rhs)),
-            Expr::Neg { operand, .. } => expr(operand),
-            Expr::Const(value) => match value {
-                Value::Num { ty, .. } if ty_ok(*ty) => Ok(()),
-                other => Err(Declined {
-                    because: format!("`{}` is not compiled yet", other.ty().word()),
-                }),
-            },
-            _ => Ok(()),
-        }
-    }
-    fn block(stmts: &[Stmt]) -> Result<(), Declined> {
-        for stmt in stmts {
-            match stmt {
-                Stmt::Store { value, .. } => expr(value)?,
-                Stmt::Print { items, .. } => {
-                    for item in items {
-                        if let Item::Value(e) = item {
-                            expr(e)?;
-                        }
-                    }
-                }
-                Stmt::Loop { ty, from, to, body, .. } => {
-                    if !ty_ok(*ty) {
-                        return Err(Declined {
-                            because: format!("counting in `{}` is not compiled yet", ty.word()),
-                        });
-                    }
-                    expr(from)?;
-                    expr(to)?;
-                    block(body)?;
-                }
-            }
-        }
-        Ok(())
-    }
-    block(&program.stmts)
+/// It takes all of them now. The types it has no instructions for — `b128`, `b256`,
+/// `bool`, `str` — live in numbered cells on the Rust side, and compiled code carries the
+/// number. This is kept as a function, and kept public, because it is the thing that would
+/// have to say no again if a type arrived that had nowhere to live.
+pub fn accepts(_program: &Checked) -> Result<(), Declined> {
+    Ok(())
+}
+
+/// Whether a value of this type can live in a register, or has to live in a cell.
+fn celled(ty: Ty) -> bool {
+    matches!(ty, Ty::B128 | Ty::B256 | Ty::Bool | Ty::Str)
 }
 
 /// Compile a program and run it, or hand it back.
@@ -101,6 +64,7 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped
 
     let mut emitter = Emitter::new(&context, &module, &engine, program);
     emitter.emit(program);
+    let spans = std::mem::take(&mut emitter.spans);
 
     let compiled = unsafe {
         engine
@@ -108,12 +72,12 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped
             .map_err(|why| Declined { because: format!("the compiled program was lost: {why}") })?
     };
 
-    runtime::begin();
+    runtime::begin(emitter.cells);
     let outcome = unsafe { compiled.call() };
     let _ = out.write_all(&runtime::taken());
     let _ = out.flush();
 
-    Ok(decode(outcome, &emitter.spans))
+    Ok(decode(outcome, &spans))
 }
 
 /// The LLVM IR, for looking at.
@@ -170,17 +134,45 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
     Err(Stopped { fault, span })
 }
 
+/// Where a value ended up: in a register, or in a cell on the Rust side.
+#[derive(Clone, Copy)]
+enum Emitted<'ctx> {
+    Native(BasicValueEnum<'ctx>),
+    /// The cell's number, which is known while compiling and so costs nothing to carry.
+    Cell(u64),
+}
+
+impl<'ctx> Emitted<'ctx> {
+    fn native(self) -> BasicValueEnum<'ctx> {
+        match self {
+            Emitted::Native(value) => value,
+            Emitted::Cell(_) => unreachable!("a celled value was used as a register one"),
+        }
+    }
+
+    fn cell(self) -> u64 {
+        match self {
+            Emitted::Cell(index) => index,
+            Emitted::Native(_) => unreachable!("a register value was used as a celled one"),
+        }
+    }
+}
+
 struct Emitter<'ctx> {
     context: &'ctx Context,
     builder: Builder<'ctx>,
     main: FunctionValue<'ctx>,
-    /// One `alloca` per variable, in the order the checker numbered them.
+    /// One `alloca` per variable, in the order the checker numbered them. Celled
+    /// variables never touch theirs.
     slots: Vec<PointerValue<'ctx>>,
-    types: Vec<Ty>,
     /// Where the fallback leaves its answer. Made once, in the entry block: an `alloca`
     /// anywhere else is stack allocated on every pass of whatever loop it is inside, which
     /// a ten-million-iteration program notices immediately by running out of stack.
     out_slot: PointerValue<'ctx>,
+    /// What the cells start out holding. Handed to the runtime before the program runs.
+    cells: Vec<Value>,
+    /// Which cell each celled variable lives in.
+    slot_cells: std::collections::HashMap<usize, u64>,
     /// Where each fault can happen, so a code can be turned back into a place.
     spans: Vec<Span>,
     overflow: Overflow,
@@ -193,6 +185,12 @@ struct Helpers<'ctx> {
     time_now: FunctionValue<'ctx>,
     compare: FunctionValue<'ctx>,
     fallback: FunctionValue<'ctx>,
+    cell_move: FunctionValue<'ctx>,
+    cell_binary: FunctionValue<'ctx>,
+    cell_neg: FunctionValue<'ctx>,
+    cell_compare: FunctionValue<'ctx>,
+    cell_time_now: FunctionValue<'ctx>,
+    print_cell: FunctionValue<'ctx>,
 }
 
 impl<'ctx> Emitter<'ctx> {
@@ -238,6 +236,44 @@ impl<'ctx> Emitter<'ctx> {
         );
         engine.add_global_mapping(&fallback, runtime::fallback as *const () as usize);
 
+        // The cells: everything done to one is a call, because everything done to one was
+        // always going to be.
+        let cell_move =
+            module.add_function("luarust_cell_move", void_t.fn_type(&[i64_t.into(), i64_t.into()], false), None);
+        engine.add_global_mapping(&cell_move, runtime::cell_move as *const () as usize);
+
+        let cell_binary = module.add_function(
+            "luarust_cell_binary",
+            i64_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into(), i64_t.into(), i32_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_binary, runtime::cell_binary as *const () as usize);
+
+        let cell_neg = module.add_function(
+            "luarust_cell_neg",
+            i64_t.fn_type(&[i64_t.into(), i64_t.into(), i32_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_neg, runtime::cell_neg as *const () as usize);
+
+        let cell_compare = module.add_function(
+            "luarust_cell_compare",
+            i32_t.fn_type(&[i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_compare, runtime::cell_compare as *const () as usize);
+
+        let cell_time_now = module.add_function(
+            "luarust_cell_time_now",
+            void_t.fn_type(&[i64_t.into(), i32_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_time_now, runtime::cell_time_now as *const () as usize);
+
+        let print_cell =
+            module.add_function("luarust_print_cell", void_t.fn_type(&[i64_t.into()], false), None);
+        engine.add_global_mapping(&print_cell, runtime::print_cell as *const () as usize);
+
         let main = module.add_function("luarust_main", i64_t.fn_type(&[], false), None);
         let entry = context.append_basic_block(main, "entry");
         let builder = context.create_builder();
@@ -264,7 +300,21 @@ impl<'ctx> Emitter<'ctx> {
             types: vec![Ty::I64; program.slots],
             spans: Vec::new(),
             overflow: program.overflow,
-            helpers: Helpers { print_text, print_value, time_now, compare, fallback },
+            cells: Vec::new(),
+            slot_cells: std::collections::HashMap::new(),
+            helpers: Helpers {
+                print_text,
+                print_value,
+                time_now,
+                compare,
+                fallback,
+                cell_move,
+                cell_binary,
+                cell_neg,
+                cell_compare,
+                cell_time_now,
+                print_cell,
+            },
         }
     }
 
@@ -290,10 +340,24 @@ impl<'ctx> Emitter<'ctx> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Store { slot, value, .. } => {
-                let value = self.expr(value);
-                self.types[*slot] = value.1;
-                self.builder.build_store(self.slots[*slot], value.0).expect("a store");
+            Stmt::Store { slot, value, span } => {
+                let (emitted, ty) = self.expr(value);
+                match emitted {
+                    Emitted::Native(value) => {
+                        // Whole-width, so nothing is left over from whatever was in the
+                        // slot before. A narrow store into a wide slot leaves the top of
+                        // it holding the last value that lived there.
+                        let bits = self.to_bits(value, ty);
+                        self.builder.build_store(self.slots[*slot], bits).expect("a store");
+                    }
+                    Emitted::Cell(src) => {
+                        let dst = self.slot_cell(*slot, ty);
+                        if dst != src {
+                            self.call_cell_move(dst, src);
+                        }
+                    }
+                }
+                let _ = span;
             }
 
             Stmt::Print { items, span } => {
@@ -314,26 +378,58 @@ impl<'ctx> Emitter<'ctx> {
                                 .expect("a call");
                         }
                         Item::Value(expr) => {
-                            let (value, ty) = self.expr(expr);
-                            let bits = self.to_bits(value, ty);
-                            let tag = self.context.i32_type().const_int(runtime::tag_of(ty) as u64, false);
-                            self.builder
-                                .build_call(self.helpers.print_value, &[bits.into(), tag.into()], "")
-                                .expect("a call");
+                            let (emitted, ty) = self.expr(expr);
+                            match emitted {
+                                Emitted::Native(value) => {
+                                    let bits = self.to_bits(value, ty);
+                                    let tag = self
+                                        .context
+                                        .i32_type()
+                                        .const_int(runtime::tag_of(ty) as u64, false);
+                                    self.builder
+                                        .build_call(
+                                            self.helpers.print_value,
+                                            &[bits.into(), tag.into()],
+                                            "",
+                                        )
+                                        .expect("a call");
+                                }
+                                Emitted::Cell(index) => {
+                                    let cell = self.cell_number(index);
+                                    self.builder
+                                        .build_call(self.helpers.print_cell, &[cell.into()], "")
+                                        .expect("a call");
+                                }
+                            }
                         }
                     }
                 }
                 let _ = span;
             }
 
-            Stmt::Loop { slot, ty, from, to, body, span } => self.loop_stmt(*slot, *ty, from, to, body, *span),
+            Stmt::Loop { slot, ty, from, to, body, span } => {
+                self.loop_stmt(*slot, *ty, from, to, body, *span)
+            }
         }
     }
 
     fn loop_stmt(&mut self, slot: usize, ty: Ty, from: &Expr, to: &Expr, body: &[Stmt], span: Span) {
+        // Start the counter, and take the far bound somewhere it will survive the body.
         let (start, _) = self.expr(from);
-        self.builder.build_store(self.slots[slot], start).expect("a store");
-        self.types[slot] = ty;
+        let counter = match start {
+            Emitted::Native(value) => {
+                let bits = self.to_bits(value, ty);
+                self.builder.build_store(self.slots[slot], bits).expect("a store");
+                None
+            }
+            Emitted::Cell(src) => {
+                let dst = self.slot_cell(slot, ty);
+                if dst != src {
+                    self.call_cell_move(dst, src);
+                }
+                Some(dst)
+            }
+        };
         let (limit, _) = self.expr(to);
 
         let check = self.context.append_basic_block(self.main, "loop.check");
@@ -346,40 +442,189 @@ impl<'ctx> Emitter<'ctx> {
         // Counting down is an empty range, so the first thing asked is whether to run at
         // all rather than whether to stop.
         self.builder.position_at_end(check);
-        let counter = self.load(slot, ty);
-        let past = self.greater(counter, limit, ty);
+        let past = self.loop_test(counter, slot, ty, limit, runtime::GREATER);
         self.builder.build_conditional_branch(past, done, top).expect("a branch");
 
         self.builder.position_at_end(top);
         self.block(body);
-        let counter = self.load(slot, ty);
-        let finished = self.equal(counter, limit, ty);
+        let finished = self.loop_test(counter, slot, ty, limit, runtime::EQUAL);
         self.builder.build_conditional_branch(finished, done, step).expect("a branch");
 
         // Stepping only after the body, and only below the bound, so a loop can reach the
         // top of its type without the increment that would take it past.
         self.builder.position_at_end(step);
-        let counter = self.load(slot, ty);
-        let one = self.one(ty);
-        let next = self.arithmetic(BinOp::Add, counter, one, ty, span);
-        self.builder.build_store(self.slots[slot], next).expect("a store");
+        match counter {
+            None => {
+                let held = self.load(slot, ty);
+                let one = self.one(ty);
+                let next = self.arithmetic(BinOp::Add, held, one, ty, span);
+                let bits = self.to_bits(next, ty);
+                self.builder.build_store(self.slots[slot], bits).expect("a store");
+            }
+            Some(cell) => {
+                let one = self.constant_cell(luarust_check::value::one_of(ty));
+                self.call_cell_binary(BinOp::Add, cell, cell, one, span);
+            }
+        }
         self.builder.build_unconditional_branch(top).expect("a branch");
 
         self.builder.position_at_end(done);
     }
 
+    /// Whether the counter stands in the given relation to the bound.
+    fn loop_test(
+        &mut self,
+        counter: Option<u64>,
+        slot: usize,
+        ty: Ty,
+        limit: Emitted<'ctx>,
+        wanted: u64,
+    ) -> inkwell::values::IntValue<'ctx> {
+        match counter {
+            None => {
+                let held = self.load(slot, ty);
+                if wanted == runtime::GREATER {
+                    self.greater(held, limit.native(), ty)
+                } else {
+                    self.equal(held, limit.native(), ty)
+                }
+            }
+            Some(cell) => self.cells_compare(cell, limit.cell(), wanted),
+        }
+    }
+
+    // ---- cells ------------------------------------------------------------------
+
+    /// A new cell, holding this to begin with.
+    fn new_cell(&mut self, initial: Value) -> u64 {
+        self.cells.push(initial);
+        (self.cells.len() - 1) as u64
+    }
+
+    /// A cell holding a constant, which nothing ever writes to.
+    fn constant_cell(&mut self, value: Value) -> u64 {
+        self.new_cell(value)
+    }
+
+    /// The cell a celled variable lives in, made the first time it is stored to.
+    fn slot_cell(&mut self, slot: usize, ty: Ty) -> u64 {
+        if let Some(found) = self.slot_cells.get(&slot) {
+            return *found;
+        }
+        let index = self.new_cell(Value::zero(ty));
+        self.slot_cells.insert(slot, index);
+        index
+    }
+
+    fn cell_number(&self, index: u64) -> inkwell::values::IntValue<'ctx> {
+        self.context.i64_type().const_int(index, false)
+    }
+
+    fn call_cell_move(&mut self, dst: u64, src: u64) {
+        let (dst, src) = (self.cell_number(dst), self.cell_number(src));
+        self.builder
+            .build_call(self.helpers.cell_move, &[dst.into(), src.into()], "")
+            .expect("a call");
+    }
+
+    fn call_cell_binary(&mut self, op: BinOp, dst: u64, a: u64, b: u64, span: Span) {
+        let i32_t = self.context.i32_type();
+        let trapping = i32_t.const_int(u64::from(self.overflow == Overflow::Trap), false);
+        let outcome = self
+            .builder
+            .build_call(
+                self.helpers.cell_binary,
+                &[
+                    i32_t.const_int(runtime::op_tag(op) as u64, false).into(),
+                    self.cell_number(dst).into(),
+                    self.cell_number(a).into(),
+                    self.cell_number(b).into(),
+                    trapping.into(),
+                ],
+                "celled",
+            )
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("it returns a fault code")
+            .into_int_value();
+        self.stop_if_nonzero(outcome, span);
+    }
+
+    fn cells_compare(&mut self, a: u64, b: u64, wanted: u64) -> inkwell::values::IntValue<'ctx> {
+        let outcome = self
+            .builder
+            .build_call(
+                self.helpers.cell_compare,
+                &[self.cell_number(a).into(), self.cell_number(b).into()],
+                "ordering",
+            )
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("comparing returns a value")
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                outcome,
+                self.context.i32_type().const_int(wanted, false),
+                "is",
+            )
+            .expect("a compare")
+    }
+
+    /// Stop the program here if a call came back with anything but zero.
+    fn stop_if_nonzero(&mut self, outcome: inkwell::values::IntValue<'ctx>, span: Span) {
+        let i64_t = self.context.i64_type();
+        let failed = self
+            .builder
+            .build_int_compare(IntPredicate::NE, outcome, i64_t.const_int(0, false), "failed")
+            .expect("a compare");
+        let stop = self.context.append_basic_block(self.main, "stop");
+        let carry_on = self.context.append_basic_block(self.main, "carry.on");
+        self.builder.build_conditional_branch(failed, stop, carry_on).expect("a branch");
+
+        self.builder.position_at_end(stop);
+        let marker = self.fault_marker(span, 0);
+        let with_place = self
+            .builder
+            .build_or(outcome, i64_t.const_int(marker as u64, false), "where")
+            .expect("an or");
+        self.builder.build_return(Some(&with_place)).expect("a return");
+
+        self.builder.position_at_end(carry_on);
+    }
+
     // ---- values -----------------------------------------------------------------
 
-    fn expr(&mut self, expr: &Expr) -> (BasicValueEnum<'ctx>, Ty) {
+    fn expr(&mut self, expr: &Expr) -> (Emitted<'ctx>, Ty) {
         match expr {
-            Expr::Const(value) => (self.constant(value), value.ty()),
+            Expr::Const(value) => {
+                if celled(value.ty()) {
+                    let cell = self.constant_cell(value.clone());
+                    return (Emitted::Cell(cell), value.ty());
+                }
+                (Emitted::Native(self.constant(value)), value.ty())
+            }
 
-            Expr::Load { slot, ty, .. } => (self.load(*slot, *ty), *ty),
+            Expr::Load { slot, ty, .. } => {
+                if celled(*ty) {
+                    return (Emitted::Cell(self.slot_cell(*slot, *ty)), *ty);
+                }
+                (Emitted::Native(self.load(*slot, *ty)), *ty)
+            }
 
-            Expr::TimeNow { ty, .. } => {
+            Expr::TimeNow { ty, span } => {
                 // Asked for in the format it is being read as. Answering in b64 whatever
                 // was wanted would put a b64's bits in a b32 variable.
                 let tag = self.context.i32_type().const_int(runtime::tag_of(*ty) as u64, false);
+                if celled(*ty) {
+                    let dst = self.new_cell(Value::zero(*ty));
+                    let number = self.cell_number(dst);
+                    self.builder
+                        .build_call(self.helpers.cell_time_now, &[number.into(), tag.into()], "")
+                        .expect("a call");
+                    return (Emitted::Cell(dst), *ty);
+                }
                 let bits = self
                     .builder
                     .build_call(self.helpers.time_now, &[tag.into()], "now")
@@ -387,11 +632,35 @@ impl<'ctx> Emitter<'ctx> {
                     .try_as_basic_value()
                     .expect_basic("the clock returns a value")
                     .into_int_value();
-                (self.value_from_bits(bits, *ty), *ty)
+                let _ = span;
+                (Emitted::Native(self.value_from_bits(bits, *ty)), *ty)
             }
 
             Expr::Neg { operand, ty, span } => {
                 let (value, _) = self.expr(operand);
+                if celled(*ty) {
+                    let dst = self.new_cell(Value::zero(*ty));
+                    let i32_t = self.context.i32_type();
+                    let trapping = i32_t.const_int(u64::from(self.overflow == Overflow::Trap), false);
+                    let outcome = self
+                        .builder
+                        .build_call(
+                            self.helpers.cell_neg,
+                            &[
+                                self.cell_number(dst).into(),
+                                self.cell_number(value.cell()).into(),
+                                trapping.into(),
+                            ],
+                            "negated",
+                        )
+                        .expect("a call")
+                        .try_as_basic_value()
+                        .expect_basic("it returns a fault code")
+                        .into_int_value();
+                    self.stop_if_nonzero(outcome, *span);
+                    return (Emitted::Cell(dst), *ty);
+                }
+                let value = value.native();
                 // Negating a float is flipping its sign bit and nothing else, which is
                 // exact for every value including the zeros and the NaNs. Not `0 - x`:
                 // `0.0 - 0.0` is `+0.0` where negating a zero gives `-0.0`.
@@ -401,23 +670,31 @@ impl<'ctx> Emitter<'ctx> {
                         .builder
                         .build_xor(value.into_int_value(), sign, "neg")
                         .expect("an xor");
-                    return (flipped.into(), *ty);
+                    return (Emitted::Native(flipped.into()), *ty);
                 }
                 if ty.is_float() {
                     let negated = self
                         .builder
                         .build_float_neg(value.into_float_value(), "neg")
                         .expect("a negate");
-                    return (negated.into(), *ty);
+                    return (Emitted::Native(negated.into()), *ty);
                 }
                 let zero = self.zero(*ty);
-                (self.arithmetic(BinOp::Sub, zero, value, *ty, *span), *ty)
+                (Emitted::Native(self.arithmetic(BinOp::Sub, zero, value, *ty, *span)), *ty)
             }
 
             Expr::Binary { op, lhs, rhs, ty, span } => {
                 let (a, _) = self.expr(lhs);
                 let (b, _) = self.expr(rhs);
-                (self.arithmetic(*op, a, b, *ty, *span), *ty)
+                if celled(*ty) {
+                    let dst = self.new_cell(Value::zero(*ty));
+                    self.call_cell_binary(*op, dst, a.cell(), b.cell(), *span);
+                    return (Emitted::Cell(dst), *ty);
+                }
+                (
+                    Emitted::Native(self.arithmetic(*op, a.native(), b.native(), *ty, *span)),
+                    *ty,
+                )
             }
         }
     }

@@ -197,17 +197,49 @@ fn a_program_that_stops_stops_the_same_way() {
 }
 
 #[test]
-fn what_it_will_not_take_it_says_so_about() {
-    for (source, expected) in [
-        ("var.local.b128 ['x'] = ['1']; print['x'];", "b128"),
-        ("var.local.b256 ['x'] = ['1']; print['x'];", "b256"),
-        ("var.local.str ['x'] = ['hi']; print['x'];", "str"),
-    ] {
-        match three_ways(source) {
-            Ran::Declined(why) => assert!(why.contains(expected), "got `{why}`, wanted `{expected}`"),
-            Ran::All(_) => panic!("the JIT took something it should have declined: {source}"),
-        }
-    }
+fn the_types_with_no_instructions_are_taken_too() {
+    // They live in numbered cells on the Rust side and everything done to them is a call,
+    // which is what their arithmetic always was. Taken for the coverage, not the speed.
+    assert_eq!(ran("var.local.b128 ['x'] = ['0.1']; print['x'];"), "0.1");
+    assert_eq!(ran("var.local.b256 ['x'] = ['0.1']; print['x'];"), "0.1");
+    assert_eq!(
+        ran("var.local.b256 ['a','b'] = ['1.5','0.25']; var.local.b256 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
+        "1.75"
+    );
+    assert_eq!(ran("var.local.b128 ['r'] = [math { -7 mod 3 }]; print['r'];"), "2");
+    // Ordering, which is a call as well.
+    assert_eq!(
+        ran("loop.temp.range.b128 ['i'] = ['1', '4'] { print['i' \" \"]; }"),
+        "1 2 3 4 "
+    );
+}
+
+#[test]
+fn text_and_truth_are_taken_too() {
+    assert_eq!(ran("var.local.str ['who'] = ['🧑‍🧑‍🧒‍🧒']; print['who'];"), "🧑‍🧑‍🧒‍🧒");
+    assert_eq!(
+        ran("var.local.mut.str ['s'] = ['first']; set ['s'] = ['second']; print['s'];"),
+        "second"
+    );
+    assert_eq!(ran("var.local.bool ['t'] = ['true']; print['t'];"), "true");
+    assert_eq!(
+        ran("var.local.str ['a','b'] = ['one','two']; print['a' \" and \" 'b' \\n];"),
+        "one and two\n"
+    );
+}
+
+#[test]
+fn a_program_mixing_everything_agrees_three_ways() {
+    assert_eq!(
+        ran("var.local.str ['who'] = ['world'];\n\
+             var.local.mut.i64 ['sum'] = ['0'];\n\
+             var.local.b16 ['small'] = ['0.1'];\n\
+             var.local.b256 ['wide'] = ['0.1'];\n\
+             var.local.bool ['yes'] = ['true'];\n\
+             loop.temp.range.i64 ['i'] = ['1', '5'] { handback 'i' as 'sum'; }\n\
+             print[\"hello \" 'who' \" \" 'sum' \" \" 'small' \" \" 'wide' \" \" 'yes' \\n];"),
+        "hello world 15 0.0999755859375 0.1 true\n"
+    );
 }
 
 #[test]
@@ -221,8 +253,10 @@ fn generated_programs_agree_three_ways() {
         }
     }
     // Printed so a change in what the JIT will take shows up as a number rather than as
-    // a feeling.
+    // a feeling. It takes all of them now, so every generated program is checked three
+    // ways rather than two -- which is the whole reason for taking the types it cannot
+    // compute with.
     println!("the JIT took {taken} of 3000 and declined {declined}");
-    assert!(taken > 500, "the JIT only took {taken} of 3000, which is too few to prove much");
-    assert!(declined > 0, "it took all 3000, so the declining is not being exercised");
+    assert_eq!(declined, 0, "the JIT declined {declined} programs");
+    assert_eq!(taken, 3000);
 }
