@@ -9,6 +9,27 @@ So, to put it simply. Luarust is a computer language that has **very helpful err
 
 We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.** 
 
+| | | |
+| --- | --- | --- |
+| | | |
+| | | |
+| | | |
+| | | |
+| | | |
+
+### Why you would, and why you would not
+
+| Why you'd pick it | Why you would not |
+| --- | --- |
+| An error names the rule you broke and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language that cannot yet write a function |
+| Nothing is implicit — no conversion, no truthiness, no coercion. If two types meet, you said so | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
+| Real IEEE 754, correctly rounded, in five binary formats — including `b128` and `b256`, which almost nothing else on earth implements | The decimal formats and `er` are in the type list and not yet built. Ask for a `d64` and you get an error, not a number |
+| Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine you build it on. That is a big dependency for a small language |
+| Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide, and the fuzzer has found real ones |
+| Only what the program uses gets delivered. No garbage collector, no parser, no JIT on the device | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
+| 1.27× C on the dependent-chain benchmark, from a language nobody has optimised | 1.27× C is still last place behind C, Rust and Java, and the bytecode VM is slower than Lua |
+| It is small enough to read. Thirteen crates, about 13,000 lines, and the whole thing fits in a head | It is one person's hobby project at version 0.0.0, and stability is **not a guarantee** |
+
 ## Declaring things
 
 A declaration says the scope and the type up front, then takes a list of names and a
