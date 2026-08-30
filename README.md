@@ -440,20 +440,28 @@ cargo build --release
 
 | command | what it does |
 | --- | --- |
-| `luarust run <file.lr>` | check it, then run it |
+| `luarust run <file.lr>` | compile to bytecode and run it |
+| `luarust interp <file.lr>` | run it on the reference interpreter instead |
+| `luarust verify <file.lr>` | run it both ways and report whether they agree |
+| `luarust dis <file.lr>` | show what the compiler decided |
 | `luarust check <file.lr>` | check it and stop |
+| `luarust fuzz [count]` | write programs and check the two paths agree |
 
 The programs in [`examples/`](examples) all run, and are checked on every push.
 
-Iteration 1 runs on a **tree-walking interpreter**: no bytecode, no compilation, and no
-attempt at speed. That is deliberate. The bytecode VM comes next and the LLVM JIT after
-it, and this interpreter stays exactly as it is — the reference both of them get checked
-against. Three implementations that must agree catch things one careful implementation
-never will.
+There are **two ways to run a program**, and that is deliberate. `run` compiles to
+bytecode; `interp` walks the checked tree directly, doing no compilation of any kind. The
+tree-walker is slow and is staying: it is the reference the VM answers to, and when the
+LLVM JIT arrives it will answer to both.
+
+One implementation only ever agrees with itself. `luarust verify` runs a program both ways
+and says whether they match, and `luarust fuzz` writes programs and does it in bulk — a
+million of them at the last count, all compiling, all agreeing, and the fourteen thousand
+that stopped part way stopping the same way both times.
 
 ## How fast it is
 
-Not very, yet, and on purpose.
+Not very, yet, and honestly.
 
 The benchmark is a dependent chain — `sum = (sum + i) mod 1000000007`, a hundred million
 times. Each value needs the one before it, so it cannot be folded into a formula,
@@ -461,12 +469,14 @@ vectorised, or run out of order. Everybody actually loops.
 
 | | 100M | vs Lua 5.4 |
 | --- | --- | --- |
-| Lua 5.4 | **580 ms** | 1× |
-| Lust | 677 ms | 1.2× |
-| LuaJIT | 722 ms | 1.2× |
-| **Luarust** | **9,627 ms** | **16.6×** |
+| Lua 5.4 | **797 ms** | 1× |
+| LuaJIT | 881 ms | 1.1× |
+| Lust | 1,022 ms | 1.3× |
+| **Luarust**, bytecode VM | **8,899 ms** | **11.2×** |
+| Luarust, tree-walker | 14,719 ms | 18.5× |
 
-One x86-64 Xeon, best of three, every one of them printing the same answer.
+One x86-64 machine, best of three, every one of them printing the same answer. The last
+two rows are the same program run two different ways, which is the point of keeping both.
 
 Before any of that means anything, each timing is checked for whether it still contains a
 loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a
@@ -475,13 +485,15 @@ ten times the time:
 
 | | 10M | 100M | ratio |
 | --- | --- | --- | --- |
-| Lua 5.4 | 67 ms | 580 ms | 8.7× |
-| LuaJIT | 80 ms | 722 ms | 9.0× |
-| Lust | 78 ms | 677 ms | 8.7× |
-| Luarust | 1,100 ms | 9,627 ms | 8.8× |
+| Lua 5.4 | 82 ms | 797 ms | 9.7× |
+| LuaJIT | 91 ms | 881 ms | 9.7× |
+| Lust | 106 ms | 1,022 ms | 9.6× |
+| Luarust VM | 891 ms | 8,899 ms | 10.0× |
+| Luarust tree-walker | 1,473 ms | 14,719 ms | 10.0× |
 
-Everyone comes in a little under ten because process startup stops mattering at the larger
-size. Nobody's loop was deleted.
+Nobody's loop was deleted.
 
-Sixteen times off is about where a tree-walker sits against a bytecode VM, which is what
-comes next. The `benchmark` workflow in this repository runs the table above.
+Eleven times off, with no JIT and a VM a few days old, against an interpreter that has been
+tuned for thirty years. The `benchmark` workflow in this repository runs the table above,
+and the numbers move by a third between runs because the machine underneath is shared —
+which is why both Luarust rows are always measured in the same job as everything else.
