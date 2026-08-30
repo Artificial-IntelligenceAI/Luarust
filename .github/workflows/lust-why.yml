@@ -52,16 +52,16 @@ jobs:
           EOF
 
           bench() {
-            local name="\$1"; shift
+            local name="$1"; shift
             local best=99999999 out=""
             for _ in 1 2 3; do
-              local t0=\$(date +%s%N)
-              out=\$("\$@" 2>&1 | tail -1 | tr -d '\n')
-              local t1=\$(date +%s%N)
-              local ms=\$(( (t1 - t0) / 1000000 ))
-              [ "\$ms" -lt "\$best" ] && best=\$ms
+              local t0=$(date +%s%N)
+              out=$("$@" 2>&1 | tail -1 | tr -d '\n')
+              local t1=$(date +%s%N)
+              local ms=$(( (t1 - t0) / 1000000 ))
+              [ "$ms" -lt "$best" ] && best=$ms
             done
-            printf "%-28s %7s ms   %s\n" "\$name" "\$best" "\$out"
+            printf "%-28s %7s ms   %s\n" "$name" "$best" "$out"
           }
 
           echo "N = $N"
