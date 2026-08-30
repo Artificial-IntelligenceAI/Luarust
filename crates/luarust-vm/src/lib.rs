@@ -1,0 +1,109 @@
+//! Luarust's bytecode, and the machine that runs it.
+//!
+//! This is the second of the three ways to run a Luarust program, and the first one that
+//! makes the others worth having: with only a tree-walker there is nothing to disagree
+//! with, and with two implementations that must produce the same answers, every
+//! disagreement is a bug one of them is hiding.
+//!
+//! It is also the artifact the README promises. A chunk is what "compile once, run
+//! anywhere" compiles to.
+//!
+//! Nothing here reimplements arithmetic. Every number still comes from `luarust-num` by
+//! way of `luarust-check`, so the VM and the interpreter agree because they are running
+//! the same code, not because two people were careful.
+
+pub mod chunk;
+pub mod compile;
+
+pub use chunk::{Chunk, Op};
+pub use compile::compile;
+
+use luarust_check::value::{Stopped, Value, binary_op, compare, format_of, negate};
+use luarust_num::binary::{self, Comparison, Round};
+use std::io::Write;
+use std::time::Instant;
+
+/// Run a compiled chunk.
+pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
+    // A register the checker has proved is written before it is read. The placeholder is
+    // never observed by a program that got this far.
+    let placeholder = Value::Bool(false);
+    let mut registers = vec![placeholder; chunk.registers];
+    let started = Instant::now();
+    let mut at = 0usize;
+
+    loop {
+        let op = chunk.code[at];
+        let span = chunk.spans[at];
+        at += 1;
+
+        match op {
+            Op::Halt => return Ok(()),
+
+            Op::Const { dst, konst } => {
+                registers[dst as usize] = chunk.consts[konst as usize].clone();
+            }
+
+            Op::Move { dst, src } => {
+                registers[dst as usize] = registers[src as usize].clone();
+            }
+
+            Op::Binary { op, dst, lhs, rhs } => {
+                let value = binary_op(
+                    op,
+                    &registers[lhs as usize],
+                    &registers[rhs as usize],
+                    chunk.overflow,
+                )
+                .map_err(|fault| Stopped { fault, span })?;
+                registers[dst as usize] = value;
+            }
+
+            Op::Neg { dst, src } => {
+                let value = negate(&registers[src as usize], chunk.overflow)
+                    .map_err(|fault| Stopped { fault, span })?;
+                registers[dst as usize] = value;
+            }
+
+            Op::TimeNow { dst, ty } => {
+                let seconds = started.elapsed().as_secs_f64();
+                let fmt = format_of(ty).expect("the clock is read as a float");
+                let bits = binary::from_decimal::<8>(
+                    fmt,
+                    Round::TiesToEven,
+                    &format!("{seconds:.9}"),
+                )
+                .expect("nine decimal places is a number");
+                registers[dst as usize] = Value::Float { ty, bits };
+            }
+
+            Op::PrintText { text } => {
+                let _ = out.write_all(chunk.texts[text as usize].as_bytes());
+                let _ = out.flush();
+            }
+
+            Op::PrintValue { src } => {
+                let _ = out.write_all(registers[src as usize].to_string().as_bytes());
+                let _ = out.flush();
+            }
+
+            Op::Jump { target } => at = target as usize,
+
+            Op::JumpIfGreater { lhs, rhs, target } => {
+                if compare(&registers[lhs as usize], &registers[rhs as usize])
+                    == Comparison::Greater
+                {
+                    at = target as usize;
+                }
+            }
+
+            Op::JumpIfEqual { lhs, rhs, target } => {
+                if compare(&registers[lhs as usize], &registers[rhs as usize])
+                    == Comparison::Equal
+                {
+                    at = target as usize;
+                }
+            }
+        }
+    }
+}

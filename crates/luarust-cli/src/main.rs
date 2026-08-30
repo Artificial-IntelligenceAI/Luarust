@@ -8,35 +8,52 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 luarust — a language that would rather not guess
 
-    luarust run <file.lr>      check it, then run it
-    luarust check <file.lr>    check it and stop
-    luarust --help             this
+    luarust run <file.lr>       compile to bytecode and run it
+    luarust interp <file.lr>    run it on the reference interpreter instead
+    luarust verify <file.lr>    run it both ways and report whether they agree
+    luarust dis <file.lr>       show what the compiler decided
+    luarust check <file.lr>     check it and stop
+    luarust --help              this
 ";
+
+/// What to do once a file has checked out.
+enum Then {
+    Nothing,
+    Run,
+    Interpret,
+    Verify,
+    Disassemble,
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let command = args.next();
     let path = args.next().map(PathBuf::from);
 
-    match (command.as_deref(), path) {
-        (Some("run"), Some(path)) => act(path, true),
-        (Some("check"), Some(path)) => act(path, false),
-        (Some("--help" | "-h" | "help"), _) => {
+    let then = match command.as_deref() {
+        Some("run") => Then::Run,
+        Some("interp") => Then::Interpret,
+        Some("verify") => Then::Verify,
+        Some("dis") => Then::Disassemble,
+        Some("check") => Then::Nothing,
+        Some("--help" | "-h" | "help") => {
             print!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        (Some(command), None) => {
-            eprintln!("`{command}` needs a file to work on.\n\n{USAGE}");
-            ExitCode::from(2)
+            return ExitCode::SUCCESS;
         }
         _ => {
             eprint!("{USAGE}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
         }
-    }
+    };
+
+    let Some(path) = path else {
+        eprintln!("that needs a file to work on.\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    act(path, then)
 }
 
-fn act(path: PathBuf, then_run: bool) -> ExitCode {
+fn act(path: PathBuf, then: Then) -> ExitCode {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(why) => {
@@ -46,10 +63,9 @@ fn act(path: PathBuf, then_run: bool) -> ExitCode {
     };
     let source = SourceFile::new(path, text);
 
-    let mut errors: Vec<Diagnostic> = Vec::new();
-
     // Each stage runs only if the one before it had nothing to say, because a parser fed
     // broken tokens invents problems that are not really there.
+    let mut errors: Vec<Diagnostic> = Vec::new();
     let lexed = luarust_lex::lex(source.text());
     errors.extend(lexed.errors);
 
@@ -68,22 +84,90 @@ fn act(path: PathBuf, then_run: bool) -> ExitCode {
         eprint!("{}", luarust_diag::report(&source, &errors));
         return ExitCode::FAILURE;
     }
-
     let Some(program) = checked else { return ExitCode::FAILURE };
-    if !then_run {
+
+    match then {
+        Then::Nothing => ExitCode::SUCCESS,
+
+        Then::Disassemble => {
+            print!("{}", luarust_vm::compile(&program).disassemble());
+            ExitCode::SUCCESS
+        }
+
+        Then::Run => {
+            let chunk = luarust_vm::compile(&program);
+            let mut out = std::io::stdout().lock();
+            finish(luarust_vm::run(&chunk, &mut out), &mut out, &source)
+        }
+
+        Then::Interpret => {
+            let mut out = std::io::stdout().lock();
+            finish(luarust_interp::run(&program, &mut out), &mut out, &source)
+        }
+
+        Then::Verify => verify(&program, &source),
+    }
+}
+
+fn finish(
+    outcome: Result<(), luarust_check::value::Stopped>,
+    out: &mut impl Write,
+    source: &SourceFile,
+) -> ExitCode {
+    let _ = out.flush();
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(stopped) => {
+            eprint!("{}", luarust_diag::report(source, &[stopped.diagnostic()]));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run a program both ways and say whether the two agree.
+///
+/// This is the whole reason the interpreter is kept after the VM exists. One
+/// implementation only ever agrees with itself.
+fn verify(program: &luarust_check::ir::Checked, source: &SourceFile) -> ExitCode {
+    let mut walked = Vec::new();
+    let walk = luarust_interp::run(program, &mut walked);
+
+    let chunk = luarust_vm::compile(program);
+    let mut ran = Vec::new();
+    let vm = luarust_vm::run(&chunk, &mut ran);
+
+    let same_output = walked == ran;
+    let same_ending = match (&walk, &vm) {
+        (Ok(()), Ok(())) => true,
+        (Err(a), Err(b)) => a.fault.code == b.fault.code,
+        _ => false,
+    };
+
+    if same_output && same_ending {
+        println!("the interpreter and the VM agree.");
+        if let Err(stopped) = walk {
+            println!("both stopped: {} — {}", stopped.fault.code, stopped.fault.message);
+        }
         return ExitCode::SUCCESS;
     }
 
-    let mut out = std::io::stdout().lock();
-    match luarust_interp::run(&program, &mut out) {
-        Ok(()) => {
-            let _ = out.flush();
-            ExitCode::SUCCESS
-        }
-        Err(stopped) => {
-            let _ = out.flush();
-            eprint!("{}", luarust_diag::report(&source, &[stopped.diagnostic()]));
-            ExitCode::FAILURE
-        }
+    println!("the interpreter and the VM DISAGREE.");
+    if !same_output {
+        println!("\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
+        println!("the VM printed:\n{}", String::from_utf8_lossy(&ran));
+    }
+    if !same_ending {
+        println!("\ninterpreter: {}", ending(&walk));
+        println!("the VM:      {}", ending(&vm));
+    }
+    println!("\n{}", chunk.disassemble());
+    let _ = source;
+    ExitCode::FAILURE
+}
+
+fn ending(outcome: &Result<(), luarust_check::value::Stopped>) -> String {
+    match outcome {
+        Ok(()) => "ran to the end".to_string(),
+        Err(stopped) => format!("stopped with {}", stopped.fault.code),
     }
 }

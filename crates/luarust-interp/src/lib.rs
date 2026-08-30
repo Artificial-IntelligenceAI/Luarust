@@ -10,30 +10,15 @@
 //! answers by construction rather than by two implementations being written carefully.
 
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
-use luarust_check::value::{Fault, Overflow, Value, binary_op, format_of, negate};
-use luarust_diag::{Diagnostic, Span};
+use luarust_check::value::{
+    Fault, Overflow, Value, binary_op, compare, format_of, negate, one_of,
+};
+pub use luarust_check::value::Stopped;
+use luarust_diag::Span;
 use luarust_num::binary::{self, Comparison, Round};
 use luarust_parse::ast::{BinOp, Ty};
 use std::io::Write;
 use std::time::Instant;
-
-/// A fault, and where in the program it happened.
-#[derive(Clone, Debug)]
-pub struct Stopped {
-    pub fault: Fault,
-    pub span: Span,
-}
-
-impl Stopped {
-    /// The same shape as every other Luarust error, so a running program's complaints
-    /// read exactly like a compiler's.
-    pub fn diagnostic(&self) -> Diagnostic {
-        Diagnostic::new(self.fault.code, self.fault.message.clone())
-            .primary(self.span, "while running this")
-            .rule(self.fault.rule)
-            .fix(self.fault.fix.clone())
-    }
-}
 
 type Outcome<T> = Result<T, Stopped>;
 
@@ -176,32 +161,5 @@ impl Machine {
                     .map_err(|fault| Stopped { fault, span: *span })
             }
         }
-    }
-}
-
-/// One, of whichever numeric type.
-fn one_of(ty: Ty) -> Value {
-    if ty.is_integer() {
-        Value::int(ty, 1)
-    } else {
-        let fmt = format_of(ty).expect("a loop counts in a number");
-        Value::Float { ty, bits: binary::arith::one::<8>(fmt, false) }
-    }
-}
-
-fn compare(a: &Value, b: &Value) -> Comparison {
-    match (a, b) {
-        (Value::Int { .. }, Value::Int { .. }) => {
-            match a.as_i128().unwrap().cmp(&b.as_i128().unwrap()) {
-                std::cmp::Ordering::Less => Comparison::Less,
-                std::cmp::Ordering::Equal => Comparison::Equal,
-                std::cmp::Ordering::Greater => Comparison::Greater,
-            }
-        }
-        (Value::Float { ty, bits: x }, Value::Float { bits: y, .. }) => {
-            let fmt = format_of(*ty).expect("a float type has a format");
-            binary::compare(fmt, *x, *y)
-        }
-        _ => Comparison::Unordered,
     }
 }

@@ -21,6 +21,7 @@ dependencies = [
  "luarust-interp",
  "luarust-lex",
  "luarust-parse",
+ "luarust-vm",
 ]
 
 [[package]]
@@ -55,4 +56,16 @@ version = "0.0.0"
 dependencies = [
  "luarust-diag",
  "luarust-lex",
+]
+
+[[package]]
+name = "luarust-vm"
+version = "0.0.0"
+dependencies = [
+ "luarust-check",
+ "luarust-diag",
+ "luarust-interp",
+ "luarust-lex",
+ "luarust-num",
+ "luarust-parse",
 ]

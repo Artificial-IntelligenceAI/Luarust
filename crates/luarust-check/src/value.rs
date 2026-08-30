@@ -9,8 +9,9 @@
 //! at 128 bits before being cut back to their width, which is what makes wrapping and
 //! trapping the same operation with a different ending.
 
+use luarust_diag::{Diagnostic, Span};
 use luarust_num::Uint;
-use luarust_num::binary::{self, Format, Round};
+use luarust_num::binary::{self, Comparison, Format, Round};
 use luarust_parse::ast::{BinOp, Ty};
 
 /// The working width every float format fits in. `b256` needs the most.
@@ -49,6 +50,59 @@ pub struct Fault {
 impl Fault {
     fn new(code: &'static str, message: impl Into<String>, rule: &'static str, fix: impl Into<String>) -> Self {
         Self { code, message: message.into(), rule, fix: fix.into() }
+    }
+}
+
+/// A fault, and where in the program it happened.
+///
+/// Shared by every execution path, so that a program stopping under the interpreter and
+/// the same program stopping under the VM produce the same words as well as the same
+/// behaviour.
+#[derive(Clone, Debug)]
+pub struct Stopped {
+    pub fault: Fault,
+    pub span: Span,
+}
+
+impl Stopped {
+    /// The same shape as every other Luarust error, so a running program's complaints
+    /// read exactly like a compiler's.
+    pub fn diagnostic(&self) -> Diagnostic {
+        Diagnostic::new(self.fault.code, self.fault.message.clone())
+            .primary(self.span, "while running this")
+            .rule(self.fault.rule)
+            .fix(self.fault.fix.clone())
+    }
+}
+
+/// Order two values of the same type.
+///
+/// Lives here rather than in whatever is running the program, so that every execution
+/// path orders things identically instead of nearly identically.
+pub fn compare(a: &Value, b: &Value) -> Comparison {
+    match (a, b) {
+        (Value::Int { .. }, Value::Int { .. }) => {
+            match a.as_i128().unwrap().cmp(&b.as_i128().unwrap()) {
+                std::cmp::Ordering::Less => Comparison::Less,
+                std::cmp::Ordering::Equal => Comparison::Equal,
+                std::cmp::Ordering::Greater => Comparison::Greater,
+            }
+        }
+        (Value::Float { ty, bits: x }, Value::Float { bits: y, .. }) => {
+            let fmt = format_of(*ty).expect("a float type has a format");
+            binary::compare(fmt, *x, *y)
+        }
+        _ => Comparison::Unordered,
+    }
+}
+
+/// One, of whichever numeric type.
+pub fn one_of(ty: Ty) -> Value {
+    if ty.is_integer() {
+        Value::int(ty, 1)
+    } else {
+        let fmt = format_of(ty).expect("a number has a format");
+        Value::Float { ty, bits: binary::arith::one::<8>(fmt, false) }
     }
 }
 

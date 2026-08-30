@@ -8,6 +8,7 @@ members = [
     "crates/luarust-lex",
     "crates/luarust-num",
     "crates/luarust-parse",
+    "crates/luarust-vm",
 ]
 
 [workspace.package]

@@ -1,20 +1,18 @@
 [package]
-name = "luarust-cli"
-description = "The luarust command."
+name = "luarust-vm"
+description = "Luarust's bytecode and the machine that runs it."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "luarust"
-path = "src/main.rs"
-
 [dependencies]
 luarust-check = { path = "../luarust-check" }
 luarust-diag = { path = "../luarust-diag" }
+luarust-num = { path = "../luarust-num" }
+luarust-parse = { path = "../luarust-parse" }
+
+[dev-dependencies]
 luarust-interp = { path = "../luarust-interp" }
 luarust-lex = { path = "../luarust-lex" }
-luarust-parse = { path = "../luarust-parse" }
-luarust-vm = { path = "../luarust-vm" }
