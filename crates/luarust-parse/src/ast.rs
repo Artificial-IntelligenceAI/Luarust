@@ -96,6 +96,8 @@ pub enum Expr {
     /// operators become legal.
     Math { inner: Box<Expr>, span: Span },
     /// `a < b`, `a > b`, `a = b`. Answers `bool` whatever its two sides were.
+    /// `name[…]` — a bare word before a list is a call, since a variable is quoted.
+    Call { name: Ident, args: Vec<Expr>, span: Span },
     /// `and` or `or`. Both sides are conditions, and so is the answer.
     Logic { op: LogicOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     /// `not`, which turns a condition around.
@@ -116,6 +118,7 @@ impl Expr {
             | Expr::TypedLiteral { span, .. }
             | Expr::Compare { span, .. }
             | Expr::Logic { span, .. }
+            | Expr::Call { span, .. }
             | Expr::Not { span, .. } => *span,
             Expr::Name(ident) => ident.span,
         }
@@ -187,6 +190,41 @@ pub struct Defaults {
     pub behaviour_span: Span,
 }
 
+/// One parameter of a function: a type, then the name it goes by inside.
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub span: Span,
+    pub ty: Ty,
+    pub ty_span: Span,
+    pub name: Ident,
+}
+
+/// `fn.local.i32 ['bigger'] [i32 'a', i32 'b'] { … }`
+///
+/// The chain says who can see it and what it answers; `nothing` there means it answers
+/// nothing at all. A function is not a statement -- it does not happen at a point in the
+/// program, it is simply true of it -- which is why the checker reads every signature
+/// before it checks any body, and why order in the file does not matter.
+#[derive(Clone, Debug)]
+pub struct Func {
+    pub span: Span,
+    pub name: Ident,
+    pub visibility: Visibility,
+    pub visibility_span: Option<Span>,
+    /// `None` when the chain said `nothing`.
+    pub returns: Option<Ty>,
+    pub returns_span: Span,
+    pub params: Vec<Param>,
+    pub body: Vec<Stmt>,
+}
+
+/// `return;` or `return <value>;`
+#[derive(Clone, Debug)]
+pub struct Return {
+    pub span: Span,
+    pub value: Option<Expr>,
+}
+
 /// One `if` or `else-if`: something to ask, and what to do when the answer is yes.
 #[derive(Clone, Debug)]
 pub struct Arm {
@@ -214,6 +252,10 @@ pub enum Stmt {
     Print(Print),
     Loop(Loop),
     If(If),
+    Func(Func),
+    Return(Return),
+    /// `greet['Tankun'];` — a call written for what it does, not for what it answers.
+    Call(Expr),
     Defaults(Defaults),
 }
 
@@ -226,6 +268,9 @@ impl Stmt {
             Stmt::Print(s) => s.span,
             Stmt::Loop(s) => s.span,
             Stmt::If(s) => s.span,
+            Stmt::Func(s) => s.span,
+            Stmt::Return(s) => s.span,
+            Stmt::Call(s) => s.span(),
             Stmt::Defaults(s) => s.span,
         }
     }

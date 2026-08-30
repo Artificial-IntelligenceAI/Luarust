@@ -35,6 +35,12 @@ pub enum Op {
     PrintText { text: u32 },
     /// Stringify a register and write it.
     PrintValue { src: Reg },
+    /// Call a function. Its arguments are the `argc` registers from `base`, and what it
+    /// answers lands in `dst`. `dst` is ignored when the function answers nothing.
+    Call { func: u32, base: Reg, argc: u16, dst: Reg },
+    /// Leave the function, with the value in `src` when there is one.
+    Return { src: Reg },
+    ReturnNothing,
     /// Turn a `bool` register around.
     Not { dst: Reg, src: Reg },
     /// Jump if a `bool` register is false.
@@ -60,6 +66,20 @@ pub struct Chunk {
     /// How many registers the machine needs.
     pub registers: usize,
     pub overflow: Overflow,
+    /// Every function, each with its own code and its own register file. The constants
+    /// and the texts are shared, because they are the same values wherever they appear.
+    pub funcs: Vec<Routine>,
+}
+
+/// One function's compiled body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Routine {
+    pub code: Vec<Op>,
+    pub spans: Vec<Span>,
+    pub registers: usize,
+    /// The first `params` registers hold the arguments, in order.
+    pub params: usize,
+    pub returns: bool,
 }
 
 impl Chunk {
@@ -84,47 +104,68 @@ impl Chunk {
 
         let _ = writeln!(out, "code:");
         for (at, op) in self.code.iter().enumerate() {
-            let text = match *op {
-                Op::Const { dst, konst } => {
-                    format!("const        r{dst}, k{konst}    -- {}", self.consts[konst as usize])
-                }
-                Op::Move { dst, src } => format!("move         r{dst}, r{src}"),
-                Op::Binary { op, ty, dst, lhs, rhs } => {
-                    format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
-                }
-                Op::Neg { dst, src } => format!("neg          r{dst}, r{src}"),
-                Op::Not { dst, src } => format!("not          r{dst}, r{src}"),
-                Op::JumpIfFalse { cond, target } => format!("jump.false   r{cond}, {target}"),
-                Op::JumpIfTrue { cond, target } => format!("jump.true    r{cond}, {target}"),
-                Op::Compare { op, operands, dst, lhs, rhs } => format!(
-                    "{:<12} r{dst}, r{lhs}, r{rhs}    -- {}",
-                    match op {
-                        CmpOp::Less => "less",
-                        CmpOp::Greater => "greater",
-                        CmpOp::Equal => "equal",
-                        CmpOp::LessEqual => "less.eq",
-                        CmpOp::GreaterEqual => "greater.eq",
-                        CmpOp::NotEqual => "not.equal",
-                    },
-                    operands.word()
-                ),
-                Op::TimeNow { dst, ty } => format!("time.now     r{dst}    -- {}", ty.word()),
-                Op::PrintText { text } => {
-                    format!("print.text   t{text}    -- {:?}", self.texts[text as usize])
-                }
-                Op::PrintValue { src } => format!("print.value  r{src}"),
-                Op::JumpIfGreater { lhs, rhs, target } => {
-                    format!("jump.gt      r{lhs}, r{rhs}, {target}")
-                }
-                Op::JumpIfEqual { lhs, rhs, target } => {
-                    format!("jump.eq      r{lhs}, r{rhs}, {target}")
-                }
-                Op::Jump { target } => format!("jump         {target}"),
-                Op::Halt => "halt".to_string(),
-            };
-            let _ = writeln!(out, "  {at:>4}  {text}");
+            let _ = writeln!(out, "  {at:>4}  {}", self.show(*op));
+        }
+
+        for (index, routine) in self.funcs.iter().enumerate() {
+            let answers = if routine.returns { "answers a value" } else { "answers nothing" };
+            let _ = writeln!(
+                out,
+                "\nf{index}: {} registers, {} of them parameters, {answers}",
+                routine.registers, routine.params
+            );
+            for (at, op) in routine.code.iter().enumerate() {
+                let _ = writeln!(out, "  {at:>4}  {}", self.show(*op));
+            }
         }
         out
+    }
+
+    /// One instruction, as a line of the listing.
+    fn show(&self, op: Op) -> String {
+        match op {
+            Op::Const { dst, konst } => {
+                format!("const        r{dst}, k{konst}    -- {}", self.consts[konst as usize])
+            }
+            Op::Move { dst, src } => format!("move         r{dst}, r{src}"),
+            Op::Binary { op, ty, dst, lhs, rhs } => {
+                format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
+            }
+            Op::Neg { dst, src } => format!("neg          r{dst}, r{src}"),
+            Op::Not { dst, src } => format!("not          r{dst}, r{src}"),
+            Op::JumpIfFalse { cond, target } => format!("jump.false   r{cond}, {target}"),
+            Op::JumpIfTrue { cond, target } => format!("jump.true    r{cond}, {target}"),
+            Op::Compare { op, operands, dst, lhs, rhs } => format!(
+                "{:<12} r{dst}, r{lhs}, r{rhs}    -- {}",
+                match op {
+                    CmpOp::Less => "less",
+                    CmpOp::Greater => "greater",
+                    CmpOp::Equal => "equal",
+                    CmpOp::LessEqual => "less.eq",
+                    CmpOp::GreaterEqual => "greater.eq",
+                    CmpOp::NotEqual => "not.equal",
+                },
+                operands.word()
+            ),
+            Op::TimeNow { dst, ty } => format!("time.now     r{dst}    -- {}", ty.word()),
+            Op::PrintText { text } => {
+                format!("print.text   t{text}    -- {:?}", self.texts[text as usize])
+            }
+            Op::PrintValue { src } => format!("print.value  r{src}"),
+            Op::JumpIfGreater { lhs, rhs, target } => {
+                format!("jump.gt      r{lhs}, r{rhs}, {target}")
+            }
+            Op::JumpIfEqual { lhs, rhs, target } => {
+                format!("jump.eq      r{lhs}, r{rhs}, {target}")
+            }
+            Op::Jump { target } => format!("jump         {target}"),
+            Op::Call { func, base, argc, dst } => {
+                format!("call         f{func}, r{base}..{argc}, -> r{dst}")
+            }
+            Op::Return { src } => format!("return       r{src}"),
+            Op::ReturnNothing => "return".to_string(),
+            Op::Halt => "halt".to_string(),
+        }
     }
 }
 

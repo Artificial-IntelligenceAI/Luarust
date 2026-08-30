@@ -25,28 +25,94 @@ pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
 use luarust_core::value::{
-    Stopped, Value, binary_op, compare, format_of, holds, int_op, negate,
+    DEPTH_LIMIT, Fault, Stopped, Value, binary_op, compare, format_of, holds, int_op, negate,
 };
 use luarust_num::binary::{self, Comparison, Round};
 use std::io::Write;
 use std::time::Instant;
+
+
+/// One call in progress: where it is, what it is holding, and where its answer goes.
+struct Frame {
+    /// The function being run, or `None` for the top level.
+    routine: Option<usize>,
+    at: usize,
+    registers: Vec<Value>,
+    /// The register in the *caller* that receives the answer.
+    dst: u16,
+}
 
 /// Run a compiled chunk.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
     // A register the checker has proved is written before it is read. The placeholder is
     // never observed by a program that got this far.
     let placeholder = Value::Bool(false);
-    let mut registers = vec![placeholder; chunk.registers];
     let started = Instant::now();
-    let mut at = 0usize;
+
+    let mut frames: Vec<Frame> = vec![Frame {
+        routine: None,
+        at: 0,
+        registers: vec![placeholder.clone(); chunk.registers],
+        dst: 0,
+    }];
 
     loop {
-        let op = chunk.code[at];
-        let span = chunk.spans[at];
-        at += 1;
+        let depth = frames.len() - 1;
+        let frame = frames.last_mut().expect("a frame is always open");
+        let code = match frame.routine {
+            None => &chunk.code,
+            Some(index) => &chunk.funcs[index].code,
+        };
+        let spans = match frame.routine {
+            None => &chunk.spans,
+            Some(index) => &chunk.funcs[index].spans,
+        };
+        let at = frame.at;
+        let op = code[at];
+        let span = spans[at];
+        frame.at += 1;
+        let registers = &mut frame.registers;
+        // Where to go next, decided inside the match and applied once it lets go of the
+        // frame it is holding.
+        let mut jump: Option<usize> = None;
 
         match op {
             Op::Halt => return Ok(()),
+
+            Op::Call { func, base, argc, dst } => {
+                if depth >= DEPTH_LIMIT {
+                    return Err(Stopped {
+                        fault: Fault {
+                            code: "R0011",
+                            message: format!("this has called itself {DEPTH_LIMIT} deep."),
+                            rule: "a call may only go so deep before the program is stopped",
+                            fix: "give the recursion a case that stops, or write it as a loop."
+                                .to_string(),
+                        },
+                        span,
+                    });
+                }
+                let routine = &chunk.funcs[func as usize];
+                let mut fresh = vec![placeholder.clone(); routine.registers];
+                for n in 0..argc as usize {
+                    fresh[n] = registers[base as usize + n].clone();
+                }
+                frames.push(Frame { routine: Some(func as usize), at: 0, registers: fresh, dst });
+                continue;
+            }
+
+            Op::Return { src } => {
+                let answer = registers[src as usize].clone();
+                let finished = frames.pop().expect("a frame is always open");
+                let caller = frames.last_mut().expect("something called it");
+                caller.registers[finished.dst as usize] = answer;
+                continue;
+            }
+
+            Op::ReturnNothing => {
+                frames.pop();
+                continue;
+            }
 
             Op::Const { dst, konst } => {
                 registers[dst as usize] = chunk.consts[konst as usize].clone();
@@ -120,23 +186,23 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::JumpIfFalse { cond, target } => {
                 if !truth(&registers[cond as usize]) {
-                    at = target as usize;
+                    jump = Some(target as usize);
                 }
             }
 
             Op::JumpIfTrue { cond, target } => {
                 if truth(&registers[cond as usize]) {
-                    at = target as usize;
+                    jump = Some(target as usize);
                 }
             }
 
-            Op::Jump { target } => at = target as usize,
+            Op::Jump { target } => jump = Some(target as usize),
 
             Op::JumpIfGreater { lhs, rhs, target } => {
                 if compare(&registers[lhs as usize], &registers[rhs as usize])
                     == Comparison::Greater
                 {
-                    at = target as usize;
+                    jump = Some(target as usize);
                 }
             }
 
@@ -144,9 +210,13 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 if compare(&registers[lhs as usize], &registers[rhs as usize])
                     == Comparison::Equal
                 {
-                    at = target as usize;
+                    jump = Some(target as usize);
                 }
             }
+        }
+
+        if let Some(to) = jump {
+            frames.last_mut().expect("a frame is always open").at = to;
         }
     }
 }

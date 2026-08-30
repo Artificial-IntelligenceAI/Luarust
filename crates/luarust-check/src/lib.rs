@@ -65,6 +65,9 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         slots: 0,
         overflow: start.overflow,
         visibility_required: start.visibility_required,
+        signatures: HashMap::new(),
+        funcs: Vec::new(),
+        inside: None,
         errors: Vec::new(),
     };
 
@@ -76,8 +79,20 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         }
     }
 
+    // Every signature is read before any body is, so a function may be called above the
+    // line it is written on, and two functions may call each other. A function is not a
+    // statement -- it does not happen at a point in the program -- so nothing about it
+    // depends on where in the file it sits. Variables are the opposite, and stay so.
+    checker.collect_signatures(&program.stmts);
+    checker.check_bodies(&program.stmts);
+
     let stmts = checker.block(&program.stmts);
-    let checked = Checked { stmts, slots: checker.slots, overflow: checker.overflow };
+    let checked = Checked {
+        stmts,
+        funcs: std::mem::take(&mut checker.funcs),
+        slots: checker.slots,
+        overflow: checker.overflow,
+    };
     (checked, checker.errors)
 }
 
@@ -86,7 +101,21 @@ struct Checker {
     slots: usize,
     overflow: Overflow,
     visibility_required: bool,
+    /// Every function's name, and where it sits in `funcs`.
+    signatures: HashMap<String, Signature>,
+    funcs: Vec<ir::Function>,
+    /// What the function being checked answers, when one is being checked. The outer
+    /// `Option` says whether we are in a function at all; the inner, whether it answers.
+    inside: Option<Option<Ty>>,
     errors: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug)]
+struct Signature {
+    index: usize,
+    params: Vec<Ty>,
+    returns: Option<Ty>,
+    declared_at: Span,
 }
 
 impl Checker {
@@ -160,6 +189,18 @@ impl Checker {
                     }
                 }
                 AStmt::If(if_stmt) => out.push(self.if_stmt(if_stmt)),
+                // Read in their own passes, before and after this one.
+                AStmt::Func(_) => {}
+                AStmt::Return(ret) => {
+                    if let Some(checked) = self.return_stmt(ret) {
+                        out.push(checked);
+                    }
+                }
+                AStmt::Call(call) => {
+                    if let Some(checked) = self.call_stmt(call) {
+                        out.push(checked);
+                    }
+                }
                 // Already read, before anything else ran.
                 AStmt::Defaults(_) => {}
             }
@@ -353,6 +394,235 @@ impl Checker {
         };
 
         ir::Stmt::If { arms, otherwise, span: if_stmt.span }
+    }
+
+    // ---- functions ---------------------------------------------------------------
+
+    /// Read every function's header, without opening a single body.
+    fn collect_signatures(&mut self, stmts: &[AStmt]) {
+        for stmt in stmts {
+            let AStmt::Func(func) = stmt else { continue };
+
+            if let Some(already) = self.signatures.get(&func.name.text) {
+                let first = already.declared_at;
+                self.error(
+                    Diagnostic::new("E0123", format!("`{}` is declared twice.", func.name.text))
+                        .secondary(first, "first declared here")
+                        .primary(func.name.span, "and again here")
+                        .rule("a name means one thing in the place it is written")
+                        .fix("rename one of them."),
+                );
+                continue;
+            }
+
+            let index = self.funcs.len();
+            self.signatures.insert(
+                func.name.text.clone(),
+                Signature {
+                    index,
+                    params: func.params.iter().map(|p| p.ty).collect(),
+                    returns: func.returns,
+                    declared_at: func.name.span,
+                },
+            );
+            // A placeholder, so the index is stable while the bodies are still unchecked
+            // and one function can already be seen calling another.
+            self.funcs.push(ir::Function {
+                name: func.name.text.clone(),
+                params: func.params.iter().map(|p| p.ty).collect(),
+                returns: func.returns,
+                slots: 0,
+                body: Vec::new(),
+                span: func.span,
+            });
+        }
+    }
+
+    /// Check every body, now that every signature is known.
+    fn check_bodies(&mut self, stmts: &[AStmt]) {
+        for stmt in stmts {
+            let AStmt::Func(func) = stmt else { continue };
+            let Some(signature) = self.signatures.get(&func.name.text).cloned() else { continue };
+
+            // A body has its own slots and its own scope. It cannot see the variables
+            // outside it -- only its parameters and whatever it declares.
+            let outer_slots = std::mem::replace(&mut self.slots, 0);
+            let outer_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+            let outer_inside = self.inside.replace(func.returns);
+
+            for param in &func.params {
+                let slot = self.next_slot();
+                self.declare(
+                    &param.name.text,
+                    Var {
+                        slot,
+                        ty: param.ty,
+                        mutable: false,
+                        visibility: Visibility::Local,
+                        declared_at: param.name.span,
+                        visibility_at: None,
+                    },
+                );
+            }
+
+            let body = self.block(&func.body);
+
+            // A function that answers something has to answer on every path out of it.
+            if let Some(answers) = func.returns.filter(|_| !always_returns(&body)) {
+                self.error(
+                    Diagnostic::new("E0124", format!("`{}` does not answer on every path.", func.name.text))
+                        .primary(func.returns_span, format!("it says it answers `{}`", answers.word()))
+                        .rule("a function that states an answer gives one however it ends")
+                        .tip("an `if` without an `else` has a path where nothing was returned.")
+                        .fix("add a `return` at the end, or an `else` that has one."),
+                );
+            }
+
+            self.funcs[signature.index].slots = self.slots;
+            self.funcs[signature.index].body = body;
+
+            self.slots = outer_slots;
+            self.scopes = outer_scopes;
+            self.inside = outer_inside;
+        }
+    }
+
+    fn return_stmt(&mut self, ret: &ast::Return) -> Option<ir::Stmt> {
+        let Some(expected) = self.inside else {
+            self.error(
+                Diagnostic::new("E0125", "there is nothing here to return from.".to_string())
+                    .primary(ret.span, "written here")
+                    .rule("`return` leaves the function it is written in")
+                    .tip("at the top level a program simply reaches its end.")
+                    .fix("move it inside a function."),
+            );
+            return None;
+        };
+
+        match (expected, &ret.value) {
+            (None, None) => Some(ir::Stmt::Return { value: None, span: ret.span }),
+            (None, Some(value)) => {
+                self.error(
+                    Diagnostic::new("E0126", "this returns a value from a function that answers nothing.".to_string())
+                        .primary(value.span(), "this value")
+                        .rule("a function answers what its chain says it answers")
+                        .fix("write `return;`, or give the function a type instead of `nothing`."),
+                );
+                None
+            }
+            (Some(ty), None) => {
+                self.error(
+                    Diagnostic::new("E0127", format!("this returns nothing from a function that answers `{}`.", ty.word()))
+                        .primary(ret.span, "written here")
+                        .rule("a function answers what its chain says it answers")
+                        .fix(format!("return a `{}`.", ty.word())),
+                );
+                None
+            }
+            (Some(ty), Some(value)) => {
+                let checked = self.expr(value, Some(ty))?;
+                Some(ir::Stmt::Return { value: Some(checked), span: ret.span })
+            }
+        }
+    }
+
+    /// `greet['Tankun'];` — a call written for what it does. Whatever it answers, if
+    /// anything, is dropped, which is the only place that is allowed.
+    fn call_stmt(&mut self, expr: &AExpr) -> Option<ir::Stmt> {
+        let AExpr::Call { name, args, span } = expr else {
+            unreachable!("a call statement holds a call")
+        };
+        let (index, _, args) = self.resolve_call(name, args, *span)?;
+        Some(ir::Stmt::Call { func: index, args, span: *span })
+    }
+
+    /// The part every call has in common: find it, count the arguments, check each one.
+    fn resolve_call(
+        &mut self,
+        name: &ast::Ident,
+        args: &[AExpr],
+        span: Span,
+    ) -> Option<(usize, Option<Ty>, Vec<ir::Expr>)> {
+        let Some(signature) = self.signatures.get(&name.text).cloned() else {
+            let guess = self
+                .signatures
+                .keys()
+                .filter(|known| edit_distance(known, &name.text) <= 2.max(name.text.chars().count() / 3))
+                .min_by_key(|known| edit_distance(known, &name.text))
+                .cloned();
+            let mut diagnostic =
+                Diagnostic::new("E0128", format!("there is no function called `{}`.", name.text))
+                    .primary(name.span, "called here")
+                    .rule("a call names a function the program declares");
+            // A near-miss on a statement keyword is the likelier mistake, and the list of
+            // functions would never have suggested it.
+            let keyword = ["print", "var", "set", "handback", "loop", "if", "fn", "return"]
+                .into_iter()
+                .filter(|word| edit_distance(word, &name.text) <= 2)
+                .min_by_key(|word| edit_distance(word, &name.text));
+            if let Some(word) = keyword {
+                diagnostic = diagnostic.fix(format!("did you mean `{word}`?"));
+            } else if let Some(guess) = guess {
+                diagnostic = diagnostic.fix(format!("did you mean `{guess}`?"));
+            } else {
+                diagnostic = diagnostic
+                    .tip("a variable is written in quotes; a bare word before `[` is a function.")
+                    .fix("check the spelling, or declare it.");
+            }
+            self.error(diagnostic);
+            return None;
+        };
+
+        if args.len() != signature.params.len() {
+            self.error(
+                Diagnostic::new("E0130", format!(
+                    "`{}` takes {}, and {} given here.",
+                    name.text,
+                    count_of(signature.params.len(), "parameter"),
+                    if args.len() == 1 { "1 is".to_string() } else { format!("{} are", args.len()) },
+                ))
+                .primary(span, "called here")
+                .secondary(signature.declared_at, "declared here")
+                .rule("a call gives one argument for each parameter")
+                .fix("add or remove arguments until the counts agree."),
+            );
+            return None;
+        }
+
+        let mut checked = Vec::with_capacity(args.len());
+        for (arg, ty) in args.iter().zip(&signature.params) {
+            checked.push(self.expr(arg, Some(*ty))?);
+        }
+
+        Some((signature.index, signature.returns, checked))
+    }
+
+    /// `name[a, b]` where a value is wanted, so it has to answer one.
+    fn call(
+        &mut self,
+        name: &ast::Ident,
+        args: &[AExpr],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Option<ir::Expr> {
+        let declared_at = self.signatures.get(&name.text).map(|s| s.declared_at);
+        let (index, returns, args) = self.resolve_call(name, args, span)?;
+
+        let Some(returns) = returns else {
+            let mut diagnostic =
+                Diagnostic::new("E0129", format!("`{}` answers nothing, so it has no value here.", name.text))
+                    .primary(span, "used as a value here")
+                    .rule("a value comes from something that answers one")
+                    .fix("call it on its own line, or give it a type to answer.");
+            if let Some(at) = declared_at {
+                diagnostic = diagnostic.secondary(at, "declared to answer `nothing`");
+            }
+            self.error(diagnostic);
+            return None;
+        };
+
+        self.agree(returns, expected, span)?;
+        Some(ir::Expr::Call { func: index, ty: returns, args, span })
     }
 
     /// Something asked as a question, which has to be a `bool` and nothing else.
@@ -602,6 +872,8 @@ impl Checker {
                 Some(ir::Expr::Not { operand: Box::new(operand), span: *span })
             }
 
+            AExpr::Call { name, args, span } => self.call(name, args, *span, expected),
+
             AExpr::Binary { op, lhs, rhs, span } => {
                 // Whichever side knows what it is goes first and tells the other, so both
                 // `'x' + 1` and `1 + 'x'` read the 1 as whatever `'x'` is.
@@ -774,6 +1046,8 @@ fn self_typing(expr: &AExpr) -> bool {
         AExpr::TypedLiteral { .. } => true,
         // These three answer `bool` whatever is in them, so they need telling nothing.
         AExpr::Compare { .. } | AExpr::Logic { .. } | AExpr::Not { .. } => true,
+        // And a call answers whatever its function was declared to answer.
+        AExpr::Call { .. } => true,
         AExpr::Math { inner, .. } => self_typing(inner),
         AExpr::Unary { operand, .. } => self_typing(operand),
         AExpr::Binary { lhs, rhs, .. } => self_typing(lhs) || self_typing(rhs),
@@ -806,6 +1080,30 @@ fn edit_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut previous, &mut current);
     }
     previous[b.len()]
+}
+
+/// Whether a block always leaves by a `return`, however it is entered.
+///
+/// Conservative on purpose: it only says yes where it can see one. A loop that certainly
+/// runs, or an `if` whose condition is always true, will not convince it -- and being
+/// told to add a `return` that never runs is a smaller cost than a function quietly
+/// falling off its own end.
+fn always_returns(stmts: &[ir::Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        ir::Stmt::Return { .. } => true,
+        // Every arm and the `else`, or one of them might not answer.
+        ir::Stmt::If { arms, otherwise, .. } => {
+            !otherwise.is_empty()
+                && arms.iter().all(|arm| always_returns(&arm.body))
+                && always_returns(otherwise)
+        }
+        _ => false,
+    })
+}
+
+/// `1 parameter` or `3 parameters`, so a sentence reads either way.
+fn count_of(n: usize, thing: &str) -> String {
+    if n == 1 { format!("1 {thing}") } else { format!("{n} {thing}s") }
 }
 
 #[cfg(test)]
@@ -1055,6 +1353,55 @@ mod tests {
             codes("if [|true|] { var.local.i32 ['x'] = [|1|]; }\nprint['x'];"),
             ["E0208"]
         );
+    }
+
+    #[test]
+    fn a_call_to_something_that_is_not_there_is_reported_with_a_guess() {
+        let (_, errors) = run("fn.local.i32 ['double'] [i32 'n'] { return 'n'; }\nprint[doubel[|1|]];");
+        assert_eq!(errors[0].code, "E0128");
+        assert!(errors[0].fixes[0].contains("double"), "{:?}", errors[0].fixes);
+        // A near-miss on a statement keyword is guessed at too, since the list of
+        // functions could never have offered it.
+        let (_, errors) = run("prnt['x'];");
+        assert_eq!(errors[0].code, "E0128");
+        assert!(errors[0].fixes[0].contains("print"), "{:?}", errors[0].fixes);
+    }
+
+    #[test]
+    fn a_function_is_checked_against_its_signature() {
+        clean("fn.local.i32 ['f'] [i32 'a'] { return 'a'; }\nprint[f[|1|]];");
+        // Too few, too many, and the wrong type.
+        assert_eq!(codes("fn.local.i32 ['f'] [i32 'a'] { return 'a'; }\nprint[f[]];"), ["E0130"]);
+        assert_eq!(codes("fn.local.i32 ['f'] [i32 'a'] { return 'a'; }\nprint[f[|1|, |2|]];"), ["E0130"]);
+        assert_eq!(
+            codes("fn.local.i32 ['f'] [i32 'a'] { return 'a'; }\nvar.local.b64 ['x'] = [f[|1|]];"),
+            ["E0215"]
+        );
+    }
+
+    #[test]
+    fn a_function_answers_on_every_path_or_says_why_not() {
+        clean("fn.local.i32 ['f'] [i32 'a'] { if [|true|] { return 'a'; } return 'a'; }");
+        clean("fn.local.i32 ['f'] [i32 'a'] { if [|true|] { return 'a'; } else { return 'a'; } }");
+        // An `if` with no `else` leaves a path where nothing was answered.
+        assert_eq!(codes("fn.local.i32 ['f'] [i32 'a'] { if [|true|] { return 'a'; } }"), ["E0124"]);
+        // And a `nothing` function needs no return at all.
+        clean("fn.local.nothing ['f'] [] { print[\"hi\"]; }");
+    }
+
+    #[test]
+    fn a_function_sees_its_parameters_and_nothing_of_its_caller() {
+        clean("fn.local.i32 ['f'] [i32 'n'] { return 'n'; }");
+        // `outside` is declared at the top level, and a function is not inside it.
+        let (_, errors) = run("var.local.i32 ['outside'] = [|1|];\nfn.local.i32 ['f'] [] { return 'outside'; }");
+        assert_eq!(errors[0].code, "E0208");
+    }
+
+    #[test]
+    fn return_belongs_to_a_function() {
+        assert_eq!(codes("return |1|;"), ["E0125"]);
+        assert_eq!(codes("fn.local.nothing ['f'] [] { return |1|; }"), ["E0126"]);
+        assert_eq!(codes("fn.local.i32 ['f'] [] { return; }"), ["E0127", "E0124"]);
     }
 
 }

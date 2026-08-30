@@ -39,11 +39,20 @@ pub struct Declined {
 
 /// Whether the JIT will take a program at all.
 ///
-/// It takes all of them now. The types it has no instructions for — `b128`, `b256`,
-/// `bool`, `str` — live in numbered cells on the Rust side, and compiled code carries the
-/// number. This is kept as a function, and kept public, because it is the thing that would
-/// have to say no again if a type arrived that had nowhere to live.
-pub fn accepts(_program: &Checked) -> Result<(), Declined> {
+/// The types it has no instructions for — `b128`, `b256`, `str` — live in numbered cells
+/// on the Rust side, and compiled code carries the number.
+///
+/// Which is exactly why functions are declined for now. A cell number is decided when the
+/// code is compiled, so every call to a function would share one set of cells, and a
+/// function that called itself would overwrite the cells its caller was still using. The
+/// fix is a stack of cells rather than a fixed row of them; until then a program with
+/// functions in it goes to the VM, which has no such problem.
+pub fn accepts(program: &Checked) -> Result<(), Declined> {
+    if !program.funcs.is_empty() {
+        return Err(Declined {
+            because: "it has functions, and cells are not yet per-call".to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -415,6 +424,11 @@ impl<'ctx> Emitter<'ctx> {
             }
 
             Stmt::If { arms, otherwise, .. } => self.if_stmt(arms, otherwise),
+
+            // `accepts` has already turned away any program that has these in it.
+            Stmt::Return { .. } | Stmt::Call { .. } => {
+                unreachable!("a program with functions is declined before it gets here")
+            }
         }
     }
 
@@ -754,6 +768,10 @@ impl<'ctx> Emitter<'ctx> {
                     )
                     .expect("an extend");
                 (Emitted::Native(widened.into()), Ty::Bool)
+            }
+
+            Expr::Call { .. } => {
+                unreachable!("a program with functions is declined before it gets here")
             }
 
             Expr::Not { operand, .. } => {

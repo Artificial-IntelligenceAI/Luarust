@@ -13,10 +13,26 @@ use luarust_parse::ast::{BinOp, CmpOp, LogicOp, Ty};
 #[derive(Clone, Debug)]
 pub struct Checked {
     pub stmts: Vec<Stmt>,
+    /// Every function in the program, in the order they were declared. A call carries
+    /// the index rather than the name -- names were the front end's business.
+    pub funcs: Vec<Function>,
     /// How many variables the program needs room for.
     pub slots: usize,
     /// What to do when a whole number will not fit.
     pub overflow: Overflow,
+}
+
+/// One function, with its own slots. The first `params` of them are its parameters, in
+/// order, which is what lets a call put its arguments straight where they belong.
+#[derive(Clone, Debug)]
+pub struct Function {
+    pub name: String,
+    pub params: Vec<Ty>,
+    /// `None` when it answers nothing.
+    pub returns: Option<Ty>,
+    pub slots: usize,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +52,10 @@ pub enum Stmt {
     /// Ask, in order, and run the first body whose condition held. `otherwise` is the
     /// `else`, and is empty when there was none.
     If { arms: Vec<Arm>, otherwise: Vec<Stmt>, span: Span },
+    /// Leave the function, with a value when it has one to give.
+    Return { value: Option<Expr>, span: Span },
+    /// Call something for what it does. Whatever it answers, if anything, is dropped.
+    Call { func: usize, args: Vec<Expr>, span: Span },
 }
 
 /// One condition and what to do about it.
@@ -68,6 +88,9 @@ pub enum Expr {
     /// which is what lets a condition guard the one after it.
     Logic { op: LogicOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     Not { operand: Box<Expr>, span: Span },
+    /// `func` indexes [`Checked::funcs`]; `ty` is what that function answers, which a
+    /// call in a value position must have.
+    Call { func: usize, ty: Ty, args: Vec<Expr>, span: Span },
 }
 
 impl Expr {
@@ -79,6 +102,7 @@ impl Expr {
             | Expr::Binary { ty, .. }
             | Expr::Neg { ty, .. } => *ty,
             Expr::Compare { .. } | Expr::Logic { .. } | Expr::Not { .. } => Ty::Bool,
+            Expr::Call { ty, .. } => *ty,
         }
     }
 
@@ -91,6 +115,7 @@ impl Expr {
             | Expr::Neg { span, .. }
             | Expr::Compare { span, .. }
             | Expr::Logic { span, .. }
+            | Expr::Call { span, .. }
             | Expr::Not { span, .. } => *span,
         }
     }

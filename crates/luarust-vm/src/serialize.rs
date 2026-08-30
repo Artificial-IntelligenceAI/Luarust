@@ -25,7 +25,7 @@
 //! complaint and not a crash — and "run anywhere" means files will arrive from places
 //! nobody vouched for.
 
-use crate::chunk::{Chunk, Op};
+use crate::chunk::{Chunk, Op, Routine};
 use luarust_core::value::{Overflow, Value};
 use luarust_diag::Span;
 use luarust_num::Uint;
@@ -36,7 +36,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -130,6 +130,22 @@ pub fn write_with(chunk: &Chunk, path: &str, source: &str, embed_source: bool) -
         put_u32(&mut out, span.start as u32);
         put_u32(&mut out, span.end as u32);
     }
+
+    put_u32(&mut out, chunk.funcs.len() as u32);
+    for routine in &chunk.funcs {
+        put_u32(&mut out, routine.registers as u32);
+        put_u32(&mut out, routine.params as u32);
+        put_u32(&mut out, u32::from(routine.returns));
+        put_u32(&mut out, routine.code.len() as u32);
+        for op in &routine.code {
+            put_op(&mut out, *op);
+        }
+        put_u32(&mut out, routine.spans.len() as u32);
+        for span in &routine.spans {
+            put_u32(&mut out, span.start as u32);
+            put_u32(&mut out, span.end as u32);
+        }
+    }
     out
 }
 
@@ -213,6 +229,18 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             out.push(6);
             put_u16(out, src);
         }
+        Op::Call { func, base, argc, dst } => {
+            out.push(15);
+            put_u32(out, func);
+            put_u16(out, base);
+            put_u16(out, argc);
+            put_u16(out, dst);
+        }
+        Op::Return { src } => {
+            out.push(16);
+            put_u16(out, src);
+        }
+        Op::ReturnNothing => out.push(17),
         Op::Not { dst, src } => {
             out.push(12);
             put_u16(out, dst);
@@ -404,7 +432,29 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
         spans.push(Span { start, end });
     }
 
-    let chunk = Chunk { code, spans, consts, texts, registers, overflow };
+    let count = cursor.u32()?;
+    let mut funcs = Vec::with_capacity(count.min(4096) as usize);
+    for _ in 0..count {
+        let registers = cursor.u32()? as usize;
+        let params = cursor.u32()? as usize;
+        let returns = cursor.u32()? != 0;
+
+        let n = cursor.u32()?;
+        let mut code = Vec::with_capacity(n.min(65536) as usize);
+        for _ in 0..n {
+            code.push(cursor.op()?);
+        }
+        let n = cursor.u32()?;
+        let mut spans = Vec::with_capacity(n.min(65536) as usize);
+        for _ in 0..n {
+            let start = cursor.u32()? as usize;
+            let end = cursor.u32()? as usize;
+            spans.push(Span { start, end });
+        }
+        funcs.push(Routine { code, spans, registers, params, returns });
+    }
+
+    let chunk = Chunk { code, spans, consts, texts, registers, overflow, funcs };
     check(&chunk)?;
     Ok(Loaded { chunk, path, source })
 }
@@ -415,22 +465,51 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
 /// the compiler never produces an index that is wrong. A file from somewhere else has made
 /// no such promise, so this is where that promise is either kept or refused.
 fn check(chunk: &Chunk) -> Result<(), Broken> {
-    if chunk.spans.len() != chunk.code.len() {
+    check_code(chunk, &chunk.code, &chunk.spans, chunk.registers)?;
+
+    // The main code halts; a routine returns. Each is checked against its own registers
+    // and its own instruction count, since neither shares those with anybody.
+    for routine in &chunk.funcs {
+        check_code(chunk, &routine.code, &routine.spans, routine.registers)?;
+        if routine.params > routine.registers {
+            return Err(Broken::OutOfRange {
+                what: "parameters in a function with registers",
+                index: routine.params as u64,
+                of: routine.registers,
+            });
+        }
+    }
+
+    // The machine runs until it is told to stop, so a chunk that never says so would run
+    // off the end of its own instructions.
+    if !chunk.code.iter().any(|op| matches!(op, Op::Halt)) {
+        return Err(Broken::Truncated);
+    }
+    Ok(())
+}
+
+fn check_code(
+    chunk: &Chunk,
+    code: &[Op],
+    spans: &[Span],
+    registers: usize,
+) -> Result<(), Broken> {
+    if spans.len() != code.len() {
         return Err(Broken::OutOfRange {
             what: "one span per instruction, and finds",
-            index: chunk.spans.len() as u64,
-            of: chunk.code.len(),
+            index: spans.len() as u64,
+            of: code.len(),
         });
     }
-    if chunk.code.is_empty() {
+    if code.is_empty() {
         return Err(Broken::Truncated);
     }
 
     let register = |r: u16| -> Result<(), Broken> {
-        if (r as usize) < chunk.registers {
+        if (r as usize) < registers {
             Ok(())
         } else {
-            Err(Broken::OutOfRange { what: "register", index: r as u64, of: chunk.registers })
+            Err(Broken::OutOfRange { what: "register", index: r as u64, of: registers })
         }
     };
     let constant = |k: u32| -> Result<(), Broken> {
@@ -450,14 +529,21 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
     // A jump may land exactly one past the end only if that is where a `Halt` is, which it
     // never is, so every target has to be a real instruction.
     let target = |t: u32| -> Result<(), Broken> {
-        if (t as usize) < chunk.code.len() {
+        if (t as usize) < code.len() {
             Ok(())
         } else {
-            Err(Broken::OutOfRange { what: "instruction", index: t as u64, of: chunk.code.len() })
+            Err(Broken::OutOfRange { what: "instruction", index: t as u64, of: code.len() })
+        }
+    };
+    let routine = |f: u32| -> Result<(), Broken> {
+        if (f as usize) < chunk.funcs.len() {
+            Ok(())
+        } else {
+            Err(Broken::OutOfRange { what: "function", index: f as u64, of: chunk.funcs.len() })
         }
     };
 
-    for op in &chunk.code {
+    for op in code {
         match *op {
             Op::Const { dst, konst } => {
                 register(dst)?;
@@ -485,14 +571,26 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
                 target(to)?;
             }
             Op::Jump { target: to } => target(to)?,
+            Op::Call { func, base, argc, dst } => {
+                routine(func)?;
+                register(dst)?;
+                // Every argument register, not only the first, since the call reads the
+                // whole run of them.
+                for n in 0..argc {
+                    register(base + n)?;
+                }
+                if usize::from(argc) != chunk.funcs[func as usize].params {
+                    return Err(Broken::OutOfRange {
+                        what: "arguments for a function taking",
+                        index: argc as u64,
+                        of: chunk.funcs[func as usize].params,
+                    });
+                }
+            }
+            Op::Return { src } => register(src)?,
+            Op::ReturnNothing => {}
             Op::Halt => {}
         }
-    }
-
-    // The machine runs until it is told to stop, so a chunk that never says so would run
-    // off the end of its own instructions.
-    if !chunk.code.iter().any(|op| matches!(op, Op::Halt)) {
-        return Err(Broken::Truncated);
     }
     Ok(())
 }
@@ -629,6 +727,14 @@ impl<'a> Cursor<'a> {
                 rhs: self.u16()?,
             },
             12 => Op::Not { dst: self.u16()?, src: self.u16()? },
+            15 => Op::Call {
+                func: self.u32()?,
+                base: self.u16()?,
+                argc: self.u16()?,
+                dst: self.u16()?,
+            },
+            16 => Op::Return { src: self.u16()? },
+            17 => Op::ReturnNothing,
             13 => Op::JumpIfFalse { cond: self.u16()?, target: self.u32()? },
             14 => Op::JumpIfTrue { cond: self.u16()?, target: self.u32()? },
             other => Err(Broken::Unknown { what: "instruction", value: other as u64 })?,

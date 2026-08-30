@@ -174,18 +174,27 @@ impl<'a> Parser<'a> {
             Some("print") => self.print_stmt().map(Stmt::Print),
             Some("loop") => self.loop_stmt().map(Stmt::Loop),
             Some("if") => self.if_stmt().map(Stmt::If),
+            Some("fn") => self.func_decl().map(Stmt::Func),
+            Some("return") => self.return_stmt().map(Stmt::Return),
+            // Anything else that is a bare word before a list is a call written for its
+            // effect. `print` is the one the language ships with; the rest are yours.
+            Some(_) if self.peek_at(1).kind == Kind::OpenList => {
+                let call = self.call()?;
+                self.expect(Kind::Semicolon, "a statement ends with `;`")?;
+                Ok(Stmt::Call(call))
+            }
             Some("defaults") => self.defaults_stmt().map(Stmt::Defaults),
             Some(other) => self.fail(
                 Diagnostic::new("E0101", format!("`{other}` does not begin a statement."))
                     .primary(start.span, "written here")
-                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if` or `defaults`")
+                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if`, `fn`, `return` or `defaults`")
                     .tip("a name is written in quotes, so a bare word here is being read as a keyword.")
                     .fix("check the spelling, or put the statement's keyword in front of it."),
             ),
             None => self.fail(
                 Diagnostic::new("E0101", "a statement was expected here.")
                     .primary(start.span, format!("{} is here instead", start.kind.describe()))
-                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if` or `defaults`")
+                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if`, `fn`, `return` or `defaults`")
                     .fix("begin the statement with one of those words."),
             ),
         }
@@ -513,6 +522,133 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `fn.local.i32 ['bigger'] [i32 'a', i32 'b'] { … }`
+    ///
+    /// The chain says the visibility and what it answers. `nothing` there is the way to
+    /// say it answers nothing -- absence is an error, because in this language a thing
+    /// left unsaid never quietly means something.
+    fn func_decl(&mut self) -> Result<Func> {
+        let start = self.advance().span; // `fn`
+        let chain = self.chain_words();
+
+        let mut visibility: Option<(Visibility, Span)> = None;
+        let mut returns: Option<(Option<Ty>, Span)> = None;
+        for (word, span) in &chain {
+            if let Some(found) = Visibility::from_word(word) {
+                visibility = Some((found, *span));
+            } else if word == "nothing" {
+                returns = Some((None, *span));
+            } else if let Some(found) = Ty::from_word(word) {
+                returns = Some((Some(found), *span));
+            } else {
+                self.errors.push(
+                    Diagnostic::new("E0120", format!("`{word}` is not part of a function."))
+                        .primary(*span, "written here")
+                        .rule("a function's chain says who can see it and what it answers")
+                        .fix("use `local`, `global` or `public`, then a type or `nothing`."),
+                );
+            }
+        }
+
+        let Some((returns, returns_span)) = returns else {
+            return self.fail(
+                Diagnostic::new("E0121", "this function does not say what it answers.")
+                    .primary(start, "written here")
+                    .rule("a function states its answer, and says `nothing` when there is none")
+                    .tip("a chain with no type in it is not the same as a function answering nothing -- one is left unsaid and the other is said.")
+                    .fix("write a type, as in `fn.local.i32`, or `fn.local.nothing`."),
+            );
+        };
+
+        self.expect(Kind::OpenList, "a function is named in `[ ]`")?;
+        let name_token = self.expect(Kind::Name, "a function's name is written in quotes")?;
+        let name = Ident {
+            text: name_value(self.text(name_token)).to_string(),
+            span: name_token.span,
+        };
+        self.expect(Kind::CloseList, "a list of names closes with `]`")?;
+
+        // The parameters. An empty pair of brackets is a function that takes nothing.
+        self.expect(Kind::OpenList, "a function takes its parameters in `[ ]`")?;
+        let mut params = Vec::new();
+        if self.peek_kind() != Kind::CloseList {
+            loop {
+                params.push(self.param()?);
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Kind::CloseList, "a list of parameters closes with `]`")?;
+
+        let (body, end) = self.braced_body("a function")?;
+
+        Ok(Func {
+            span: start.to(end),
+            name,
+            visibility: visibility.map_or(Visibility::Restricted, |(v, _)| v),
+            visibility_span: visibility.map(|(_, span)| span),
+            returns,
+            returns_span,
+            params,
+            body,
+        })
+    }
+
+    /// `name[a, b]` — a call, in a value slot or inside a math block alike.
+    fn call(&mut self) -> Result<Expr> {
+        let word = self.advance();
+        let name = Ident { text: self.text(word).to_string(), span: word.span };
+        self.expect(Kind::OpenList, "a call takes its arguments in `[ ]`")?;
+        let mut args = Vec::new();
+        if self.peek_kind() != Kind::CloseList {
+            loop {
+                args.push(self.value_expr()?);
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+        }
+        let close = self.expect(Kind::CloseList, "a list of arguments closes with `]`")?;
+        Ok(Expr::Call { name, args, span: word.span.to(close.span) })
+    }
+
+    /// `i32 'a'` — the type, then the name it answers to inside the body.
+    fn param(&mut self) -> Result<Param> {
+        let start = self.peek();
+        let Some(ty) = self.word().and_then(Ty::from_word) else {
+            return self.fail(
+                Diagnostic::new("E0122", "a parameter was expected here.")
+                    .primary(start.span, format!("{} is here instead", start.kind.describe()))
+                    .rule("a parameter states its type and then its name")
+                    .fix("write a type and a name, as in `i32 'n'`."),
+            );
+        };
+        let ty_span = self.advance().span;
+        let name_token = self.expect(Kind::Name, "a parameter's name is written in quotes")?;
+        Ok(Param {
+            span: ty_span.to(name_token.span),
+            ty,
+            ty_span,
+            name: Ident {
+                text: name_value(self.text(name_token)).to_string(),
+                span: name_token.span,
+            },
+        })
+    }
+
+    /// `return;` or `return <value>;`
+    fn return_stmt(&mut self) -> Result<Return> {
+        let start = self.advance().span; // `return`
+        if self.peek_kind() == Kind::Semicolon {
+            let end = self.advance().span;
+            return Ok(Return { span: start.to(end), value: None });
+        }
+        let value = self.value_expr()?;
+        let end = self.expect(Kind::Semicolon, "a statement ends with `;`")?;
+        Ok(Return { span: start.to(end.span), value: Some(value) })
+    }
+
     /// `if [ … ] { … } else-if [ … ] { … } else { … }`
     ///
     /// The `if` and its `else-if`s are the same shape and are kept in one list. `else`
@@ -664,6 +800,9 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Math { inner: Box::new(inner), span: start.to(close.span) })
             }
             Kind::Word if self.word() == Some("time") => self.time_now(),
+            // A bare word before a list is a call. A variable is always quoted, so
+            // there is nothing else a bare word in front of `[` could be.
+            Kind::Word if self.peek_at(1).kind == Kind::OpenList => self.call(),
             _ => {
                 let found = self.peek();
                 self.fail(
@@ -913,6 +1052,9 @@ impl<'a> Parser<'a> {
                 Ok(inner)
             }
             Kind::Word if self.word() == Some("time") => self.time_now(),
+            // A bare word before a list is a call. A variable is always quoted, so
+            // there is nothing else a bare word in front of `[` could be.
+            Kind::Word if self.peek_at(1).kind == Kind::OpenList => self.call(),
             _ => {
                 let found = self.peek();
                 self.fail(
@@ -975,6 +1117,10 @@ mod tests {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }
             Expr::Not { operand, .. } => format!("(not {})", show(operand)),
+            Expr::Call { name, args, .. } => {
+                let shown: Vec<String> = args.iter().map(show).collect();
+                format!("({} {})", name.text, shown.join(" "))
+            }
         }
     }
 
@@ -1195,8 +1341,11 @@ mod tests {
 
     #[test]
     fn a_statement_that_starts_with_the_wrong_word_is_reported() {
-        assert_eq!(codes("wobble ['x'];"), ["E0101"]);
+        assert_eq!(codes("wobble 'x';"), ["E0101"]);
         assert_eq!(codes("'x' = [|1|];"), ["E0101"]);
+        // With a list after it, it is a call and not a mystery: the parser takes it and
+        // the checker is the one that says there is no such function.
+        clean("wobble ['x'];");
     }
 
     #[test]
@@ -1217,7 +1366,7 @@ mod tests {
     fn one_bad_statement_does_not_swallow_the_rest() {
         // Three separate problems in one file, all found.
         let source = "var.local ['a'] = [|1|];\n\
-                      wobble ['b'];\n\
+                      wobble 'b';\n\
                       var.local.global.b16 ['c'] = [|1|];\n\
                       print['c'];\n";
         let out = parse_str(source);
@@ -1308,6 +1457,58 @@ mod tests {
         // `!=`, and it can only ever appear after something.
         assert_eq!(math("'a' not= 'b'"), "(!= a b)");
         assert_eq!(math("not 'a' not= 'b'"), "(not (!= a b))");
+    }
+
+    #[test]
+    fn a_function_says_who_sees_it_and_what_it_answers() {
+        let program = clean(
+            "fn.local.i32 ['bigger'] [i32 'a', i32 'b'] {\n\
+                 if [math { 'a' > 'b' }] { return 'a'; }\n\
+                 return 'b';\n\
+             }",
+        );
+        let Stmt::Func(func) = &program.stmts[0] else { panic!("a function") };
+        assert_eq!(func.name.text, "bigger");
+        assert_eq!(func.visibility, Visibility::Local);
+        assert_eq!(func.returns, Some(Ty::I32));
+        assert_eq!(func.params.len(), 2);
+        assert_eq!(func.params[0].name.text, "a");
+        assert_eq!(func.params[1].ty, Ty::I32);
+    }
+
+    #[test]
+    fn a_function_may_answer_nothing_but_must_say_so() {
+        let program = clean("fn.local.nothing ['greet'] [str 'who'] { print['who']; }");
+        let Stmt::Func(func) = &program.stmts[0] else { panic!("a function") };
+        assert_eq!(func.returns, None);
+        // Leaving it unsaid is not the same as saying nothing.
+        assert_eq!(codes("fn.local ['greet'] [str 'who'] { }"), ["E0121"]);
+    }
+
+    #[test]
+    fn a_function_may_take_nothing_at_all() {
+        let program = clean("fn.local.i32 ['answer'] [] { return |42|; }");
+        let Stmt::Func(func) = &program.stmts[0] else { panic!("a function") };
+        assert!(func.params.is_empty());
+    }
+
+    #[test]
+    fn a_bare_word_before_a_list_is_a_call_and_a_quoted_one_is_not() {
+        // `double[…]` calls; `'double'` would be a variable of that name.
+        assert_eq!(math("double[|5|]"), "(double |5|)");
+        assert_eq!(math("'a' + double[|5|, 'b']"), "(+ a (double |5| b))");
+        // And a call is a value in its own right, not only a math term.
+        let program = clean("var.local.i32 ['n'] = [double[|5|]];");
+        let Stmt::Var(var) = &program.stmts[0] else { panic!("a declaration") };
+        assert!(matches!(&var.values[0], Expr::Call { .. }));
+    }
+
+    #[test]
+    fn return_may_carry_a_value_or_nothing() {
+        let program = clean("fn.local.nothing ['f'] [] { return; }");
+        let Stmt::Func(func) = &program.stmts[0] else { panic!("a function") };
+        let Stmt::Return(ret) = &func.body[0] else { panic!("a return") };
+        assert!(ret.value.is_none());
     }
 
 }

@@ -14,6 +14,14 @@ use luarust_num::Uint;
 use luarust_num::binary::{self, Comparison, Format, Round};
 use crate::{BinOp, CmpOp, Ty};
 
+/// How deep calls may go before a program is stopped.
+///
+/// The same number everywhere, and that matters more than the number itself: if the
+/// interpreter gave up at one depth and the machine code at another, the same program
+/// would end two different ways and the three paths would stop being comparable. It is
+/// bounded by the tree-walker, whose frames are the real stack.
+pub const DEPTH_LIMIT: usize = 2_000;
+
 /// The working width every float format fits in. `b256` needs the most.
 pub type Bits = Uint<8>;
 

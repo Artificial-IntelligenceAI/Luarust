@@ -7,9 +7,9 @@
 //! which has to survive its body and is parked below the body's temporaries for exactly
 //! that reason.
 
-use crate::chunk::{Chunk, Op, Reg};
+use crate::chunk::{Chunk, Op, Reg, Routine};
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
-use luarust_check::value::{Value, one_of};
+use luarust_check::value::{Overflow, Value, one_of};
 use luarust_diag::Span;
 use luarust_parse::ast::{BinOp, LogicOp};
 
@@ -21,8 +21,33 @@ use luarust_parse::ast::{BinOp, LogicOp};
 /// costs a load and a remainder rather than a remainder — and it is the innermost
 /// instruction in the hottest place a program has.
 pub fn compile(program: &Checked) -> Chunk {
+    // Two passes: the first only to learn which constants the top level uses, the second
+    // to preload them into registers before anything runs.
     let scouted = Compiler::new(program, Vec::new()).run(program);
-    Compiler::new(program, scouted.consts).run(program)
+    let mut chunk = Compiler::new(program, scouted.consts).run(program);
+
+    // Each function gets its own code and its own register file. Constants are not
+    // preloaded inside one -- the pool is shared and a function uses an arbitrary part of
+    // it, so there is no prefix to hoist. A `Const` per use instead, which is one
+    // instruction and the obvious thing to improve later.
+    for func in &program.funcs {
+        let mut inner = Compiler::for_function(func, std::mem::take(&mut chunk.consts));
+        inner.chunk.texts = std::mem::take(&mut chunk.texts);
+        inner.block(&func.body);
+        if func.returns.is_none() {
+            inner.emit(Op::ReturnNothing, func.span);
+        }
+        chunk.consts = std::mem::take(&mut inner.chunk.consts);
+        chunk.texts = std::mem::take(&mut inner.chunk.texts);
+        chunk.funcs.push(Routine {
+            code: inner.chunk.code,
+            spans: inner.chunk.spans,
+            registers: inner.chunk.registers,
+            params: func.params.len(),
+            returns: func.returns.is_some(),
+        });
+    }
+    chunk
 }
 
 struct Compiler {
@@ -51,11 +76,34 @@ impl Compiler {
                 texts: Vec::new(),
                 registers: temps as usize,
                 overflow: program.overflow,
+                funcs: Vec::new(),
             },
             floor: temps,
             next: temps,
             const_base: base,
             preloaded,
+        }
+    }
+
+    /// A compiler for one function body. Its registers begin with the parameters, in
+    /// order, which is what lets a call put the arguments straight where they belong.
+    fn for_function(func: &luarust_check::ir::Function, consts: Vec<Value>) -> Self {
+        let base = func.slots as Reg;
+        Self {
+            chunk: Chunk {
+                code: Vec::new(),
+                spans: Vec::new(),
+                consts,
+                texts: Vec::new(),
+                registers: func.slots,
+                overflow: Overflow::Wrap,
+                funcs: Vec::new(),
+            },
+            floor: base,
+            next: base,
+            const_base: base,
+            // Nothing preloaded, so `const_operand` emits a `Const` where it is used.
+            preloaded: 0,
         }
     }
 
@@ -227,7 +275,41 @@ impl Compiler {
                 }
                 self.release();
             }
+
+            Stmt::Return { value, span } => {
+                match value {
+                    Some(expr) => {
+                        let mark = self.next;
+                        let src = self.operand(expr, *span);
+                        self.emit(Op::Return { src }, *span);
+                        self.next = mark;
+                    }
+                    None => {
+                        self.emit(Op::ReturnNothing, *span);
+                    }
+                }
+            }
+
+            // Called for what it does. The answer, if there is one, goes to a temporary
+            // that is released immediately.
+            Stmt::Call { func, args, span } => {
+                let mark = self.next;
+                let (base, argc) = self.arguments(args, *span);
+                let dst = self.temp();
+                self.emit(Op::Call { func: *func as u32, base, argc, dst }, *span);
+                self.next = mark;
+            }
         }
+    }
+
+    /// Put the arguments in consecutive registers, which is how a call hands them over.
+    fn arguments(&mut self, args: &[Expr], span: Span) -> (Reg, u16) {
+        let base = self.next;
+        for arg in args {
+            let reg = self.temp();
+            self.expr(arg, reg, span);
+        }
+        (base, args.len() as u16)
     }
 
     /// A register holding this expression's value, without copying when there is already
@@ -310,6 +392,13 @@ impl Compiler {
                 self.land(settled);
 
                 self.emit(Op::Move { dst, src: held }, *span);
+                self.next = mark;
+            }
+
+            Expr::Call { func, args, span, .. } => {
+                let mark = self.next;
+                let (base, argc) = self.arguments(args, *span);
+                self.emit(Op::Call { func: *func as u32, base, argc, dst }, *span);
                 self.next = mark;
             }
 
