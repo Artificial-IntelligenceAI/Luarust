@@ -180,7 +180,7 @@ impl Compiler {
                     *span,
                 );
                 self.emit(
-                    Op::Binary { op: BinOp::Add, dst: counter, lhs: counter, rhs: step },
+                    Op::Binary { op: BinOp::Add, ty: *ty, dst: counter, lhs: counter, rhs: step },
                     *span,
                 );
                 self.emit(Op::Jump { target: top }, *span);
@@ -243,13 +243,13 @@ impl Compiler {
                 self.emit(Op::Neg { dst, src }, *span);
             }
 
-            Expr::Binary { op, lhs, rhs, span, .. } => {
+            Expr::Binary { op, ty, lhs, rhs, span } => {
                 // Take both sides before writing the answer, since `dst` may well be one
                 // of them -- `set ['sum'] = [math { 'sum' + 'i' }]` is the common case.
                 let mark = self.next;
                 let a = self.operand(lhs, *span);
                 let b = self.operand(rhs, *span);
-                self.emit(Op::Binary { op: *op, dst, lhs: a, rhs: b }, *span);
+                self.emit(Op::Binary { op: *op, ty: *ty, dst, lhs: a, rhs: b }, *span);
                 self.next = mark;
             }
         }

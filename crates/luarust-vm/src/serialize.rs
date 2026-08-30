@@ -31,7 +31,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -160,9 +160,10 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_u16(out, dst);
             put_u16(out, src);
         }
-        Op::Binary { op, dst, lhs, rhs } => {
+        Op::Binary { op, ty, dst, lhs, rhs } => {
             out.push(2);
             out.push(op_tag(op));
+            out.push(ty_tag(ty));
             put_u16(out, dst);
             put_u16(out, lhs);
             put_u16(out, rhs);
@@ -481,6 +482,7 @@ impl<'a> Cursor<'a> {
             1 => Op::Move { dst: self.u16()?, src: self.u16()? },
             2 => Op::Binary {
                 op: self.binop()?,
+                ty: self.ty()?,
                 dst: self.u16()?,
                 lhs: self.u16()?,
                 rhs: self.u16()?,

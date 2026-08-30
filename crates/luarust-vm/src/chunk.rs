@@ -22,7 +22,9 @@ pub enum Op {
     Const { dst: Reg, konst: u32 },
     /// Copy one register to another.
     Move { dst: Reg, src: Reg },
-    Binary { op: BinOp, dst: Reg, lhs: Reg, rhs: Reg },
+    /// The type is here because the checker already knew it. Working it out again from
+    /// the values, once per operation, was costing more than the arithmetic did.
+    Binary { op: BinOp, ty: Ty, dst: Reg, lhs: Reg, rhs: Reg },
     Neg { dst: Reg, src: Reg },
     /// Read the clock into a register.
     TimeNow { dst: Reg, ty: Ty },
@@ -78,8 +80,8 @@ impl Chunk {
                     format!("const        r{dst}, k{konst}    -- {}", self.consts[konst as usize])
                 }
                 Op::Move { dst, src } => format!("move         r{dst}, r{src}"),
-                Op::Binary { op, dst, lhs, rhs } => {
-                    format!("{:<12} r{dst}, r{lhs}, r{rhs}", name_of(op))
+                Op::Binary { op, ty, dst, lhs, rhs } => {
+                    format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
                 }
                 Op::Neg { dst, src } => format!("neg          r{dst}, r{src}"),
                 Op::TimeNow { dst, ty } => format!("time.now     r{dst}    -- {}", ty.word()),

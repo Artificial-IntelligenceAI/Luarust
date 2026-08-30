@@ -20,7 +20,7 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
-use luarust_check::value::{Stopped, Value, binary_op, compare, format_of, negate};
+use luarust_check::value::{Stopped, Value, binary_op, compare, format_of, int_op, negate};
 use luarust_num::binary::{self, Comparison, Round};
 use std::io::Write;
 use std::time::Instant;
@@ -50,7 +50,21 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 registers[dst as usize] = registers[src as usize].clone();
             }
 
-            Op::Binary { op, dst, lhs, rhs } => {
+            // Integers go straight to the arithmetic with their raw bits, since the
+            // instruction already says what width they are. Everything else goes the long
+            // way round, which for a b256 divide is nothing next to the divide.
+            Op::Binary { op, ty, dst, lhs, rhs } if ty.is_integer() => {
+                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+                    (&registers[lhs as usize], &registers[rhs as usize])
+                else {
+                    unreachable!("the checker said these are integers")
+                };
+                let bits = int_op(op, ty, *a, *b, chunk.overflow)
+                    .map_err(|fault| Stopped { fault, span })?;
+                registers[dst as usize] = Value::Num { ty, bits };
+            }
+
+            Op::Binary { op, dst, lhs, rhs, .. } => {
                 let value = binary_op(
                     op,
                     &registers[lhs as usize],
