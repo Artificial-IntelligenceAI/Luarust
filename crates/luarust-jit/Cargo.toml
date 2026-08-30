@@ -13,6 +13,7 @@ luarust-check = { path = "../luarust-check" }
 luarust-diag = { path = "../luarust-diag" }
 luarust-num = { path = "../luarust-num" }
 luarust-parse = { path = "../luarust-parse" }
+luarust-vm = { path = "../luarust-vm" }
 
 [dev-dependencies]
 luarust-interp = { path = "../luarust-interp" }

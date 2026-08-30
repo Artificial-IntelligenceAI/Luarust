@@ -20,12 +20,15 @@ pub type Reg = u16;
 pub enum Op {
     /// Put a constant in a register.
     Const { dst: Reg, konst: u32 },
-    /// Copy one register to another.
-    Move { dst: Reg, src: Reg },
+    /// Copy one register to another. The type is here for the same reason it is on
+    /// `Binary`: whatever reads this chunk should not have to work out again what the
+    /// checker already knew. The VM could manage without it, since its values carry their
+    /// own type; the JIT cannot, because a register is just bits by then.
+    Move { dst: Reg, src: Reg, ty: Ty },
     /// The type is here because the checker already knew it. Working it out again from
     /// the values, once per operation, was costing more than the arithmetic did.
     Binary { op: BinOp, ty: Ty, dst: Reg, lhs: Reg, rhs: Reg },
-    Neg { dst: Reg, src: Reg },
+    Neg { dst: Reg, src: Reg, ty: Ty },
     /// Answers `bool`. `operands` is what the two sides are, which is what decides how
     /// they get compared.
     Compare { op: CmpOp, operands: Ty, dst: Reg, lhs: Reg, rhs: Reg },
@@ -34,12 +37,12 @@ pub enum Op {
     /// Write a piece of text from the pool.
     PrintText { text: u32 },
     /// Stringify a register and write it.
-    PrintValue { src: Reg },
+    PrintValue { src: Reg, ty: Ty },
     /// Call a function. Its arguments are the `argc` registers from `base`, and what it
     /// answers lands in `dst`. `dst` is ignored when the function answers nothing.
     Call { func: u32, base: Reg, argc: u16, dst: Reg },
     /// Leave the function, with the value in `src` when there is one.
-    Return { src: Reg },
+    Return { src: Reg, ty: Ty },
     ReturnNothing,
     /// Turn a `bool` register around.
     Not { dst: Reg, src: Reg },
@@ -47,10 +50,11 @@ pub enum Op {
     JumpIfFalse { cond: Reg, target: u32 },
     /// Jump if a `bool` register is true.
     JumpIfTrue { cond: Reg, target: u32 },
-    /// Jump if `lhs` is greater than `rhs`.
-    JumpIfGreater { lhs: Reg, rhs: Reg, target: u32 },
+    /// Jump if `lhs` is greater than `rhs`. `operands` is what the two are, which is
+    /// what decides how they get compared.
+    JumpIfGreater { lhs: Reg, rhs: Reg, ty: Ty, target: u32 },
     /// Jump if the two are equal.
-    JumpIfEqual { lhs: Reg, rhs: Reg, target: u32 },
+    JumpIfEqual { lhs: Reg, rhs: Reg, ty: Ty, target: u32 },
     Jump { target: u32 },
     Halt,
 }
@@ -77,9 +81,10 @@ pub struct Routine {
     pub code: Vec<Op>,
     pub spans: Vec<Span>,
     pub registers: usize,
-    /// The first `params` registers hold the arguments, in order.
-    pub params: usize,
-    pub returns: bool,
+    /// The types of the arguments, which are also the first registers, in order.
+    pub params: Vec<Ty>,
+    /// What it answers, when it answers anything.
+    pub returns: Option<Ty>,
 }
 
 impl Chunk {
@@ -108,11 +113,16 @@ impl Chunk {
         }
 
         for (index, routine) in self.funcs.iter().enumerate() {
-            let answers = if routine.returns { "answers a value" } else { "answers nothing" };
+            let answers = match routine.returns {
+                Some(ty) => format!("answers {}", ty.word()),
+                None => "answers nothing".to_string(),
+            };
+            let written: Vec<&str> = routine.params.iter().map(|ty| ty.word()).collect();
             let _ = writeln!(
                 out,
-                "\nf{index}: {} registers, {} of them parameters, {answers}",
-                routine.registers, routine.params
+                "\nf{index}: {} registers, taking [{}], {answers}",
+                routine.registers,
+                written.join(", ")
             );
             for (at, op) in routine.code.iter().enumerate() {
                 let _ = writeln!(out, "  {at:>4}  {}", self.show(*op));
@@ -127,11 +137,13 @@ impl Chunk {
             Op::Const { dst, konst } => {
                 format!("const        r{dst}, k{konst}    -- {}", self.consts[konst as usize])
             }
-            Op::Move { dst, src } => format!("move         r{dst}, r{src}"),
+            Op::Move { dst, src, ty } => {
+                format!("move         r{dst}, r{src}    -- {}", ty.word())
+            }
             Op::Binary { op, ty, dst, lhs, rhs } => {
                 format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
             }
-            Op::Neg { dst, src } => format!("neg          r{dst}, r{src}"),
+            Op::Neg { dst, src, ty } => format!("neg          r{dst}, r{src}    -- {}", ty.word()),
             Op::Not { dst, src } => format!("not          r{dst}, r{src}"),
             Op::JumpIfFalse { cond, target } => format!("jump.false   r{cond}, {target}"),
             Op::JumpIfTrue { cond, target } => format!("jump.true    r{cond}, {target}"),
@@ -151,18 +163,18 @@ impl Chunk {
             Op::PrintText { text } => {
                 format!("print.text   t{text}    -- {:?}", self.texts[text as usize])
             }
-            Op::PrintValue { src } => format!("print.value  r{src}"),
-            Op::JumpIfGreater { lhs, rhs, target } => {
-                format!("jump.gt      r{lhs}, r{rhs}, {target}")
+            Op::PrintValue { src, ty } => format!("print.value  r{src}    -- {}", ty.word()),
+            Op::JumpIfGreater { lhs, rhs, ty, target } => {
+                format!("jump.gt      r{lhs}, r{rhs}, {target}    -- {}", ty.word())
             }
-            Op::JumpIfEqual { lhs, rhs, target } => {
-                format!("jump.eq      r{lhs}, r{rhs}, {target}")
+            Op::JumpIfEqual { lhs, rhs, ty, target } => {
+                format!("jump.eq      r{lhs}, r{rhs}, {target}    -- {}", ty.word())
             }
             Op::Jump { target } => format!("jump         {target}"),
             Op::Call { func, base, argc, dst } => {
                 format!("call         f{func}, r{base}..{argc}, -> r{dst}")
             }
-            Op::Return { src } => format!("return       r{src}"),
+            Op::Return { src, ty } => format!("return       r{src}    -- {}", ty.word()),
             Op::ReturnNothing => "return".to_string(),
             Op::Halt => "halt".to_string(),
         }

@@ -15,7 +15,8 @@
 //! no answer, and the disagreement would be found by the fuzzer at some unrelated moment
 //! months later.
 
-pub mod runtime;
+pub mod blocks;
+mod runtime;
 
 use inkwell::OptimizationLevel;
 use inkwell::builder::Builder;

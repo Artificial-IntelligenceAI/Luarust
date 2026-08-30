@@ -11,7 +11,7 @@ use crate::chunk::{Chunk, Op, Reg, Routine};
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Overflow, Value, one_of};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, LogicOp};
+use luarust_parse::ast::{BinOp, LogicOp, Ty};
 
 /// Compile a checked program.
 ///
@@ -43,8 +43,8 @@ pub fn compile(program: &Checked) -> Chunk {
             code: inner.chunk.code,
             spans: inner.chunk.spans,
             registers: inner.chunk.registers,
-            params: func.params.len(),
-            returns: func.returns.is_some(),
+            params: func.params.clone(),
+            returns: func.returns,
         });
     }
     chunk
@@ -198,8 +198,9 @@ impl Compiler {
                             self.emit(Op::PrintText { text: index }, *span);
                         }
                         Item::Value(expr) => {
+                            let ty = expr.ty();
                             let reg = self.operand(expr, *span);
-                            self.emit(Op::PrintValue { src: reg }, *span);
+                            self.emit(Op::PrintValue { src: reg, ty }, *span);
                             self.release();
                         }
                     }
@@ -222,7 +223,7 @@ impl Compiler {
 
                 // Counting down is an empty range, so leave before running anything.
                 let skip = self.emit(
-                    Op::JumpIfGreater { lhs: counter, rhs: limit, target: 0 },
+                    Op::JumpIfGreater { lhs: counter, rhs: limit, ty: *ty, target: 0 },
                     *span,
                 );
 
@@ -232,7 +233,7 @@ impl Compiler {
                 // Step only while the counter is below the bound, so a loop can reach the
                 // top of its type without the increment that would take it past.
                 let done = self.emit(
-                    Op::JumpIfEqual { lhs: counter, rhs: limit, target: 0 },
+                    Op::JumpIfEqual { lhs: counter, rhs: limit, ty: *ty, target: 0 },
                     *span,
                 );
                 self.emit(
@@ -331,8 +332,9 @@ impl Compiler {
                 match value {
                     Some(expr) => {
                         let mark = self.next;
+                        let ty = expr.ty();
                         let src = self.operand(expr, *span);
-                        self.emit(Op::Return { src }, *span);
+                        self.emit(Op::Return { src, ty }, *span);
                         self.next = mark;
                     }
                     None => {
@@ -403,10 +405,10 @@ impl Compiler {
                 self.emit(Op::Const { dst, konst: index }, span);
             }
 
-            Expr::Load { slot, .. } => {
+            Expr::Load { slot, ty, .. } => {
                 let src = *slot as Reg;
                 if src != dst {
-                    self.emit(Op::Move { dst, src }, span);
+                    self.emit(Op::Move { dst, src, ty: *ty }, span);
                 }
             }
 
@@ -414,10 +416,10 @@ impl Compiler {
                 self.emit(Op::TimeNow { dst, ty: *ty }, *span);
             }
 
-            Expr::Neg { operand, span, .. } => {
+            Expr::Neg { ty, operand, span } => {
                 let mark = self.next;
                 let src = self.operand(operand, *span);
-                self.emit(Op::Neg { dst, src }, *span);
+                self.emit(Op::Neg { dst, src, ty: *ty }, *span);
                 self.next = mark;
             }
 
@@ -451,7 +453,7 @@ impl Compiler {
                 self.expr(rhs, held, *span);
                 self.land(settled);
 
-                self.emit(Op::Move { dst, src: held }, *span);
+                self.emit(Op::Move { dst, src: held, ty: Ty::Bool }, *span);
                 self.next = mark;
             }
 

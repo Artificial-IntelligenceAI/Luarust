@@ -36,7 +36,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -145,8 +145,17 @@ pub fn write_with(
     put_u32(&mut out, chunk.funcs.len() as u32);
     for routine in &chunk.funcs {
         put_u32(&mut out, routine.registers as u32);
-        put_u32(&mut out, routine.params as u32);
-        put_u32(&mut out, u32::from(routine.returns));
+        put_u32(&mut out, routine.params.len() as u32);
+        for ty in &routine.params {
+            out.push(ty_tag(*ty));
+        }
+        match routine.returns {
+            Some(ty) => {
+                out.push(1);
+                out.push(ty_tag(ty));
+            }
+            None => out.push(0),
+        }
         put_u32(&mut out, routine.code.len() as u32);
         for op in &routine.code {
             put_op(&mut out, *op);
@@ -254,10 +263,11 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_u16(out, dst);
             put_u32(out, konst);
         }
-        Op::Move { dst, src } => {
+        Op::Move { dst, src, ty } => {
             out.push(1);
             put_u16(out, dst);
             put_u16(out, src);
+            out.push(ty_tag(ty));
         }
         Op::Binary { op, ty, dst, lhs, rhs } => {
             out.push(2);
@@ -267,10 +277,11 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_u16(out, lhs);
             put_u16(out, rhs);
         }
-        Op::Neg { dst, src } => {
+        Op::Neg { dst, src, ty } => {
             out.push(3);
             put_u16(out, dst);
             put_u16(out, src);
+            out.push(ty_tag(ty));
         }
         Op::TimeNow { dst, ty } => {
             out.push(4);
@@ -281,9 +292,10 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             out.push(5);
             put_u32(out, text);
         }
-        Op::PrintValue { src } => {
+        Op::PrintValue { src, ty } => {
             out.push(6);
             put_u16(out, src);
+            out.push(ty_tag(ty));
         }
         Op::Call { func, base, argc, dst } => {
             out.push(15);
@@ -292,9 +304,10 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_u16(out, argc);
             put_u16(out, dst);
         }
-        Op::Return { src } => {
+        Op::Return { src, ty } => {
             out.push(16);
             put_u16(out, src);
+            out.push(ty_tag(ty));
         }
         Op::ReturnNothing => out.push(17),
         Op::Not { dst, src } => {
@@ -312,16 +325,18 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_u16(out, cond);
             put_u32(out, target);
         }
-        Op::JumpIfGreater { lhs, rhs, target } => {
+        Op::JumpIfGreater { lhs, rhs, ty, target } => {
             out.push(7);
             put_u16(out, lhs);
             put_u16(out, rhs);
+            out.push(ty_tag(ty));
             put_u32(out, target);
         }
-        Op::JumpIfEqual { lhs, rhs, target } => {
+        Op::JumpIfEqual { lhs, rhs, ty, target } => {
             out.push(8);
             put_u16(out, lhs);
             put_u16(out, rhs);
+            out.push(ty_tag(ty));
             put_u32(out, target);
         }
         Op::Jump { target } => {
@@ -494,8 +509,12 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     let mut funcs = Vec::with_capacity(count.min(4096) as usize);
     for _ in 0..count {
         let registers = cursor.u32()? as usize;
-        let params = cursor.u32()? as usize;
-        let returns = cursor.u32()? != 0;
+        let count = cursor.u32()?;
+        let mut params = Vec::with_capacity((count as usize).min(256));
+        for _ in 0..count {
+            params.push(cursor.ty()?);
+        }
+        let returns = if cursor.u8()? == 0 { None } else { Some(cursor.ty()?) };
 
         let n = cursor.u32()?;
         let mut code = Vec::with_capacity(n.min(65536) as usize);
@@ -529,10 +548,10 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
     // and its own instruction count, since neither shares those with anybody.
     for routine in &chunk.funcs {
         check_code(chunk, &routine.code, &routine.spans, routine.registers)?;
-        if routine.params > routine.registers {
+        if routine.params.len() > routine.registers {
             return Err(Broken::OutOfRange {
                 what: "parameters in a function with registers",
-                index: routine.params as u64,
+                index: routine.params.len() as u64,
                 of: routine.registers,
             });
         }
@@ -607,7 +626,7 @@ fn check_code(
                 register(dst)?;
                 constant(konst)?;
             }
-            Op::Move { dst, src } | Op::Neg { dst, src } | Op::Not { dst, src } => {
+            Op::Move { dst, src, .. } | Op::Neg { dst, src, .. } | Op::Not { dst, src } => {
                 register(dst)?;
                 register(src)?;
             }
@@ -618,8 +637,9 @@ fn check_code(
             }
             Op::TimeNow { dst, .. } => register(dst)?,
             Op::PrintText { text: index } => text(index)?,
-            Op::PrintValue { src } => register(src)?,
-            Op::JumpIfGreater { lhs, rhs, target: to } | Op::JumpIfEqual { lhs, rhs, target: to } => {
+            Op::PrintValue { src, .. } => register(src)?,
+            Op::JumpIfGreater { lhs, rhs, target: to, .. }
+            | Op::JumpIfEqual { lhs, rhs, target: to, .. } => {
                 register(lhs)?;
                 register(rhs)?;
                 target(to)?;
@@ -637,15 +657,15 @@ fn check_code(
                 for n in 0..argc {
                     register(base + n)?;
                 }
-                if usize::from(argc) != chunk.funcs[func as usize].params {
+                if usize::from(argc) != chunk.funcs[func as usize].params.len() {
                     return Err(Broken::OutOfRange {
                         what: "arguments for a function taking",
                         index: argc as u64,
-                        of: chunk.funcs[func as usize].params,
+                        of: chunk.funcs[func as usize].params.len(),
                     });
                 }
             }
-            Op::Return { src } => register(src)?,
+            Op::Return { src, .. } => register(src)?,
             Op::ReturnNothing => {}
             Op::Halt => {}
         }
@@ -782,7 +802,7 @@ impl<'a> Cursor<'a> {
     fn op(&mut self) -> Result<Op, Broken> {
         Ok(match self.u8()? {
             0 => Op::Const { dst: self.u16()?, konst: self.u32()? },
-            1 => Op::Move { dst: self.u16()?, src: self.u16()? },
+            1 => Op::Move { dst: self.u16()?, src: self.u16()?, ty: self.ty()? },
             2 => Op::Binary {
                 op: self.binop()?,
                 ty: self.ty()?,
@@ -790,12 +810,22 @@ impl<'a> Cursor<'a> {
                 lhs: self.u16()?,
                 rhs: self.u16()?,
             },
-            3 => Op::Neg { dst: self.u16()?, src: self.u16()? },
+            3 => Op::Neg { dst: self.u16()?, src: self.u16()?, ty: self.ty()? },
             4 => Op::TimeNow { dst: self.u16()?, ty: self.ty()? },
             5 => Op::PrintText { text: self.u32()? },
-            6 => Op::PrintValue { src: self.u16()? },
-            7 => Op::JumpIfGreater { lhs: self.u16()?, rhs: self.u16()?, target: self.u32()? },
-            8 => Op::JumpIfEqual { lhs: self.u16()?, rhs: self.u16()?, target: self.u32()? },
+            6 => Op::PrintValue { src: self.u16()?, ty: self.ty()? },
+            7 => Op::JumpIfGreater {
+                lhs: self.u16()?,
+                rhs: self.u16()?,
+                ty: self.ty()?,
+                target: self.u32()?,
+            },
+            8 => Op::JumpIfEqual {
+                lhs: self.u16()?,
+                rhs: self.u16()?,
+                ty: self.ty()?,
+                target: self.u32()?,
+            },
             9 => Op::Jump { target: self.u32()? },
             10 => Op::Halt,
             11 => Op::Compare {
@@ -812,7 +842,7 @@ impl<'a> Cursor<'a> {
                 argc: self.u16()?,
                 dst: self.u16()?,
             },
-            16 => Op::Return { src: self.u16()? },
+            16 => Op::Return { src: self.u16()?, ty: self.ty()? },
             17 => Op::ReturnNothing,
             13 => Op::JumpIfFalse { cond: self.u16()?, target: self.u32()? },
             14 => Op::JumpIfTrue { cond: self.u16()?, target: self.u32()? },

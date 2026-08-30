@@ -101,7 +101,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 continue;
             }
 
-            Op::Return { src } => {
+            Op::Return { src, .. } => {
                 let answer = registers[src as usize].clone();
                 let finished = frames.pop().expect("a frame is always open");
                 let caller = frames.last_mut().expect("something called it");
@@ -118,7 +118,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 registers[dst as usize] = chunk.consts[konst as usize].clone();
             }
 
-            Op::Move { dst, src } => {
+            Op::Move { dst, src, .. } => {
                 registers[dst as usize] = registers[src as usize].clone();
             }
 
@@ -152,7 +152,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 registers[dst as usize] = Value::Bool(holds(op, ordering));
             }
 
-            Op::Neg { dst, src } => {
+            Op::Neg { dst, src, .. } => {
                 let value = negate(&registers[src as usize], chunk.overflow)
                     .map_err(|fault| Stopped { fault, span })?;
                 registers[dst as usize] = value;
@@ -175,7 +175,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let _ = out.flush();
             }
 
-            Op::PrintValue { src } => {
+            Op::PrintValue { src, .. } => {
                 let _ = out.write_all(registers[src as usize].to_string().as_bytes());
                 let _ = out.flush();
             }
@@ -198,7 +198,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::Jump { target } => jump = Some(target as usize),
 
-            Op::JumpIfGreater { lhs, rhs, target } => {
+            Op::JumpIfGreater { lhs, rhs, target, .. } => {
                 if compare(&registers[lhs as usize], &registers[rhs as usize])
                     == Comparison::Greater
                 {
@@ -206,7 +206,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 }
             }
 
-            Op::JumpIfEqual { lhs, rhs, target } => {
+            Op::JumpIfEqual { lhs, rhs, target, .. } => {
                 if compare(&registers[lhs as usize], &registers[rhs as usize])
                     == Comparison::Equal
                 {
