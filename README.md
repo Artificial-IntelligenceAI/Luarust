@@ -7,7 +7,7 @@ Luarust's method is focused on compile once, run anywhere (Like Java's), and boo
 
 So, to put it simply. Luarust is a computer language that has **very helpful error messages**, and **could run basically anywhere**, **without sacrificing much performance**.
 
-**We ran some benchmarks, **Luarust is one of the slowest JIT ever.**
+We ran some benchmarks, **Luarust is one of the slowest JIT ever.**
 
 ## Declaring things
 
