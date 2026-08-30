@@ -1,0 +1,16 @@
+[package]
+name = "luarust-check"
+description = "Names, types, visibility and mutability — and the values a program computes with."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dev-dependencies]
+luarust-lex = { path = "../luarust-lex" }
+
+[dependencies]
+luarust-diag = { path = "../luarust-diag" }
+luarust-num = { path = "../luarust-num" }
+luarust-parse = { path = "../luarust-parse" }

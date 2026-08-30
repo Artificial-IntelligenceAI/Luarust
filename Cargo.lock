@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "luarust-check"
+version = "0.0.0"
+dependencies = [
+ "luarust-diag",
+ "luarust-lex",
+ "luarust-num",
+ "luarust-parse",
+]
+
+[[package]]
 name = "luarust-diag"
 version = "0.0.0"
 

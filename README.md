@@ -253,7 +253,7 @@ before it:
 ```luarust
 var.local.mut.ui32 ['total'] = ['0'];
 
-loop.temp.range.ui8 ['i'] = ['1', '10'] {
+loop.temp.range.ui32 ['i'] = ['1', '10'] {
     handback 'i' as 'total';
 }
 
@@ -264,8 +264,10 @@ print["total is " 'total' \n];
 total is 55
 ```
 
-`total` needs `mut` because the loop changes it, and it is `ui32` rather than `ui8`
-because a sum outgrows its parts.
+`total` needs `mut` because the loop changes it. And the counter is `ui32` for the same
+reason everything else in Luarust matches exactly: nothing converts on its own, so a
+`ui8` counter could not be added to a `ui32` total — not because it would not fit, but
+because they are two different types and the language will not quietly bridge them.
 
 Notice there is **no semicolon after the closing brace**. A semicolon ends a statement
 that finishes on a value, and a block already says where it ends. `};` would be saying
