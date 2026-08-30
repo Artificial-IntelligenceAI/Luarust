@@ -183,6 +183,8 @@ fn fault_code(fault: &luarust_check::value::Fault) -> i64 {
         "R0002" => DIVIDE_BY_ZERO,
         "R0003" => REMAINDER_BY_ZERO,
         "R0005" => DOES_NOT_FIT,
+        "R0012" => FRACTIONAL_POWER,
+        "R0013" => POWER_TOO_LARGE,
         _ => OTHER,
     }
 }
@@ -266,8 +268,10 @@ pub const OK: i64 = 0;
 pub const DIVIDE_BY_ZERO: i64 = 1;
 pub const REMAINDER_BY_ZERO: i64 = 2;
 pub const DOES_NOT_FIT: i64 = 3;
-pub const TOO_DEEP: i64 = 4;
 pub const OTHER: i64 = 4;
+pub const TOO_DEEP: i64 = 5;
+pub const FRACTIONAL_POWER: i64 = 6;
+pub const POWER_TOO_LARGE: i64 = 7;
 
 /// Print a piece of text.
 ///

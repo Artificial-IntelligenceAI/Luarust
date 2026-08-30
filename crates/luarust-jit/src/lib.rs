@@ -57,7 +57,9 @@ fn celled(ty: Ty) -> bool {
     // started *producing* them: a truth value is one bit, and putting every comparison's
     // answer in a cell would be a call for something the machine settles in one
     // instruction.
-    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str)
+    // `er` joins them for a reason the others do not have: it is not merely wide, it is
+    // unbounded. There is no register anywhere that could hold one.
+    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str | Ty::Er)
 }
 
 /// Compile a program and run it, or hand it back.
@@ -125,6 +127,23 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
             message: "this takes a remainder against zero.".into(),
             rule: "a remainder against zero is not a number",
             fix: "check the divisor before taking a remainder.".into(),
+        },
+        runtime::FRACTIONAL_POWER => Fault {
+            code: "R0012",
+            message: "this raises an exact number to a power that is not whole.".into(),
+            rule: "a ratio raised to a whole power is a ratio, and raised to anything else usually is not",
+            fix: "use a whole exponent, or a float type, where the answer can be approximated."
+                .into(),
+        },
+        runtime::POWER_TOO_LARGE => Fault {
+            code: "R0013",
+            message: format!(
+                "this raises an exact number to a power above {}.",
+                luarust_num::Exact::POWER_LIMIT
+            ),
+            rule: "an exact answer has to be written down, and that one would not fit anywhere",
+            fix: "use a smaller exponent, or a float type, where the answer is rounded to a width."
+                .into(),
         },
         runtime::TOO_DEEP => Fault {
             code: "R0011",

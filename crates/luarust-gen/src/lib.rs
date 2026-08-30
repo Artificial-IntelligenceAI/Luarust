@@ -27,7 +27,8 @@ pub struct Written {
 }
 
 /// Every type a generated program declares variables of.
-const DECLARED: [Ty; 15] = [
+const DECLARED: [Ty; 16] = [
+    Ty::Er,
     Ty::B16,
     Ty::B32,
     Ty::B64,
@@ -47,7 +48,8 @@ const DECLARED: [Ty; 15] = [
 
 /// The types arithmetic and loops work in. `bool` cannot be counted in or added to, and
 /// neither can `str`.
-const TYPES: [Ty; 13] = [
+const TYPES: [Ty; 14] = [
+    Ty::Er,
     Ty::B16,
     Ty::B32,
     Ty::B64,
@@ -559,6 +561,15 @@ impl Writer {
                 1 => format!("text {}", self.rng.below(1000)),
                 2 => "🧑‍🧑‍🧒‍🧒".to_string(),
                 _ => format!("a phrase, with punctuation {}", self.rng.below(100)),
+            };
+        }
+        if ty == Ty::Er {
+            return match self.rng.below(4) {
+                0 => format!("{}", self.rng.below(1000)),
+                1 => format!("-{}", self.rng.below(1000)),
+                2 => format!("{}.{}", self.rng.below(100), self.rng.below(1000)),
+                // The form no decimal could have written, which is the whole point of it.
+                _ => format!("{}/{}", self.rng.below(1000), 1 + self.rng.below(999)),
             };
         }
         if ty.is_float() {

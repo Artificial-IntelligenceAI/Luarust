@@ -594,6 +594,36 @@ float here they state their width in their name — there is no bare `i` you hav
 up. Everything else numeric is a float, and `er` is an exact rational — a numerator over
 a denominator, both unbounded, so it neither rounds nor overflows.
 
+### The one that never rounds
+
+`er` is a numerator over a denominator, both unbounded, always in lowest terms. Nothing
+in it rounds and nothing in it overflows:
+
+```luarust
+var.local.er ['a'] = [|0.1|];
+var.local.er ['b'] = [|0.2|];
+print[math { 'a' + 'b' } \n];       -- 3/10, not 0.30000000000000004
+
+var.local.er ['third'] = [|1/3|];
+print[math { ('third' + 'third') + 'third' } \n];   -- exactly 1
+```
+
+**A written `er` may be a fraction** — `|1/3|` — which no decimal could have said. A type
+whose whole purpose is exactness should not make you approximate the first interesting
+number. And it prints as a fraction for the same reason: a third has no finite decimal,
+and writing `0.333…` is the one thing this type exists not to do.
+
+Two things it will not do, and says so rather than guessing:
+
+| | |
+| --- | --- |
+| `er \|2\| ** er \|1/2\|` | the square root of two is not a ratio |
+| `er \|1\| div er \|0\|` | there is no infinity here to answer with |
+
+What it costs: arithmetic allocates, and denominators grow when you add fractions with
+nothing in common. Exactness is not free — it is just honest about what you are paying
+for.
+
 The binary formats are the real IEEE 754 ones rather than approximations of them:
 `b16` is true half precision, and `b256` carries 237 bits of significand, which almost
 nothing else on earth implements. The decimal formats are the ones where `0.1` is

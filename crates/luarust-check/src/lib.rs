@@ -338,7 +338,7 @@ impl Checker {
         if !self.usable_type(loop_stmt.ty, loop_stmt.ty_span) {
             return None;
         }
-        if !loop_stmt.ty.is_integer() && !loop_stmt.ty.is_float() {
+        if !loop_stmt.ty.is_number() {
             self.error(
                 Diagnostic::new("E0205", format!("a loop cannot count in `{}`.", loop_stmt.ty.word()))
                     .primary(loop_stmt.ty_span, "written here")
@@ -885,7 +885,7 @@ impl Checker {
 
             AExpr::Percent { inner, span } => {
                 let ty = self.need_type(*span, expected, "a percentage")?;
-                if !ty.is_float() {
+                if !ty.is_float() && ty != Ty::Er {
                     self.error(
                         Diagnostic::new("E0211", format!("a percentage cannot be read as `{}`.", ty.word()))
                             .primary(*span, "written here")
@@ -932,7 +932,7 @@ impl Checker {
                 let (lhs, rhs) = self.two_sides(lhs, rhs, None)?;
                 let operands = lhs.ty();
 
-                let orderable = operands.is_integer() || operands.is_float();
+                let orderable = operands.is_number();
                 if op.orders() && !orderable {
                     self.error(
                         Diagnostic::new("E0220", format!("`{}` cannot be put in order.", operands.word()))
@@ -980,7 +980,7 @@ impl Checker {
                 // `'x' + 1` and `1 + 'x'` read the 1 as whatever `'x'` is.
                 let (lhs, rhs) = self.two_sides(lhs, rhs, expected)?;
                 let ty = lhs.ty();
-                if !ty.is_integer() && !ty.is_float() {
+                if !ty.is_number() {
                     self.error(
                         Diagnostic::new("E0213", format!("`{}` cannot be calculated with.", ty.word()))
                             .primary(*span, "used in arithmetic here")
@@ -1063,6 +1063,24 @@ impl Checker {
                             .rule("a `bool` is `true` or `false`, and nothing else is either")
                             .tip("Luarust has no truthiness: a number is never a condition.")
                             .fix("write `'true'` or `'false'`."),
+                    );
+                    None
+                }
+            };
+        }
+
+        if ty == Ty::Er {
+            return match luarust_num::Exact::parse(text) {
+                Some(value) => {
+                    Some(ir::Expr::Const(Value::Exact(std::rc::Rc::new(value))))
+                }
+                None => {
+                    self.error(
+                        Diagnostic::new("E0217", format!("`{text}` is not an exact number."))
+                            .primary(at, "written here")
+                            .rule("an `er` is a whole number, a decimal, or one number over another")
+                            .tip("`|1/3|` is exactly a third, which is why the fraction form is there: no decimal could have written it.")
+                            .fix("write something like `|3|`, `|-2.5|` or `|1/3|`."),
                     );
                     None
                 }
@@ -1309,7 +1327,19 @@ mod tests {
     #[test]
     fn the_types_that_are_not_built_yet_say_so() {
         assert_eq!(codes("var.local.d64 ['money'] = [|19.99|];"), ["E0209"]);
-        assert_eq!(codes("var.local.er ['third'] = [|1|];"), ["E0209"]);
+    }
+
+    #[test]
+    fn an_exact_rational_is_read_as_written() {
+        clean("var.local.er ['third'] = [|1/3|];");
+        clean("var.local.er ['half'] = [|-0.5|];");
+        clean("var.local.er ['three'] = [|3|];");
+        // A percentage is a fraction of a hundred, which this holds exactly -- `20%` is
+        // one fifth here rather than the nearest float to it.
+        clean("var.local.er ['fifth'] = [math { 20% }];");
+        // And anything that is not a number says so rather than becoming one.
+        assert_eq!(codes("var.local.er ['x'] = [|hello|];"), ["E0217"]);
+        assert_eq!(codes("var.local.er ['x'] = [|1/0|];"), ["E0217"]);
     }
 
     #[test]

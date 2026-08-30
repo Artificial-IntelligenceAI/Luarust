@@ -188,6 +188,21 @@ fn put_value(out: &mut Vec<u8>, value: &Value) {
             out.push(3);
             put_str(out, text);
         }
+        // Written out as it reads: a sign and two runs of limbs, which is the whole of
+        // what an exact rational is.
+        Value::Exact(value) => {
+            out.push(4);
+            put_big(out, value.numerator());
+            put_big(out, value.denominator());
+        }
+    }
+}
+
+fn put_big(out: &mut Vec<u8>, value: &luarust_num::Big) {
+    out.push(u8::from(value.is_negative()));
+    put_u32(out, value.limbs().len() as u32);
+    for limb in value.limbs() {
+        put_u64(out, *limb);
     }
 }
 
@@ -672,8 +687,29 @@ impl<'a> Cursor<'a> {
             }
             2 => Ok(Value::Bool(self.u8()? != 0)),
             3 => Ok(Value::text(&self.text()?)),
+            4 => {
+                let numerator = self.big()?;
+                let denominator = self.big()?;
+                // A zero denominator would be a value no arithmetic could have made, so
+                // a chunk carrying one is a corrupt chunk rather than a strange number.
+                let exact = luarust_num::Exact::ratio(numerator, denominator)
+                    .ok_or(Broken::Unknown { what: "denominator", value: 0 })?;
+                Ok(Value::Exact(std::rc::Rc::new(exact)))
+            }
             other => Err(Broken::Unknown { what: "value", value: other as u64 }),
         }
+    }
+
+    fn big(&mut self) -> Result<luarust_num::Big, Broken> {
+        let negative = self.u8()? != 0;
+        let count = self.u32()?;
+        // A magnitude longer than the file could hold is a corrupt file, and reserving
+        // for it before reading it is how a bad length becomes a bad allocation.
+        let mut limbs = Vec::with_capacity((count as usize).min(4096));
+        for _ in 0..count {
+            limbs.push(self.u64()?);
+        }
+        Ok(luarust_num::Big::from_parts(negative, limbs))
     }
 
     fn binop(&mut self) -> Result<BinOp, Broken> {

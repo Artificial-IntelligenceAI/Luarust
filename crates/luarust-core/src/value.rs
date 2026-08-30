@@ -10,7 +10,7 @@
 //! trapping the same operation with a different ending.
 
 use luarust_diag::{Diagnostic, Span};
-use luarust_num::Uint;
+use luarust_num::{Exact, Uint};
 use luarust_num::binary::{self, Comparison, Format, Round};
 use crate::{BinOp, CmpOp, Ty};
 
@@ -60,6 +60,9 @@ pub enum Value {
     /// Shared, because a string is immutable here and copying one to move it between
     /// registers would be paying for nothing.
     Str(std::rc::Rc<str>),
+    /// `er`. Shared for the same reason a string is: a number does not change, so two
+    /// names for one is two names for one, and nothing can tell the difference.
+    Exact(std::rc::Rc<Exact>),
 }
 
 /// Something that went wrong while a program was running.
@@ -124,6 +127,9 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
     let ordering = match (a, b) {
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        // An exact rational orders exactly. There is no NaN here and nothing unordered:
+        // every pair of ratios stands one way or the other.
+        (Value::Exact(x), Value::Exact(y)) => x.cmp(y),
         _ => return Comparison::Unordered,
     };
     match ordering {
@@ -155,7 +161,9 @@ pub fn holds(op: CmpOp, ordering: Comparison) -> bool {
 
 /// One, of whichever numeric type.
 pub fn one_of(ty: Ty) -> Value {
-    if ty.is_integer() {
+    if ty == Ty::Er {
+        Value::Exact(std::rc::Rc::new(Exact::one()))
+    } else if ty.is_integer() {
         Value::int(ty, 1)
     } else {
         let fmt = format_of(ty).expect("a number has a format");
@@ -181,6 +189,7 @@ impl Value {
             Value::Num { ty, .. } | Value::Wide { ty, .. } => *ty,
             Value::Bool(_) => Ty::Bool,
             Value::Str(_) => Ty::Str,
+            Value::Exact(_) => Ty::Er,
         }
     }
 
@@ -209,7 +218,9 @@ impl Value {
 
     /// Zero, of whichever type.
     pub fn zero(ty: Ty) -> Value {
-        if ty.is_integer() {
+        if ty == Ty::Er {
+            Value::Exact(std::rc::Rc::new(Exact::zero()))
+        } else if ty.is_integer() {
             Value::Num { ty, bits: 0 }
         } else if let Some(fmt) = format_of(ty) {
             Value::float(ty, binary::zero(fmt, false))
@@ -253,9 +264,53 @@ impl Value {
     }
 }
 
+/// Arithmetic on two exact rationals. Nothing rounds and nothing overflows, so the only
+/// ways this can fail are the ones that have no answer at all.
+fn exact_op(op: BinOp, a: &Exact, b: &Exact) -> Result<Value, Fault> {
+    use luarust_num::exact::Trouble;
+    let outcome = match op {
+        BinOp::Add => Ok(a.add(b)),
+        BinOp::Sub => Ok(a.sub(b)),
+        BinOp::Mul => Ok(a.mul(b)),
+        BinOp::Div => a.div(b),
+        BinOp::Mod => a.rem(b),
+        BinOp::Pow => a.pow(b),
+    };
+    match outcome {
+        Ok(value) => Ok(Value::Exact(std::rc::Rc::new(value))),
+        Err(Trouble::DivideByZero) if op == BinOp::Mod => Err(Fault::new(
+            "R0003",
+            "this takes a remainder against zero.",
+            "a remainder against zero is not a number",
+            "check the divisor before taking a remainder.",
+        )),
+        Err(Trouble::DivideByZero) => Err(Fault::new(
+            "R0002",
+            "this divides an exact number by zero.",
+            "an exact rational has no way to express what dividing by zero would give",
+            "check the divisor before dividing. `er` has no infinity to answer with.",
+        )),
+        Err(Trouble::FractionalPower) => Err(Fault::new(
+            "R0012",
+            "this raises an exact number to a power that is not whole.",
+            "a ratio raised to a whole power is a ratio, and raised to anything else usually is not",
+            "use a whole exponent, or a float type, where the answer can be approximated.",
+        )),
+        Err(Trouble::PowerTooLarge) => Err(Fault::new(
+            "R0013",
+            format!("this raises an exact number to a power above {}.", Exact::POWER_LIMIT),
+            "an exact answer has to be written down, and that one would not fit anywhere",
+            "use a smaller exponent, or a float type, where the answer is rounded to a width.",
+        )),
+    }
+}
+
 /// `lhs op rhs`, both already known to be the same type.
 pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Result<Value, Fault> {
     let ty = lhs.ty();
+    if let (Value::Exact(a), Value::Exact(b)) = (lhs, rhs) {
+        return exact_op(op, a, b);
+    }
     if ty.is_integer() && rhs.ty().is_integer() {
         return integer_op(op, ty, lhs, rhs, overflow);
     }
@@ -594,6 +649,7 @@ fn float_pow(fmt: Format, ty: Ty, base: Bits, exponent: Bits) -> Result<Value, F
 /// Negation. Exact for every value.
 pub fn negate(value: &Value, overflow: Overflow) -> Result<Value, Fault> {
     match value {
+        Value::Exact(value) => Ok(Value::Exact(std::rc::Rc::new(value.negated()))),
         Value::Num { ty, .. } | Value::Wide { ty, .. } if ty.is_float() => {
             let fmt = format_of(*ty).expect("a float type has a format");
             Ok(Value::float(*ty, binary::neg(fmt, value.bits().expect("a float has bits"))))
@@ -631,6 +687,9 @@ impl std::fmt::Display for Value {
         match self {
             Value::Str(text) => write!(f, "{text}"),
             Value::Bool(value) => write!(f, "{value}"),
+            // A fraction, because that is what it is. A third has no finite decimal, and
+            // printing `0.333…` is the one thing this type exists not to do.
+            Value::Exact(value) => write!(f, "{value}"),
             _ if self.ty().is_integer() => write!(f, "{}", self.as_i128().unwrap()),
             _ => {
                 let ty = self.ty();

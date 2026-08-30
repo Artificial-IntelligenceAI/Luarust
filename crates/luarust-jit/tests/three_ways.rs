@@ -429,6 +429,48 @@ fn break_leaves_the_innermost_loop_and_nothing_more() {
 }
 
 #[test]
+fn an_exact_rational_is_exact_on_all_three_paths() {
+    // The sum every article about floating point opens with, and the number no binary
+    // float can hold. Both come out right here because nothing rounded.
+    assert_eq!(
+        ran("var.local.er ['a'] = [|0.1|];\n\
+             var.local.er ['b'] = [|0.2|];\n\
+             print[math { 'a' + 'b' } \\n];"),
+        "3/10\n"
+    );
+    assert_eq!(
+        ran("var.local.er ['t'] = [|1/3|];\n\
+             print[math { ('t' + 't') + 't' } \\n];"),
+        "1\n"
+    );
+}
+
+#[test]
+fn an_exact_rational_has_no_width_to_overflow() {
+    // Two to the sixty-fourth is where a `ui64` gives up. This does not.
+    assert_eq!(
+        ran("print[math { er |2| ** er |64| } \\n];"),
+        "18446744073709551616\n"
+    );
+    assert_eq!(
+        ran("print[math { er |2| ** er |-2| } \\n];"),
+        "1/4\n"
+    );
+}
+
+#[test]
+fn an_exact_rational_refuses_what_it_cannot_answer() {
+    // The square root of two is not a ratio, so a ratio type will not pretend to have
+    // one. Nothing is printed because all three stop before the print -- and `ran` has
+    // already insisted they stopped for the same reason as each other.
+    assert_eq!(ran("print[math { er |2| ** er |1/2| } \\n];"), "");
+    // The same for an answer too large to write down.
+    assert_eq!(ran("print[math { er |2| ** er |100000| } \\n];"), "");
+    // And for dividing by nothing, which `er` has no infinity to answer with.
+    assert_eq!(ran("print[math { er |1| div er |0| } \\n];"), "");
+}
+
+#[test]
 fn generated_programs_agree_three_ways() {
     let mut taken = 0;
     let mut declined = 0;
