@@ -11,7 +11,7 @@
 
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{
-    Fault, Overflow, Value, binary_op, compare, format_of, negate, one_of,
+    Fault, Overflow, Value, binary_op, compare, format_of, holds, negate, one_of,
 };
 pub use luarust_check::value::Stopped;
 use luarust_diag::Span;
@@ -152,6 +152,14 @@ impl Machine {
             Expr::Neg { operand, span, .. } => {
                 let value = self.eval(operand)?;
                 negate(&value, self.overflow).map_err(|fault| Stopped { fault, span: *span })
+            }
+
+            // A NaN is not less than, greater than, or equal to anything, itself
+            // included -- so all three answer false, which is what unordered means.
+            Expr::Compare { op, lhs, rhs, .. } => {
+                let lhs = self.eval(lhs)?;
+                let rhs = self.eval(rhs)?;
+                Ok(Value::Bool(holds(*op, compare(&lhs, &rhs))))
             }
 
             Expr::Binary { op, lhs, rhs, span, .. } => {

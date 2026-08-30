@@ -7,7 +7,7 @@
 
 use luarust_check::value::{Overflow, Value};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, Ty};
 
 /// Which register. Sixteen bits is far more than any program in this language will want.
 pub type Reg = u16;
@@ -26,6 +26,9 @@ pub enum Op {
     /// the values, once per operation, was costing more than the arithmetic did.
     Binary { op: BinOp, ty: Ty, dst: Reg, lhs: Reg, rhs: Reg },
     Neg { dst: Reg, src: Reg },
+    /// Answers `bool`. `operands` is what the two sides are, which is what decides how
+    /// they get compared.
+    Compare { op: CmpOp, operands: Ty, dst: Reg, lhs: Reg, rhs: Reg },
     /// Read the clock into a register.
     TimeNow { dst: Reg, ty: Ty },
     /// Write a piece of text from the pool.
@@ -84,6 +87,15 @@ impl Chunk {
                     format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
                 }
                 Op::Neg { dst, src } => format!("neg          r{dst}, r{src}"),
+                Op::Compare { op, operands, dst, lhs, rhs } => format!(
+                    "{:<12} r{dst}, r{lhs}, r{rhs}    -- {}",
+                    match op {
+                        CmpOp::Less => "less",
+                        CmpOp::Greater => "greater",
+                        CmpOp::Equal => "equal",
+                    },
+                    operands.word()
+                ),
                 Op::TimeNow { dst, ty } => format!("time.now     r{dst}    -- {}", ty.word()),
                 Op::PrintText { text } => {
                     format!("print.text   t{text}    -- {:?}", self.texts[text as usize])

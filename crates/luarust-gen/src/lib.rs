@@ -26,7 +26,27 @@ pub struct Written {
     pub source: String,
 }
 
-/// Every type a generated program is allowed to use.
+/// Every type a generated program declares variables of.
+const DECLARED: [Ty; 15] = [
+    Ty::B16,
+    Ty::B32,
+    Ty::B64,
+    Ty::B128,
+    Ty::B256,
+    Ty::I8,
+    Ty::I16,
+    Ty::I32,
+    Ty::I64,
+    Ty::U8,
+    Ty::U16,
+    Ty::U32,
+    Ty::U64,
+    Ty::Bool,
+    Ty::Str,
+];
+
+/// The types arithmetic and loops work in. `bool` cannot be counted in or added to, and
+/// neither can `str`.
 const TYPES: [Ty; 13] = [
     Ty::B16,
     Ty::B32,
@@ -101,7 +121,7 @@ impl Writer {
     }
 
     fn declaration(&mut self) {
-        let ty = self.pick_type();
+        let ty = DECLARED[self.rng.below(DECLARED.len() as u64) as usize];
         let mutable = self.rng.below(2) == 0;
         let name = self.fresh_name();
         let value = self.value_of(ty);
@@ -120,7 +140,8 @@ impl Writer {
     }
 
     fn handback(&mut self) {
-        let Some(target) = self.pick_changeable() else {
+        // `handback` adds, and neither truth nor text can be added to.
+        let Some(target) = self.pick_changeable().filter(|known| numeric(known.ty)) else {
             self.print();
             return;
         };
@@ -184,11 +205,32 @@ impl Writer {
 
     /// Something of exactly this type, in a value slot.
     fn value_of(&mut self, ty: Ty) -> String {
-        if self.rng.below(3) == 0 {
-            format!("math {{ {} }}", self.arithmetic(ty, 0))
-        } else {
-            format!("'{}'", self.literal(ty))
+        // A truth is either written down or worked out by comparing two numbers, which is
+        // the only way the language makes one.
+        //
+        // One side has to be a variable. A comparison says nothing about what its sides
+        // are, so `math { 1 < 2 }` has no type in reach and does not compile -- which is
+        // the language being consistent, and is also why this cannot just write two
+        // literals and hope.
+        if ty == Ty::Bool && self.rng.below(2) == 0 {
+            if let Some(known) = self.pick_numeric() {
+                let op = match self.rng.below(3) {
+                    0 => "<",
+                    1 => ">",
+                    _ => "=",
+                };
+                let other = self.arithmetic(known.ty, 1);
+                return if self.rng.below(2) == 0 {
+                    format!("math {{ '{}' {op} {other} }}", known.name)
+                } else {
+                    format!("math {{ {other} {op} '{}' }}", known.name)
+                };
+            }
         }
+        if ty == Ty::Bool || ty == Ty::Str || self.rng.below(3) != 0 {
+            return format!("'{}'", self.literal(ty));
+        }
+        format!("math {{ {} }}", self.arithmetic(ty, 0))
     }
 
     /// An expression of exactly this type, inside a math block.
@@ -220,8 +262,19 @@ impl Writer {
         }
     }
 
-    /// A number that will fit the type it is being read as.
+    /// A value that will fit the type it is being read as.
     fn literal(&mut self, ty: Ty) -> String {
+        if ty == Ty::Bool {
+            return if self.rng.below(2) == 0 { "true".into() } else { "false".into() };
+        }
+        if ty == Ty::Str {
+            return match self.rng.below(4) {
+                0 => "".to_string(),
+                1 => format!("text {}", self.rng.below(1000)),
+                2 => "🧑‍🧑‍🧒‍🧒".to_string(),
+                _ => format!("a phrase, with punctuation {}", self.rng.below(100)),
+            };
+        }
         if ty.is_float() {
             return match self.rng.below(6) {
                 0 => "0".to_string(),
@@ -257,6 +310,16 @@ impl Writer {
             return None;
         }
         Some(matching[self.rng.below(matching.len() as u64) as usize].clone())
+    }
+
+    /// Any variable arithmetic works on, which is what a comparison needs one side to be.
+    fn pick_numeric(&mut self) -> Option<Known> {
+        let usable: Vec<Known> =
+            self.scope.iter().filter(|known| numeric(known.ty)).cloned().collect();
+        if usable.is_empty() {
+            return None;
+        }
+        Some(usable[self.rng.below(usable.len() as u64) as usize].clone())
     }
 
     fn pick_changeable(&mut self) -> Option<Known> {
@@ -308,4 +371,9 @@ impl Rng {
     fn below(&mut self, bound: u64) -> u64 {
         if bound == 0 { 0 } else { self.next() % bound }
     }
+}
+
+/// Whether arithmetic works on this at all. Neither truth nor text can be added.
+fn numeric(ty: Ty) -> bool {
+    ty.is_integer() || ty.is_float()
 }

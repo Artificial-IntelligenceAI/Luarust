@@ -108,6 +108,8 @@ impl<'a> Lexer<'a> {
                 '-' => self.punctuation(Kind::Minus),
                 '/' | '÷' => self.punctuation(Kind::Slash),
                 '%' => self.punctuation(Kind::Percent),
+                '<' => self.punctuation(Kind::Less),
+                '>' => self.punctuation(Kind::Greater),
 
                 '*' => {
                     let start = self.at;

@@ -7,7 +7,7 @@
 
 use crate::value::{Overflow, Value};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, Ty};
 
 /// A whole checked program.
 #[derive(Clone, Debug)]
@@ -51,6 +51,9 @@ pub enum Expr {
     TimeNow { ty: Ty, span: Span },
     Binary { op: BinOp, ty: Ty, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     Neg { ty: Ty, operand: Box<Expr>, span: Span },
+    /// Answers `bool`. `operands` is what the two sides are, which is what decides how
+    /// they get compared.
+    Compare { op: CmpOp, operands: Ty, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
 }
 
 impl Expr {
@@ -61,6 +64,7 @@ impl Expr {
             | Expr::TimeNow { ty, .. }
             | Expr::Binary { ty, .. }
             | Expr::Neg { ty, .. } => *ty,
+            Expr::Compare { .. } => Ty::Bool,
         }
     }
 
@@ -70,7 +74,8 @@ impl Expr {
             Expr::Load { span, .. }
             | Expr::TimeNow { span, .. }
             | Expr::Binary { span, .. }
-            | Expr::Neg { span, .. } => *span,
+            | Expr::Neg { span, .. }
+            | Expr::Compare { span, .. } => *span,
         }
     }
 }

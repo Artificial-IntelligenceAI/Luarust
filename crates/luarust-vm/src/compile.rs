@@ -243,6 +243,17 @@ impl Compiler {
                 self.emit(Op::Neg { dst, src }, *span);
             }
 
+            Expr::Compare { op, operands, lhs, rhs, span } => {
+                let mark = self.next;
+                let a = self.operand(lhs, *span);
+                let b = self.operand(rhs, *span);
+                self.emit(
+                    Op::Compare { op: *op, operands: *operands, dst, lhs: a, rhs: b },
+                    *span,
+                );
+                self.next = mark;
+            }
+
             Expr::Binary { op, ty, lhs, rhs, span } => {
                 // Take both sides before writing the answer, since `dst` may well be one
                 // of them -- `set ['sum'] = [math { 'sum' + 'i' }]` is the common case.

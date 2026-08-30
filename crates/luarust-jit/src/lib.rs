@@ -27,7 +27,7 @@ use inkwell::{FloatPredicate, IntPredicate};
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Fault, Overflow, Stopped, Value};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, Ty};
 
 use std::io::Write;
 
@@ -49,7 +49,11 @@ pub fn accepts(_program: &Checked) -> Result<(), Declined> {
 
 /// Whether a value of this type can live in a register, or has to live in a cell.
 fn celled(ty: Ty) -> bool {
-    matches!(ty, Ty::B128 | Ty::B256 | Ty::Bool | Ty::Str)
+    // `bool` used to be one of these. It stopped being one when comparisons arrived and
+    // started *producing* them: a truth value is one bit, and putting every comparison's
+    // answer in a cell would be a call for something the machine settles in one
+    // instruction.
+    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str)
 }
 
 /// Compile a program and run it, or hand it back.
@@ -682,6 +686,27 @@ impl<'ctx> Emitter<'ctx> {
                 (Emitted::Native(self.arithmetic(BinOp::Sub, zero, value, *ty, *span)), *ty)
             }
 
+            Expr::Compare { op, operands, lhs, rhs, .. } => {
+                let (a, _) = self.expr(lhs);
+                let (b, _) = self.expr(rhs);
+                let truth = if celled(*operands) {
+                    let wanted = match op {
+                        CmpOp::Less => runtime::LESS,
+                        CmpOp::Greater => runtime::GREATER,
+                        CmpOp::Equal => runtime::EQUAL,
+                    };
+                    self.cells_compare(a.cell(), b.cell(), wanted)
+                } else {
+                    self.relation(a.native(), b.native(), *operands, *op)
+                };
+                // One bit widened to the sixty-four a slot holds.
+                let widened = self
+                    .builder
+                    .build_int_z_extend(truth, self.context.i64_type(), "truth")
+                    .expect("an extend");
+                (Emitted::Native(widened.into()), Ty::Bool)
+            }
+
             Expr::Binary { op, lhs, rhs, ty, span } => {
                 let (a, _) = self.expr(lhs);
                 let (b, _) = self.expr(rhs);
@@ -699,7 +724,10 @@ impl<'ctx> Emitter<'ctx> {
     }
 
     fn constant(&self, value: &Value) -> BasicValueEnum<'ctx> {
-        let Value::Num { ty, bits } = value else { unreachable!("declined earlier") };
+        if let Value::Bool(truth) = value {
+            return self.context.i64_type().const_int(u64::from(*truth), false).into();
+        }
+        let Value::Num { ty, bits } = value else { unreachable!("celled values do not come here") };
         match ty {
             Ty::B32 => {
                 let float = f32::from_bits(*bits as u32);
@@ -809,34 +837,54 @@ impl<'ctx> Emitter<'ctx> {
     }
 
     fn greater(&self, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>, ty: Ty) -> inkwell::values::IntValue<'ctx> {
-        if ty == Ty::B16 {
-            return self.compare_by_call(a, b, ty, runtime::GREATER);
-        }
-        if ty.is_float() {
-            self.builder
-                .build_float_compare(FloatPredicate::OGT, a.into_float_value(), b.into_float_value(), "gt")
-                .expect("a compare")
-        } else {
-            let predicate = if ty.is_signed() { IntPredicate::SGT } else { IntPredicate::UGT };
-            self.builder
-                .build_int_compare(predicate, a.into_int_value(), b.into_int_value(), "gt")
-                .expect("a compare")
-        }
+        self.relation(a, b, ty, CmpOp::Greater)
     }
 
     fn equal(&self, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>, ty: Ty) -> inkwell::values::IntValue<'ctx> {
+        self.relation(a, b, ty, CmpOp::Equal)
+    }
+
+    /// Whether two values stand in a relation — one instruction for the types the machine
+    /// can order, and a call for `b16`, whose values are sign-and-magnitude in sixteen
+    /// bits and so are neither an integer nor a float comparison.
+    fn relation(
+        &self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        ty: Ty,
+        op: CmpOp,
+    ) -> inkwell::values::IntValue<'ctx> {
         if ty == Ty::B16 {
-            return self.compare_by_call(a, b, ty, runtime::EQUAL);
+            let wanted = match op {
+                CmpOp::Less => runtime::LESS,
+                CmpOp::Greater => runtime::GREATER,
+                CmpOp::Equal => runtime::EQUAL,
+            };
+            return self.compare_by_call(a, b, ty, wanted);
         }
         if ty.is_float() {
-            self.builder
-                .build_float_compare(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value(), "eq")
-                .expect("a compare")
-        } else {
-            self.builder
-                .build_int_compare(IntPredicate::EQ, a.into_int_value(), b.into_int_value(), "eq")
-                .expect("a compare")
+            // The ordered predicates, so a NaN answers false to all three rather than
+            // sneaking a true out of one of them.
+            let predicate = match op {
+                CmpOp::Less => FloatPredicate::OLT,
+                CmpOp::Greater => FloatPredicate::OGT,
+                CmpOp::Equal => FloatPredicate::OEQ,
+            };
+            return self
+                .builder
+                .build_float_compare(predicate, a.into_float_value(), b.into_float_value(), "rel")
+                .expect("a compare");
         }
+        let predicate = match (op, ty.is_signed()) {
+            (CmpOp::Less, true) => IntPredicate::SLT,
+            (CmpOp::Less, false) => IntPredicate::ULT,
+            (CmpOp::Greater, true) => IntPredicate::SGT,
+            (CmpOp::Greater, false) => IntPredicate::UGT,
+            (CmpOp::Equal, _) => IntPredicate::EQ,
+        };
+        self.builder
+            .build_int_compare(predicate, a.into_int_value(), b.into_int_value(), "rel")
+            .expect("a compare")
     }
 
     /// Ask `luarust-num` how two values order, and test the answer against the one wanted.

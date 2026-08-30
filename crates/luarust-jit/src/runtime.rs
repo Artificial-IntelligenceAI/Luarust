@@ -160,7 +160,10 @@ fn untag(tag: u32) -> Ty {
 
 /// Rebuild a value from the bits compiled code was holding it in.
 fn value_of(tag: u32, bits: u64) -> Value {
-    Value::Num { ty: untag(tag), bits }
+    match untag(tag) {
+        Ty::Bool => Value::Bool(bits != 0),
+        ty => Value::Num { ty, bits },
+    }
 }
 
 /// Which operation, as a number compiled code can carry.

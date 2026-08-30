@@ -107,6 +107,24 @@ impl<'a> Parser<'a> {
         Err(Failed)
     }
 
+    /// Pick up after a statement that could not be understood, and be sure to have moved.
+    ///
+    /// [`Self::resynchronise`] stops at a `}` without eating it, so that a failure inside
+    /// a loop body does not swallow the brace that ends the body. At the top level there
+    /// is no body, nothing else consumes the brace, and the parser would otherwise try the
+    /// same token again forever — reporting the same error until it ran out of memory.
+    /// So: if recovering did not move, move.
+    fn recover(&mut self) {
+        let before = self.at;
+        self.resynchronise();
+        if self.at == before {
+            self.advance();
+            // And then get somewhere a statement could actually begin, rather than
+            // reporting every bracket on the way out as a statement that is not one.
+            self.resynchronise();
+        }
+    }
+
     /// Step forward to somewhere a new statement could plausibly begin, so that one
     /// misunderstood line does not turn into a hundred.
     fn resynchronise(&mut self) {
@@ -141,7 +159,7 @@ impl<'a> Parser<'a> {
         while self.peek_kind() != Kind::End {
             match self.statement() {
                 Ok(stmt) => stmts.push(stmt),
-                Err(Failed) => self.resynchronise(),
+                Err(Failed) => self.recover(),
             }
         }
         Program { stmts }
@@ -476,7 +494,7 @@ impl<'a> Parser<'a> {
             }
             match self.statement() {
                 Ok(stmt) => body.push(stmt),
-                Err(Failed) => self.resynchronise(),
+                Err(Failed) => self.recover(),
             }
         }
         let end = self.advance(); // `}`
@@ -553,7 +571,7 @@ impl<'a> Parser<'a> {
             Kind::Word if self.word() == Some("math") => {
                 let start = self.advance().span;
                 self.expect(Kind::OpenBlock, "`math` takes its arithmetic in `{ }`")?;
-                let inner = self.sum()?;
+                let inner = self.comparison()?;
                 let close = self.expect(Kind::CloseBlock, "a math block closes with `}`")?;
                 Ok(Expr::Math { inner: Box::new(inner), span: start.to(close.span) })
             }
@@ -596,6 +614,39 @@ impl<'a> Parser<'a> {
     // Loosest first. Exponent binds tightest and groups rightward, so `2 ** 3 ** 2` is
     // 512, and unary minus sits below it, so `-'x' ** 2` is `-('x' ** 2)` -- which is how
     // a mathematician reads it and, as it happens, how most languages do too.
+
+    /// The loosest thing a math block holds: at most one comparison.
+    ///
+    /// Deliberately not a chain. Mathematics reads `a < b < c` as both comparisons at
+    /// once, and most languages read it as comparing a `bool` to a number, which is
+    /// nonsense — so rather than pick the wrong one quietly, a second comparison is an
+    /// error that says the first one is what needs deciding.
+    fn comparison(&mut self) -> Result<Expr> {
+        let lhs = self.sum()?;
+        let op = match (self.peek_kind(), self.word()) {
+            (Kind::Less, _) => CmpOp::Less,
+            (Kind::Greater, _) => CmpOp::Greater,
+            (Kind::Equals, _) => CmpOp::Equal,
+            _ => return Ok(lhs),
+        };
+        self.advance();
+        let rhs = self.sum()?;
+        let span = lhs.span().to(rhs.span());
+
+        if matches!(self.peek_kind(), Kind::Less | Kind::Greater | Kind::Equals) {
+            let second = self.peek();
+            return self.fail(
+                Diagnostic::new("E0114", "there are two comparisons here.")
+                    .secondary(span, "this one")
+                    .primary(second.span, "and this one")
+                    .rule("a comparison compares two things, and is not chained")
+                    .tip("mathematics reads `a < b < c` as both at once; most languages read it as comparing a `bool` to a number, which is nothing. Luarust refuses rather than pick.")
+                    .fix("compare two things at a time."),
+            );
+        }
+
+        Ok(Expr::Compare { op, lhs: Box::new(lhs), rhs: Box::new(rhs), span })
+    }
 
     fn sum(&mut self) -> Result<Expr> {
         let mut lhs = self.product()?;
@@ -689,7 +740,7 @@ impl<'a> Parser<'a> {
             }
             Kind::OpenGroup => {
                 self.advance();
-                let inner = self.sum()?;
+                let inner = self.comparison()?;
                 self.expect(Kind::CloseGroup, "a group opened with `(` closes with `)`")?;
                 Ok(inner)
             }
@@ -748,6 +799,9 @@ mod tests {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }
             Expr::Math { inner, .. } => show(inner),
+            Expr::Compare { op, lhs, rhs, .. } => {
+                format!("({} {} {})", op.word(), show(lhs), show(rhs))
+            }
         }
     }
 
@@ -887,6 +941,39 @@ mod tests {
         assert_eq!(math("2 ÷ 3"), math("2 div 3"));
         assert_eq!(math("2 ** 3"), math("2 xx 3"));
         assert_eq!(math("2 ** 3"), math("2 pow 3"));
+    }
+
+    #[test]
+    fn a_comparison_is_the_loosest_thing_in_a_math_block() {
+        assert_eq!(math("'a' + 1 < 'b'"), "(< (+ a 1) b)");
+        assert_eq!(math("'a' < 'b' + 1"), "(< a (+ b 1))");
+        assert_eq!(math("'a' x 2 = 'b'"), "(= (* a 2) b)");
+        assert_eq!(math("'a' > 'b'"), "(> a b)");
+        // `=` inside a math block is a comparison; the `=` of a declaration is elsewhere
+        // entirely, between a list of names and a list of values, so there is no clash.
+        assert_eq!(math("('a' + 1) = ('b' - 1)"), "(= (+ a 1) (- b 1))");
+    }
+
+    #[test]
+    fn a_chain_of_comparisons_is_refused_rather_than_guessed_at() {
+        // The first error is the one that matters; what follows is the parser finding its
+        // way out of a math block it was left in the middle of.
+        for source in [
+            "var.local.bool ['c'] = [math { 'a' < 'b' < 'c' }];",
+            "var.local.bool ['c'] = [math { 'a' = 'b' = 'c' }];",
+        ] {
+            assert_eq!(codes(source).first().map(String::as_str), Some("E0114"), "{source}");
+        }
+    }
+
+    #[test]
+    fn recovering_from_a_bad_statement_always_moves_forward() {
+        // A failure inside a math block leaves the cursor at a `}`, which resynchronising
+        // deliberately will not eat -- so without forcing progress the parser reported the
+        // same error until it ran out of memory. This finishes.
+        let out = parse_str("var.local.bool ['c'] = [math { 'a' < 2 < 3 }];\nprint[\"after\"];");
+        assert!(out.errors.len() < 5, "{} errors from one bad line", out.errors.len());
+        assert_eq!(out.errors[0].code, "E0114");
     }
 
     #[test]

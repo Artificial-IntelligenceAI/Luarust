@@ -16,7 +16,9 @@ pub mod value;
 use ir::Checked;
 use luarust_diag::{Diagnostic, Span};
 use luarust_num::binary::{self, Round};
-use luarust_parse::ast::{self, BinOp, Expr as AExpr, Lifetime, PrintItem, Stmt as AStmt, Ty, Visibility};
+use luarust_parse::ast::{
+    self, BinOp, CmpOp, Expr as AExpr, Lifetime, PrintItem, Stmt as AStmt, Ty, Visibility,
+};
 use std::collections::HashMap;
 use value::{Overflow, Value, format_of};
 
@@ -462,12 +464,43 @@ impl Checker {
                 Some(ir::Expr::Neg { ty, operand: Box::new(value), span: *span })
             }
 
+            AExpr::Compare { op, lhs, rhs, span } => {
+                // A comparison answers `bool` whatever its two sides are, so what is
+                // expecting it says nothing about them.
+                self.agree(Ty::Bool, expected, *span)?;
+                // Whichever side knows what it is goes first, and tells the other. A
+                // comparison says nothing about its sides, so if neither knows, nothing
+                // does -- but `-97 < 'x'` is perfectly well typed and reading only the
+                // left of it would say otherwise.
+                let (lhs, rhs) = self.two_sides(lhs, rhs, None)?;
+                let operands = lhs.ty();
+
+                let orderable = operands.is_integer() || operands.is_float();
+                if matches!(op, CmpOp::Less | CmpOp::Greater) && !orderable {
+                    self.error(
+                        Diagnostic::new("E0220", format!("`{}` cannot be put in order.", operands.word()))
+                            .primary(*span, format!("compared with `{}` here", op.word()))
+                            .rule("`<` and `>` order numbers")
+                            .tip("`=` works on anything, since two things of the same type are either the same or not.")
+                            .fix("use `=`, or compare numbers."),
+                    );
+                    return None;
+                }
+
+                Some(ir::Expr::Compare {
+                    op: *op,
+                    operands,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: *span,
+                })
+            }
+
             AExpr::Binary { op, lhs, rhs, span } => {
-                // Take the left side first, and hold whatever it turned out to be against
-                // the right, so that `'x' + 1` reads the 1 as whatever `'x'` is.
-                let lhs = self.expr(lhs, expected)?;
+                // Whichever side knows what it is goes first and tells the other, so both
+                // `'x' + 1` and `1 + 'x'` read the 1 as whatever `'x'` is.
+                let (lhs, rhs) = self.two_sides(lhs, rhs, expected)?;
                 let ty = lhs.ty();
-                let rhs = self.expr(rhs, Some(ty))?;
                 if !ty.is_integer() && !ty.is_float() {
                     self.error(
                         Diagnostic::new("E0213", format!("`{}` cannot be calculated with.", ty.word()))
@@ -480,6 +513,26 @@ impl Checker {
                 Some(ir::Expr::Binary { op: *op, ty, lhs: Box::new(lhs), rhs: Box::new(rhs), span: *span })
             }
         }
+    }
+
+    /// Check two operands, starting from whichever of them carries a type.
+    ///
+    /// Returns them in the order they were written, whichever order they were checked in.
+    fn two_sides(
+        &mut self,
+        lhs: &AExpr,
+        rhs: &AExpr,
+        expected: Option<Ty>,
+    ) -> Option<(ir::Expr, ir::Expr)> {
+        if expected.is_some() || self_typing(lhs) || !self_typing(rhs) {
+            let lhs = self.expr(lhs, expected)?;
+            let ty = lhs.ty();
+            let rhs = self.expr(rhs, Some(ty))?;
+            return Some((lhs, rhs));
+        }
+        let rhs = self.expr(rhs, None)?;
+        let lhs = self.expr(lhs, Some(rhs.ty()))?;
+        Some((lhs, rhs))
     }
 
     /// A literal has no type of its own, so refuse politely when nothing supplies one.
@@ -602,6 +655,21 @@ impl Checker {
             .rule("a written value must be a value of the type it is read as")
             .tip(tip)
             .fix("write a plain number, such as `'1000'` or `'0.1'`.")
+    }
+}
+
+/// Whether an expression settles its own type without being told.
+///
+/// A variable does, because it was declared. A written number does not, and neither does
+/// the clock or a percentage: those take the type of whatever is expecting them.
+fn self_typing(expr: &AExpr) -> bool {
+    match expr {
+        AExpr::Name(_) => true,
+        AExpr::Compare { .. } => true,
+        AExpr::Math { inner, .. } => self_typing(inner),
+        AExpr::Unary { operand, .. } => self_typing(operand),
+        AExpr::Binary { lhs, rhs, .. } => self_typing(lhs) || self_typing(rhs),
+        AExpr::Literal { .. } | AExpr::Number { .. } | AExpr::TimeNow { .. } | AExpr::Percent { .. } => false,
     }
 }
 

@@ -199,6 +199,24 @@ impl BinOp {
     }
 }
 
+/// How two values are being compared.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CmpOp {
+    Less,
+    Greater,
+    Equal,
+}
+
+impl CmpOp {
+    pub fn word(self) -> &'static str {
+        match self {
+            CmpOp::Less => "<",
+            CmpOp::Greater => ">",
+            CmpOp::Equal => "=",
+        }
+    }
+}
+
 /// Anything that produces a value.
 #[derive(Clone, Debug)]
 pub enum Expr {
@@ -217,6 +235,8 @@ pub enum Expr {
     /// `math { … }`. Kept as a node because it is the boundary where bare numbers and
     /// operators become legal.
     Math { inner: Box<Expr>, span: Span },
+    /// `a < b`, `a > b`, `a = b`. Answers `bool` whatever its two sides were.
+    Compare { op: CmpOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
 }
 
 impl Expr {
@@ -228,7 +248,8 @@ impl Expr {
             | Expr::Percent { span, .. }
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }
-            | Expr::Math { span, .. } => *span,
+            | Expr::Math { span, .. }
+            | Expr::Compare { span, .. } => *span,
             Expr::Name(ident) => ident.span,
         }
     }

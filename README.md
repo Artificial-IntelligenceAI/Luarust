@@ -166,6 +166,9 @@ Most operators have more than one spelling, and they all mean exactly the same t
 | raise to a power | `**` | `xx` or `pow` |
 | divide | `/` | `÷` or `div` |
 | remainder | `mod` | |
+| less than | `<` | |
+| greater than | `>` | |
+| equal to | `=` | |
 
 `%` is **not** remainder. Mathematics has never used it for one — it is percent, written
 after a number, so `15%` is fifteen hundredths:
@@ -188,6 +191,39 @@ math { 7 mod -3 }     -- -2, not 1
 
 So `'i' mod 3` cycles `0 1 2` however `'i'` is signed, which is what anyone counting
 actually wanted.
+
+### Comparing
+
+Three of them, and they answer `bool`:
+
+```luarust
+var.local.i32 ['a', 'b'] = ['3', '5'];
+
+var.local.bool ['less'] = [math { 'a' < 'b' }];     -- true
+var.local.bool ['more'] = [math { 'a' > 'b' }];     -- false
+var.local.bool ['same'] = [math { 'a' = 'a' }];     -- true
+```
+
+`=` here is not the `=` of a declaration, and cannot be mistaken for it: that one only ever
+sits between a list of names and a list of values, and this one only ever sits inside a
+math block.
+
+A comparison is the loosest thing in a math block, so `math { 'a' + 1 < 'b' }` compares the
+sum, which is how it reads.
+
+**A comparison is not chained.** Mathematics reads `a < b < c` as both comparisons at once
+and most languages read it as comparing a `bool` to a number, which is nothing at all.
+Luarust refuses to pick:
+
+```
+error[E0114]: there are two comparisons here.
+```
+
+**A NaN answers false to all three**, itself included, because it is not less than, greater
+than, or equal to anything. `math { 'n' = 'n' }` where `'n'` is a NaN is `false`.
+
+`<` and `>` order numbers. `=` works on anything, since two things of the same type are
+either the same or they are not.
 
 Words work as operators here because a name is always quoted. `'x'` is a variable and a
 bare `x` cannot be one, so there is nothing for `math { 'a' x 'b' }` to be confused with.

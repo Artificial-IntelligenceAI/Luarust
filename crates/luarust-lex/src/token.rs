@@ -51,6 +51,10 @@ pub enum Kind {
     Slash,
     /// `%` — percent, written after a number. Never remainder; that is the word `mod`.
     Percent,
+    /// `<`
+    Less,
+    /// `>`
+    Greater,
 
     /// A bare word: a keyword, a chain part, a type, or a word-spelled operator.
     Word,
@@ -87,6 +91,8 @@ impl Kind {
             Kind::StarStar => "`**`",
             Kind::Slash => "`/`",
             Kind::Percent => "`%`",
+            Kind::Less => "`<`",
+            Kind::Greater => "`>`",
             Kind::Word => "a word",
             Kind::Number => "a number",
             Kind::Name => "a name",

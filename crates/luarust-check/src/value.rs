@@ -12,7 +12,7 @@
 use luarust_diag::{Diagnostic, Span};
 use luarust_num::Uint;
 use luarust_num::binary::{self, Comparison, Format, Round};
-use luarust_parse::ast::{BinOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, Ty};
 
 /// The working width every float format fits in. `b256` needs the most.
 pub type Bits = Uint<8>;
@@ -103,6 +103,19 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
             binary::compare(fmt, x, y)
         }
         _ => Comparison::Unordered,
+    }
+}
+
+/// Whether an ordering satisfies what was asked of it.
+///
+/// A NaN is not less than, greater than, or equal to anything, itself included, so all
+/// three answer false for one. That is what unordered means, and it lives here so that
+/// every execution path decides it the same way.
+pub fn holds(op: CmpOp, ordering: Comparison) -> bool {
+    match op {
+        CmpOp::Less => ordering == Comparison::Less,
+        CmpOp::Greater => ordering == Comparison::Greater,
+        CmpOp::Equal => ordering == Comparison::Equal,
     }
 }
 

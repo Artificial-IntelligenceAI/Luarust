@@ -20,7 +20,9 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
-use luarust_check::value::{Stopped, Value, binary_op, compare, format_of, int_op, negate};
+use luarust_check::value::{
+    Stopped, Value, binary_op, compare, format_of, holds, int_op, negate,
+};
 use luarust_num::binary::{self, Comparison, Round};
 use std::io::Write;
 use std::time::Instant;
@@ -73,6 +75,11 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 )
                 .map_err(|fault| Stopped { fault, span })?;
                 registers[dst as usize] = value;
+            }
+
+            Op::Compare { op, dst, lhs, rhs, .. } => {
+                let ordering = compare(&registers[lhs as usize], &registers[rhs as usize]);
+                registers[dst as usize] = Value::Bool(holds(op, ordering));
             }
 
             Op::Neg { dst, src } => {

@@ -24,14 +24,14 @@ use crate::chunk::{Chunk, Op};
 use luarust_check::value::{Overflow, Value};
 use luarust_diag::Span;
 use luarust_num::Uint;
-use luarust_parse::ast::{BinOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, Ty};
 
 /// What every Luarust chunk begins with.
 pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -202,7 +202,23 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             out.push(9);
             put_u32(out, target);
         }
+        Op::Compare { op, operands, dst, lhs, rhs } => {
+            out.push(11);
+            out.push(cmp_tag(op));
+            out.push(ty_tag(operands));
+            put_u16(out, dst);
+            put_u16(out, lhs);
+            put_u16(out, rhs);
+        }
         Op::Halt => out.push(10),
+    }
+}
+
+fn cmp_tag(op: CmpOp) -> u8 {
+    match op {
+        CmpOp::Less => 0,
+        CmpOp::Greater => 1,
+        CmpOp::Equal => 2,
     }
 }
 
@@ -357,7 +373,7 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
                 register(dst)?;
                 register(src)?;
             }
-            Op::Binary { dst, lhs, rhs, .. } => {
+            Op::Binary { dst, lhs, rhs, .. } | Op::Compare { dst, lhs, rhs, .. } => {
                 register(dst)?;
                 register(lhs)?;
                 register(rhs)?;
@@ -476,6 +492,15 @@ impl<'a> Cursor<'a> {
         })
     }
 
+    fn cmp(&mut self) -> Result<CmpOp, Broken> {
+        Ok(match self.u8()? {
+            0 => CmpOp::Less,
+            1 => CmpOp::Greater,
+            2 => CmpOp::Equal,
+            other => return Err(Broken::Unknown { what: "comparison", value: other as u64 }),
+        })
+    }
+
     fn op(&mut self) -> Result<Op, Broken> {
         Ok(match self.u8()? {
             0 => Op::Const { dst: self.u16()?, konst: self.u32()? },
@@ -495,6 +520,13 @@ impl<'a> Cursor<'a> {
             8 => Op::JumpIfEqual { lhs: self.u16()?, rhs: self.u16()?, target: self.u32()? },
             9 => Op::Jump { target: self.u32()? },
             10 => Op::Halt,
+            11 => Op::Compare {
+                op: self.cmp()?,
+                operands: self.ty()?,
+                dst: self.u16()?,
+                lhs: self.u16()?,
+                rhs: self.u16()?,
+            },
             other => Err(Broken::Unknown { what: "instruction", value: other as u64 })?,
         })
     }
