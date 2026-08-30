@@ -58,6 +58,33 @@ The two lists have to be the same length. Three names and two values is an error
 it names the one that went without — Luarust will not invent a value you did not
 write.
 
+## Changing things
+
+`var` makes a variable. `set` changes one that already exists:
+
+```luarust
+var.local.mut.b16 ['x'] = ['1000'];
+set ['x'] = [math { 'x' + 1 }];
+```
+
+A variable cannot be changed unless it said it could. `mut` goes in the chain, and
+without it that second line is an error — one that names the word you left out rather
+than the line you wrote it on.
+
+`set` carries no visibility and no type, because the variable already has both. It takes
+the same lists as everything else:
+
+```luarust
+var.local.mut.b16 ['a', 'b'] = ['1', '2'];
+set ['a', 'b'] = ['10', '20'];
+```
+
+`mut` hoists like the rest of the chain, so names that share it say it once:
+
+```luarust
+var.local.mut [b16 'a', b64 'b'] = ['1', '2'];
+```
+
 ## Printing
 
 `print` takes its items in brackets, juxtaposed rather than separated by anything:
