@@ -17,6 +17,15 @@ jobs:
           uname -m; nproc
           grep -m1 "model name" /proc/cpuinfo || true
 
+      # Pinned, because the table in the README names a version. Left to the runner's
+      # default it would change under us and the label beside the number would quietly
+      # stop being true.
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: LLVM 21, for the JIT
         run: |
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
@@ -34,6 +43,7 @@ jobs:
           sudo apt-get install -y -qq lua5.4 luajit >/dev/null 2>&1
           cargo install lust-rs >/dev/null 2>&1
           lua5.4 -v; luajit -v; lust --version; java --version | head -1; cc --version | head -1
+          echo "-- the versions above are what the README's table is describing --"
           exit 0
 
       - name: Run
@@ -119,7 +129,7 @@ jobs:
 
             bench "C, clang -O2"   ./bench_c $N
             bench "Rust, rustc -O"  ./bench_rs $N
-            bench "Java"           java Bench $N
+            bench "Java 21"        java Bench $N
             bench "Lua 5.4"        lua5.4 bench.lua
             bench "LuaJIT"         luajit bench.lua
             bench "Lust"           lust bench.lust
