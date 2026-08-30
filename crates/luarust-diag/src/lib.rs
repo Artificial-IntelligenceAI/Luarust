@@ -14,3 +14,6 @@
 //! separated here rather than left for whoever writes the renderer to conflate.
 
 pub mod grapheme;
+pub mod source;
+
+pub use source::{Position, SourceFile, Span};
