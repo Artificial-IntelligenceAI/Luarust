@@ -385,3 +385,43 @@ or once for the whole project:
 [defaults]
 overflow = "trap"
 ```
+
+## Errors
+
+An error apologises for the interruption, points at the code, names the rule that was
+broken, and finishes on the fix — so the last thing left on screen is what to do next.
+
+```
+Hello, I think there may be thing(s) wrong with your code. I'm sorry, if I'm wrong.
+
+file: /Users/ts/hello/src/main.lr, line: 4, column: 6 (src/main.lr:4:6)
+
+`'total'` cannot be changed, because its declaration never said it could.
+
+  2 | var.local.ui32 ['total'] = ['0'];
+    |     ~~~~~ declared here, and `mut` is not in the chain
+  4 | set ['total'] = ['55'];
+    |      ^^^^^^^ changed here
+
+Error code: E0104
+Rule(s) broken: a variable changes only if its declaration says `mut`
+Tip(s): `mut` goes between the visibility and the type.
+Suggested fix(s): line 2 — `var.local.mut.ui32 ['total'] = ['0'];`
+
+1 error.
+```
+
+The greeting is printed once however many errors follow it, and the count once at the end.
+
+**Columns are counted the way a reader counts.** `🧑‍🧑‍🧒‍🧒` is one character, exactly as `c`
+is, though it is seven Unicode scalars welded together with zero-width joiners and
+twenty-five bytes on disk. The short `file:line:column` in brackets carries a **byte**
+column instead, because its job is to be pasted into an editor or a `grep`, and that is
+the number those understand.
+
+Carets are laid out in **terminal cells**, which is a third measurement again — an emoji
+draws two cells wide where a letter draws one. The number you read and the caret you see
+are counted differently on purpose, and both have to be right.
+
+Every error names a rule. The message says what went wrong here; the rule says what is
+true everywhere.
