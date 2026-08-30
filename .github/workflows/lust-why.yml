@@ -64,10 +64,33 @@ jobs:
             printf "%-28s %7s ms   %s\n" "$name" "$best" "$out"
           }
 
+          # And the same loop with nothing in it but an add. If a trace JIT is going to
+          # fire anywhere it is here, and if this is no faster per iteration than the
+          # remainder version then there is no native code being made at all.
+          sudo apt-get install -y -qq lua5.4 >/dev/null 2>&1
+          cat > add.lust <<EOF
+          local sum: int = 0
+          for i = 1, $N do
+            sum = sum + i
+          end
+          println(tostring(sum))
+          EOF
+          cat > add.lua <<EOF
+          local sum = 0
+          for i = 1, $N do
+            sum = sum + i
+          end
+          io.write(sum)
+          EOF
+
           echo "N = $N"
-          bench "loop at the top level"   lust top.lust
-          bench "loop inside a function"  lust wrapped.lust
-          bench "called once to warm up"  lust warmed.lust
+          bench "lust, top level"         lust top.lust
+          bench "lust, in a function"     lust wrapped.lust
+          bench "lust, warmed up"         lust warmed.lust
+          echo
+          echo "and with no remainder in it, just an add:"
+          bench "lust, add only"          lust add.lust
+          bench "lua 5.4, add only"       lua5.4 add.lua
           exit 0
 
       - name: Does it say anything about the JIT?
