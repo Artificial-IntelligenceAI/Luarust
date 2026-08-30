@@ -171,6 +171,7 @@ version = "0.0.0"
 dependencies = [
  "luarust-check",
  "luarust-diag",
+ "luarust-gen",
  "luarust-interp",
  "luarust-lex",
  "luarust-num",

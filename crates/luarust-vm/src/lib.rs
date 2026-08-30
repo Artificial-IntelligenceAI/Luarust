@@ -14,9 +14,11 @@
 
 pub mod chunk;
 pub mod compile;
+pub mod serialize;
 
 pub use chunk::{Chunk, Op};
 pub use compile::compile;
+pub use serialize::{Broken, Loaded, read, write};
 
 use luarust_check::value::{Stopped, Value, binary_op, compare, format_of, negate};
 use luarust_num::binary::{self, Comparison, Round};

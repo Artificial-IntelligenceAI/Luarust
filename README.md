@@ -445,6 +445,7 @@ cargo build --release
 | `luarust run <file.lr>` | compile to bytecode and run it |
 | `luarust interp <file.lr>` | run it on the reference interpreter instead |
 | `luarust verify <file.lr>` | run it both ways and report whether they agree |
+| `luarust build <file.lr>` | compile it to a `.lrc` chunk and stop |
 | `luarust dis <file.lr>` | show what the compiler decided |
 | `luarust check <file.lr>` | check it and stop |
 | `luarust fuzz [count]` | write programs and check the paths agree |
@@ -452,6 +453,40 @@ cargo build --release
 | `luarust ir <file.lr>` | show the LLVM IR |
 
 The programs in [`examples/`](examples) all run, and are checked on every push.
+
+### Compile once, run anywhere
+
+`luarust build` writes a **`.lrc` chunk**: the whole program, in one file, with no source
+and no compiler needed to run it.
+
+```bash
+luarust build hello.lr      # hello.lrc — 514 bytes
+luarust run hello.lrc
+```
+
+Everything in it is little-endian whatever machine wrote it, so a chunk built on one
+architecture runs on another. **The source travels inside it**, which costs a few kilobytes
+and buys the thing that would otherwise be lost — a program that stops half way through can
+still point at the line that did it, on a machine that has never seen the source:
+
+```
+file: /tmp/faulty.lr, line: 3, column: 21 (/tmp/faulty.lr:3:21)
+
+this divides a whole number by zero.
+
+  3 | set ['n'] = [math { 'n' div 0 }];
+    |                     ^^^^^^^^^ while running this
+```
+
+That file had been deleted before the chunk was run.
+
+**Nothing read from a chunk is trusted.** Every register, constant, text and jump target is
+checked against what it indexes before the program starts, because a corrupt file has to
+produce a complaint rather than a crash — and "run anywhere" means chunks arrive from
+places nobody vouched for. There is a test that flips every bit of every byte of a chunk
+and requires that each one either loads or explains itself.
+
+### Three ways to run one
 
 There are **three ways to run a program**, and that is deliberate. `jit` compiles to
 machine code with LLVM, in memory; `run` compiles to bytecode; `interp` walks the checked

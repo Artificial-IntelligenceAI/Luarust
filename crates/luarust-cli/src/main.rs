@@ -2,7 +2,7 @@
 
 use luarust_diag::{Diagnostic, SourceFile};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -12,6 +12,7 @@ luarust — a language that would rather not guess
     luarust interp <file.lr>    run it on the reference interpreter instead
     luarust verify <file.lr>    run it both ways and report whether they agree
     luarust dis <file.lr>       show what the compiler decided
+    luarust build <file.lr>     compile it to a .lrc chunk and stop
     luarust check <file.lr>     check it and stop
     luarust fuzz [count]        write programs and check the paths agree
     luarust --help              this
@@ -30,6 +31,7 @@ enum Then {
     Run,
     Interpret,
     Verify,
+    Build,
     Disassemble,
     #[cfg(feature = "jit")]
     Jit,
@@ -46,6 +48,7 @@ fn main() -> ExitCode {
         Some("run") => Then::Run,
         Some("interp") => Then::Interpret,
         Some("verify") => Then::Verify,
+        Some("build") => Then::Build,
         Some("dis") => Then::Disassemble,
         #[cfg(feature = "jit")]
         Some("jit") => Then::Jit,
@@ -81,14 +84,28 @@ fn main() -> ExitCode {
 }
 
 fn act(path: PathBuf, then: Then) -> ExitCode {
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(why) => {
             eprintln!("{} could not be read: {why}", path.display());
             return ExitCode::from(2);
         }
     };
-    let source = SourceFile::new(path, text);
+
+    // A chunk is recognised by what it begins with rather than by what it is called, so a
+    // renamed file still works and a source file that happens to end in .lrc still does.
+    if bytes.starts_with(luarust_vm::serialize::MAGIC) {
+        return run_chunk(&bytes, &path, then);
+    }
+
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            eprintln!("{} is neither Luarust source nor a Luarust chunk.", path.display());
+            return ExitCode::from(2);
+        }
+    };
+    let source = SourceFile::new(path.clone(), text);
 
     // Each stage runs only if the one before it had nothing to say, because a parser fed
     // broken tokens invents problems that are not really there.
@@ -119,6 +136,26 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         Then::Disassemble => {
             print!("{}", luarust_vm::compile(&program).disassemble());
             ExitCode::SUCCESS
+        }
+
+        Then::Build => {
+            let chunk = luarust_vm::compile(&program);
+            let bytes = luarust_vm::serialize::write(
+                &chunk,
+                &path.display().to_string(),
+                source.text(),
+            );
+            let out = path.with_extension("lrc");
+            match std::fs::write(&out, &bytes) {
+                Ok(()) => {
+                    println!("{} — {} bytes", out.display(), bytes.len());
+                    ExitCode::SUCCESS
+                }
+                Err(why) => {
+                    eprintln!("{} could not be written: {why}", out.display());
+                    ExitCode::from(2)
+                }
+            }
         }
 
         Then::Run => {
@@ -160,6 +197,46 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+/// Run, or look at, a chunk that came off disk.
+///
+/// Nothing is lexed, parsed or checked: the file *is* the program. The source it was
+/// compiled from travels inside it, which is what lets a program that stops half way
+/// through still point at the line that did it, on a machine that has never seen the
+/// source.
+fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
+    let loaded = match luarust_vm::serialize::read(bytes) {
+        Ok(loaded) => loaded,
+        Err(broken) => {
+            eprintln!("{}: {broken}", path.display());
+            return ExitCode::from(2);
+        }
+    };
+
+    match then {
+        Then::Disassemble => {
+            print!("{}", loaded.chunk.disassemble());
+            ExitCode::SUCCESS
+        }
+        Then::Nothing => {
+            println!("{} — a Luarust chunk, and it checks out.", path.display());
+            ExitCode::SUCCESS
+        }
+        Then::Run => {
+            let source = SourceFile::new(loaded.path.clone(), loaded.source.clone());
+            let mut out = std::io::stdout().lock();
+            finish(luarust_vm::run(&loaded.chunk, &mut out), &mut out, &source)
+        }
+        _ => {
+            eprintln!(
+                "{} is a chunk, so it can only be `run`, `dis`, or `check`. \
+                 The other commands need the source.",
+                path.display()
+            );
+            ExitCode::from(2)
+        }
     }
 }
 

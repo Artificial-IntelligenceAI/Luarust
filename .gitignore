@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Compiled chunks. Built from the sources beside them.
+*.lrc
