@@ -230,6 +230,70 @@ pub fn sqrt<const W: usize>(fmt: Format, mode: Round, a: Uint<W>) -> Uint<W> {
     round_and_pack(fmt, mode, false, root, exp / 2)
 }
 
+/// The remainder of `a ÷ b`, exactly, with the sign of `a`.
+///
+/// This is `fmod`: `a − b × trunc(a ÷ b)`, and the reason it is not computed that way is
+/// that it cannot be. Once the quotient is too large to hold exactly — anything past
+/// `2^p` — rounding it throws away precisely the information the remainder is made of,
+/// and the answer comes back zero when it should not. `4.88e35 mod −1954` is `−1430`, and
+/// forming the quotient first says `0`.
+///
+/// So the quotient is never formed. Both values are a whole number times a power of two,
+/// which makes this an integer remainder with the exponents accounted for: reduce the
+/// dividend's significand modulo the divisor's, then walk the exponent difference down in
+/// as large a step as the working width allows.
+///
+/// Every step is exact, so the answer is exact. No rounding happens anywhere.
+pub fn remainder<const W: usize>(fmt: Format, a: Uint<W>, b: Uint<W>) -> Uint<W> {
+    let (x, y) = (unpack(fmt, a), unpack(fmt, b));
+
+    if x.class == Class::Nan {
+        return quiet(fmt, a);
+    }
+    if y.class == Class::Nan {
+        return quiet(fmt, b);
+    }
+    // Nothing is left over from an infinity, and nothing divides into zero.
+    if x.class == Class::Infinite || y.class == Class::Zero {
+        return quiet_nan(fmt);
+    }
+    // Everything is left over from a division by infinity, and from zero, nothing.
+    if y.class == Class::Infinite || x.class == Class::Zero {
+        return a;
+    }
+
+    // A dividend smaller than the divisor is entirely the remainder, sign and all --
+    // which is what keeps `-0 mod 859` at `-0` rather than turning it positive.
+    if compare(fmt, abs(fmt, a), abs(fmt, b)) == Comparison::Less {
+        return a;
+    }
+
+    let (sx, ex) = (x.sig, x.exp);
+    let (sy, ey) = (y.sig, y.exp);
+
+    let (residue, scale) = if ex >= ey {
+        // Reduce, then double the exponent gap away -- in chunks of as many bits as the
+        // working width has spare, rather than one at a time.
+        let mut r = sx.div_rem(sy).1;
+        let mut gap = (ex - ey) as u32;
+        while gap > 0 {
+            let step = gap.min(Uint::<W>::BITS - sy.bit_len());
+            r = r.shl(step).div_rem(sy).1;
+            gap -= step;
+        }
+        (r, ey)
+    } else {
+        // The divisor is finer-grained than the dividend. It cannot be much finer, since
+        // the dividend is the larger number, so this shift is bounded by the precision.
+        let shift = (ey - ex) as u32;
+        debug_assert!(shift < fmt.precision, "the larger value has the coarser scale");
+        (sx.div_rem(sy.shl(shift)).1, ex)
+    };
+
+    // Exact: the residue is smaller than the divisor's significand, so it fits.
+    round_and_pack(fmt, Round::TowardZero, x.sign, residue, scale)
+}
+
 /// Compare two values, IEEE 754 style: a NaN on either side leaves them unordered, and
 /// the two zeros are equal despite their differing signs.
 pub fn compare<const W: usize>(fmt: Format, a: Uint<W>, b: Uint<W>) -> Comparison {
@@ -634,6 +698,65 @@ mod tests {
             assert_eq!(compare(f, nzero, one_v), Comparison::Less, "{name}");
             assert_eq!(compare(f, pinf, one_v), Comparison::Greater, "{name}");
             assert_eq!(compare(f, ninf, pinf), Comparison::Less, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_remainder_matches_the_hardware() {
+        // `%` on an f64 is fmod, and fmod is exact, so this is a real oracle.
+        let f = Format::B64;
+        let mut rng = Rng::new(11);
+        for _ in 0..200_000 {
+            let (x, y) = (rng.f64(), rng.f64());
+            let got = remainder(f, f64_in(x), f64_in(y));
+            assert!(same_f64(got, x % y), "{x:e} mod {y:e}");
+        }
+        for x in AWKWARD_F64 {
+            for y in AWKWARD_F64 {
+                let got = remainder(f, f64_in(x), f64_in(y));
+                assert!(same_f64(got, x % y), "{x:e} mod {y:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_remainder_survives_a_quotient_too_large_to_hold() {
+        // The case that forming the quotient gets wrong. 4.88e35 divided by -1954 is
+        // about -2.5e32, which has an ulp far larger than one -- so rounding it throws
+        // away exactly the part the remainder is made of, and the answer comes back zero.
+        let f = Format::B64;
+        let (x, y) = (4.881682476028273e35f64, -1954.0f64);
+        let got = remainder(f, f64_in(x), f64_in(y));
+        assert_eq!(f64_out(got), x % y);
+        assert_ne!(f64_out(got), 0.0, "this is the answer the naive method gives");
+
+        // And a zero dividend keeps its sign, which the naive method also loses.
+        let got = remainder(f, f64_in(-0.0), f64_in(859.0));
+        assert!(f64_out(got).is_sign_negative(), "-0 mod 859 is -0");
+    }
+
+    #[test]
+    fn the_remainder_is_exact_at_every_width() {
+        // Nothing rounds, so the answer is always smaller than the divisor and always a
+        // whole number of the divisor's steps away from the dividend.
+        for f in [Format::B16, Format::B32, Format::B64, Format::B128, Format::B256] {
+            let one = one::<8>(f, false);
+            let three = add(f, Round::TiesToEven, add(f, Round::TiesToEven, one, one), one);
+            let seven = add(
+                f,
+                Round::TiesToEven,
+                add(f, Round::TiesToEven, three, three),
+                one,
+            );
+            // 7 mod 3 is 1, whatever the width.
+            assert_eq!(remainder(f, seven, three), one, "{}", f.name);
+            // And -7 mod 3 is -1, since this one takes the sign of the dividend.
+            assert_eq!(
+                remainder(f, neg(f, seven), three),
+                neg(f, one),
+                "{}",
+                f.name
+            );
         }
     }
 

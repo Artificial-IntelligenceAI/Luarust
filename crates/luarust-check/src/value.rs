@@ -212,6 +212,25 @@ pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Res
     if ty.is_integer() && rhs.ty().is_integer() {
         return integer_op(op, ty, lhs, rhs, overflow);
     }
+    // b32 and b64 are the two formats the hardware knows, and for these operations what
+    // the hardware does is *correctly rounded* -- which means there is exactly one right
+    // answer and both routes give it. That is not an assumption: `luarust-num` is checked
+    // against the machine over 200,000 random pairs per operation, and this fast path is
+    // checked against `luarust-num` again below. Doing it natively is worth roughly an
+    // order of magnitude, since the alternative is an IEEE implementation in software.
+    //
+    // NaN payloads may differ between the two routes. Nothing in Luarust can observe one:
+    // a NaN prints as `nan` and compares as unordered whatever it is carrying.
+    if ty == rhs.ty() {
+        if let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (lhs, rhs) {
+            match ty {
+                Ty::B64 => return Ok(Value::Num { ty, bits: f64_op(op, *a, *b)? }),
+                Ty::B32 => return Ok(Value::Num { ty, bits: f32_op(op, *a, *b)? }),
+                _ => {}
+            }
+        }
+    }
+
     match (lhs.bits(), rhs.bits()) {
         (Some(a), Some(b)) if ty == rhs.ty() => float_op(op, ty, a, b),
         _ => Err(Fault::new(
@@ -376,6 +395,59 @@ fn power(op: BinOp, ty: Ty, a: i128, b: i128, overflow: Overflow) -> Result<u64,
 }
 
 
+/// `b64` arithmetic on the hardware, taking and returning the stored bits.
+pub fn f64_op(op: BinOp, a: u64, b: u64) -> Result<u64, Fault> {
+    let (x, y) = (f64::from_bits(a), f64::from_bits(b));
+    let value = match op {
+        BinOp::Add => x + y,
+        BinOp::Sub => x - y,
+        BinOp::Mul => x * y,
+        BinOp::Div => x / y,
+        // Rust's `%` truncates and takes the sign of the dividend; mathematics takes the
+        // sign of the divisor, so where they differ the divisor is added back. Both steps
+        // are exact, so nothing rounds twice.
+        BinOp::Mod => {
+            let truncated = x % y;
+            if truncated != 0.0 && truncated.is_sign_negative() != y.is_sign_negative() {
+                truncated + y
+            } else {
+                truncated
+            }
+        }
+        BinOp::Pow => {
+            let fmt = format_of(Ty::B64).expect("b64 has a format");
+            let result = float_pow(fmt, Ty::B64, Bits::from_u64(a), Bits::from_u64(b))?;
+            return Ok(result.bits().expect("a float").low64());
+        }
+    };
+    Ok(value.to_bits())
+}
+
+/// `b32` arithmetic on the hardware, taking and returning the stored bits.
+pub fn f32_op(op: BinOp, a: u64, b: u64) -> Result<u64, Fault> {
+    let (x, y) = (f32::from_bits(a as u32), f32::from_bits(b as u32));
+    let value = match op {
+        BinOp::Add => x + y,
+        BinOp::Sub => x - y,
+        BinOp::Mul => x * y,
+        BinOp::Div => x / y,
+        BinOp::Mod => {
+            let truncated = x % y;
+            if truncated != 0.0 && truncated.is_sign_negative() != y.is_sign_negative() {
+                truncated + y
+            } else {
+                truncated
+            }
+        }
+        BinOp::Pow => {
+            let fmt = format_of(Ty::B32).expect("b32 has a format");
+            let result = float_pow(fmt, Ty::B32, Bits::from_u64(a), Bits::from_u64(b))?;
+            return Ok(result.bits().expect("a float").low64());
+        }
+    };
+    Ok(value.to_bits() as u64)
+}
+
 fn float_op(op: BinOp, ty: Ty, a: Bits, b: Bits) -> Result<Value, Fault> {
     let fmt = format_of(ty).expect("a float type has a format");
     let mode = Round::TiesToEven;
@@ -390,28 +462,21 @@ fn float_op(op: BinOp, ty: Ty, a: Bits, b: Bits) -> Result<Value, Fault> {
     Ok(Value::float(ty, bits))
 }
 
-/// Floored remainder, built from the operations that are exact.
+/// Floored remainder.
 ///
-/// `a - b × floor(a ÷ b)`, with the quotient truncated toward zero and then corrected
-/// downward when the signs disagree — which is what makes the answer take the divisor's
-/// sign, the way mathematics does and the C family does not.
+/// `luarust-num` gives the truncated one, exactly — the sign of the dividend, as `fmod`
+/// does. Mathematics takes the sign of the divisor, so where the two disagree the divisor
+/// is added back, which is exact because the remainder is already smaller than it.
 fn float_remainder(fmt: Format, a: Bits, b: Bits) -> Bits {
-    let mode = Round::TiesToEven;
-    if binary::unpack(fmt, b).class == binary::Class::Zero {
-        return binary::quiet_nan(fmt);
+    let truncated = binary::remainder(fmt, a, b);
+    let left = binary::unpack(fmt, truncated);
+    if left.class == binary::Class::Zero || left.class == binary::Class::Nan {
+        return truncated;
     }
-    let quotient = binary::div(fmt, mode, a, b);
-    let truncated = truncate(fmt, quotient);
-    let mut remainder = binary::sub(fmt, mode, a, binary::mul(fmt, mode, truncated, b));
-
-    // A non-zero remainder whose sign differs from the divisor is on the wrong side.
-    let remainder_negative = binary::unpack(fmt, remainder).sign;
-    let divisor_negative = binary::unpack(fmt, b).sign;
-    let is_zero = binary::unpack(fmt, remainder).class == binary::Class::Zero;
-    if !is_zero && remainder_negative != divisor_negative {
-        remainder = binary::add(fmt, mode, remainder, b);
+    if left.sign != binary::unpack(fmt, b).sign {
+        return binary::add(fmt, Round::TiesToEven, truncated, b);
     }
-    remainder
+    truncated
 }
 
 /// Toward zero, to a whole number.
@@ -539,5 +604,124 @@ impl std::fmt::Display for Value {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use luarust_num::binary::Format;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        /// A spread of values. Uniform bit patterns are almost all enormous, so the other
+        /// shapes exist to reach the ranges arithmetic actually happens in.
+        fn f64(&mut self) -> f64 {
+            let bits = self.next();
+            match self.next() % 4 {
+                0 => f64::from_bits(bits),
+                1 => {
+                    let e = 1023u64 + (self.next() % 60) - 30;
+                    f64::from_bits((bits & 0x800f_ffff_ffff_ffff) | (e << 52))
+                }
+                2 => f64::from_bits(bits & 0x800f_ffff_ffff_ffff),
+                _ => ((bits % 4000) as f64) - 2000.0,
+            }
+        }
+    }
+
+    /// The whole justification for the native fast path, tested rather than asserted.
+    ///
+    /// If the hardware and `luarust-num` ever disagree about `b32` or `b64`, this is where
+    /// it shows up — and it has to show up here, because once both routes are in use the
+    /// three execution paths would otherwise start quietly answering differently.
+    #[test]
+    fn the_hardware_and_the_soft_float_give_the_same_b64_answers() {
+        let fmt = Format::B64;
+        let mode = Round::TiesToEven;
+        let mut rng = Rng(1);
+
+        for _ in 0..200_000 {
+            let (x, y) = (rng.f64(), rng.f64());
+            let (a, b) = (x.to_bits(), y.to_bits());
+            let wide = |v: u64| Bits::from_u64(v);
+
+            for (op, soft) in [
+                (BinOp::Add, binary::add(fmt, mode, wide(a), wide(b))),
+                (BinOp::Sub, binary::sub(fmt, mode, wide(a), wide(b))),
+                (BinOp::Mul, binary::mul(fmt, mode, wide(a), wide(b))),
+                (BinOp::Div, binary::div(fmt, mode, wide(a), wide(b))),
+                (BinOp::Mod, float_remainder(fmt, wide(a), wide(b))),
+            ] {
+                let fast = f64::from_bits(f64_op(op, a, b).expect("no fault"));
+                let slow = f64::from_bits(soft.low64());
+                if slow.is_nan() {
+                    // Payloads may differ and nothing in the language can see one.
+                    assert!(fast.is_nan(), "{x:e} {} {y:e}: {fast:e} where soft-float said nan", op.word());
+                } else {
+                    assert_eq!(
+                        fast.to_bits(),
+                        slow.to_bits(),
+                        "{x:e} {} {y:e}: hardware {fast:e}, soft-float {slow:e}",
+                        op.word()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hardware_and_the_soft_float_give_the_same_b32_answers() {
+        let fmt = Format::B32;
+        let mode = Round::TiesToEven;
+        let mut rng = Rng(2);
+
+        for _ in 0..200_000 {
+            let (x, y) = (rng.f64() as f32, rng.f64() as f32);
+            let (a, b) = (x.to_bits() as u64, y.to_bits() as u64);
+            let wide = |v: u64| Bits::from_u64(v);
+
+            for (op, soft) in [
+                (BinOp::Add, binary::add(fmt, mode, wide(a), wide(b))),
+                (BinOp::Sub, binary::sub(fmt, mode, wide(a), wide(b))),
+                (BinOp::Mul, binary::mul(fmt, mode, wide(a), wide(b))),
+                (BinOp::Div, binary::div(fmt, mode, wide(a), wide(b))),
+                (BinOp::Mod, float_remainder(fmt, wide(a), wide(b))),
+            ] {
+                let fast = f32::from_bits(f32_op(op, a, b).expect("no fault") as u32);
+                let slow = f32::from_bits(soft.low64() as u32);
+                if slow.is_nan() {
+                    assert!(fast.is_nan(), "{x:e} {} {y:e}", op.word());
+                } else {
+                    assert_eq!(
+                        fast.to_bits(),
+                        slow.to_bits(),
+                        "{x:e} {} {y:e}: hardware {fast:e}, soft-float {slow:e}",
+                        op.word()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_remainder_is_floored_either_way() {
+        let cases: [(f64, f64, f64); 4] =
+            [(-7.0, 3.0, 2.0), (7.0, -3.0, -2.0), (7.0, 3.0, 1.0), (-7.5, 2.0, 0.5)];
+        for (a, b, expected) in cases {
+            let bits = f64_op(BinOp::Mod, a.to_bits(), b.to_bits()).expect("no fault");
+            assert_eq!(f64::from_bits(bits), expected, "{a} mod {b}");
+        }
+        // And against zero it is a NaN rather than a fault, the way every float is.
+        let bits = f64_op(BinOp::Mod, 1.0f64.to_bits(), 0.0f64.to_bits()).expect("no fault");
+        assert!(f64::from_bits(bits).is_nan());
     }
 }
