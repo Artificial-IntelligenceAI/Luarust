@@ -627,13 +627,24 @@ impl<'a> Parser<'a> {
             (Kind::Less, _) => CmpOp::Less,
             (Kind::Greater, _) => CmpOp::Greater,
             (Kind::Equals, _) => CmpOp::Equal,
+            (Kind::LessEqual, _) => CmpOp::LessEqual,
+            (Kind::GreaterEqual, _) => CmpOp::GreaterEqual,
+            (Kind::NotEqual, _) => CmpOp::NotEqual,
+            // `not=` is the word and the sign, which is a third way of writing `!=`.
+            (Kind::Word, Some("not")) if self.peek_at(1).kind == Kind::Equals => {
+                self.advance();
+                CmpOp::NotEqual
+            }
             _ => return Ok(lhs),
         };
         self.advance();
         let rhs = self.sum()?;
         let span = lhs.span().to(rhs.span());
 
-        if matches!(self.peek_kind(), Kind::Less | Kind::Greater | Kind::Equals) {
+        if matches!(
+            self.peek_kind(),
+            Kind::Less | Kind::Greater | Kind::Equals | Kind::LessEqual | Kind::GreaterEqual | Kind::NotEqual
+        ) {
             let second = self.peek();
             return self.fail(
                 Diagnostic::new("E0114", "there are two comparisons here.")

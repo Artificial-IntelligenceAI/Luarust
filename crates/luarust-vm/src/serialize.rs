@@ -31,7 +31,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -219,6 +219,9 @@ fn cmp_tag(op: CmpOp) -> u8 {
         CmpOp::Less => 0,
         CmpOp::Greater => 1,
         CmpOp::Equal => 2,
+        CmpOp::LessEqual => 3,
+        CmpOp::GreaterEqual => 4,
+        CmpOp::NotEqual => 5,
     }
 }
 
@@ -497,6 +500,9 @@ impl<'a> Cursor<'a> {
             0 => CmpOp::Less,
             1 => CmpOp::Greater,
             2 => CmpOp::Equal,
+            3 => CmpOp::LessEqual,
+            4 => CmpOp::GreaterEqual,
+            5 => CmpOp::NotEqual,
             other => return Err(Broken::Unknown { what: "comparison", value: other as u64 }),
         })
     }

@@ -205,6 +205,12 @@ pub enum CmpOp {
     Less,
     Greater,
     Equal,
+    /// `</=`
+    LessEqual,
+    /// `>/=`
+    GreaterEqual,
+    /// `!=`, `≠`, `not=`
+    NotEqual,
 }
 
 impl CmpOp {
@@ -213,7 +219,16 @@ impl CmpOp {
             CmpOp::Less => "<",
             CmpOp::Greater => ">",
             CmpOp::Equal => "=",
+            CmpOp::LessEqual => "</=",
+            CmpOp::GreaterEqual => ">/=",
+            CmpOp::NotEqual => "!=",
         }
+    }
+
+    /// Whether this one puts values in order, rather than only asking whether they are the
+    /// same. `=` and `!=` work on anything; the other four need numbers.
+    pub fn orders(self) -> bool {
+        !matches!(self, CmpOp::Equal | CmpOp::NotEqual)
     }
 }
 

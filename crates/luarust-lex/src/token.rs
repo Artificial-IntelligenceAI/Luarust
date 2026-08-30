@@ -55,6 +55,12 @@ pub enum Kind {
     Less,
     /// `>`
     Greater,
+    /// `</=` — less than, or equal. The `/` is part of the operator, not a division.
+    LessEqual,
+    /// `>/=`
+    GreaterEqual,
+    /// `!=` or `≠`. Also spelled `not=`, which arrives as the word `not` and an `=`.
+    NotEqual,
 
     /// A bare word: a keyword, a chain part, a type, or a word-spelled operator.
     Word,
@@ -93,6 +99,9 @@ impl Kind {
             Kind::Percent => "`%`",
             Kind::Less => "`<`",
             Kind::Greater => "`>`",
+            Kind::LessEqual => "`</=`",
+            Kind::GreaterEqual => "`>/=`",
+            Kind::NotEqual => "`!=`",
             Kind::Word => "a word",
             Kind::Number => "a number",
             Kind::Name => "a name",

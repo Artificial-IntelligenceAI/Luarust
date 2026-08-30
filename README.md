@@ -179,7 +179,10 @@ Most operators have more than one spelling, and they all mean exactly the same t
 | remainder | `mod` | |
 | less than | `<` | |
 | greater than | `>` | |
+| less than or equal | `</=` | `<=` or `≤` |
+| greater than or equal | `>/=` | `>=` or `≥` |
 | equal to | `=` | |
+| not equal to | `!=` | `not=` or `≠` |
 
 `%` is **not** remainder. Mathematics has never used it for one — it is percent, written
 after a number, so `15%` is fifteen hundredths:
@@ -205,15 +208,21 @@ actually wanted.
 
 ### Comparing
 
-Three of them, and they answer `bool`:
+Six of them, and they answer `bool`:
 
 ```luarust
 var.local.i32 ['a', 'b'] = ['3', '5'];
 
-var.local.bool ['less'] = [math { 'a' < 'b' }];     -- true
-var.local.bool ['more'] = [math { 'a' > 'b' }];     -- false
-var.local.bool ['same'] = [math { 'a' = 'a' }];     -- true
+var.local.bool ['less']    = [math { 'a' <   'b' }];    -- true
+var.local.bool ['more']    = [math { 'a' >   'b' }];    -- false
+var.local.bool ['at most'] = [math { 'a' </= 'a' }];    -- true
+var.local.bool ['same']    = [math { 'a' =   'a' }];    -- true
+var.local.bool ['differs'] = [math { 'a' !=  'b' }];    -- true
 ```
+
+`</=` and `>/=` are one operator each, and the `/` in them is the "or" of *less than or
+equal* — not a division. Nothing else could ever follow a `<` with a `/`, so there is
+nothing for it to be confused with.
 
 `=` here is not the `=` of a declaration, and cannot be mistaken for it: that one only ever
 sits between a list of names and a list of values, and this one only ever sits inside a
@@ -230,11 +239,20 @@ Luarust refuses to pick:
 error[E0114]: there are two comparisons here.
 ```
 
-**A NaN answers false to all three**, itself included, because it is not less than, greater
-than, or equal to anything. `math { 'n' = 'n' }` where `'n'` is a NaN is `false`.
+**A NaN answers false to all of them but one.** It is not less than, greater than, or equal
+to anything, itself included — so `math { 'n' = 'n' }` is `false` for a NaN, and so is
+`</=`. The exception is `!=`, which asks only that the two differ, and a NaN differs from
+everything:
 
-`<` and `>` order numbers. `=` works on anything, since two things of the same type are
-either the same or they are not.
+```
+nan <   nan     false
+nan </= nan     false
+nan =   nan     false
+nan !=  nan     true
+```
+
+`<`, `>`, `</=` and `>/=` put numbers in order. `=` and `!=` work on anything, since two
+things of the same type are either the same or they are not.
 
 Words work as operators here because a name is always quoted. `'x'` is a variable and a
 bare `x` cannot be one, so there is nothing for `math { 'a' x 'b' }` to be confused with.

@@ -108,8 +108,26 @@ impl<'a> Lexer<'a> {
                 '-' => self.punctuation(Kind::Minus),
                 '/' | '÷' => self.punctuation(Kind::Slash),
                 '%' => self.punctuation(Kind::Percent),
-                '<' => self.punctuation(Kind::Less),
-                '>' => self.punctuation(Kind::Greater),
+                // `</=` and `>/=` are one operator each: the `/` is the "or" in "less
+                // than or equal", not a division. Nothing else could follow a `<` with a
+                // `/`, so taking all three characters is never wrong. `<=` and `≤` are the
+                // same operator written the usual way and the mathematical way.
+                '<' => self.or_equal(Kind::LessEqual, Kind::Less),
+                '>' => self.or_equal(Kind::GreaterEqual, Kind::Greater),
+                '≤' => self.punctuation(Kind::LessEqual),
+                '≥' => self.punctuation(Kind::GreaterEqual),
+                '≠' => self.punctuation(Kind::NotEqual),
+                '!' => {
+                    let start = self.at;
+                    self.bump();
+                    if self.peek() == Some('=') {
+                        self.bump();
+                        self.push(Kind::NotEqual, start);
+                    } else {
+                        self.at = start;
+                        self.unknown_character();
+                    }
+                }
 
                 '*' => {
                     let start = self.at;
@@ -161,6 +179,24 @@ impl<'a> Lexer<'a> {
         let start = self.at;
         self.bump();
         self.push(kind, start);
+    }
+
+    /// `<` or `>`, and whether it is the `</=` or `>/=` that includes being equal.
+    fn or_equal(&mut self, both: Kind, plain: Kind) {
+        let start = self.at;
+        self.bump();
+        match (self.peek(), self.peek_at(1)) {
+            (Some('='), _) => {
+                self.bump();
+                self.push(both, start);
+            }
+            (Some('/'), Some('=')) => {
+                self.bump();
+                self.bump();
+                self.push(both, start);
+            }
+            _ => self.push(plain, start),
+        }
     }
 
     fn skip_comment(&mut self) {
@@ -396,6 +432,20 @@ mod tests {
         // And the multi-byte one still spans exactly itself.
         let out = clean("÷");
         assert_eq!(out.tokens[0].span, Span::new(0, "÷".len()));
+    }
+
+    #[test]
+    fn or_equal_has_three_spellings_each() {
+        for source in ["</=", "<=", "≤"] {
+            assert_eq!(kinds(source)[..2], [Kind::LessEqual, Kind::End], "{source}");
+            assert_eq!(clean(source).tokens[0].span, Span::new(0, source.len()));
+        }
+        for source in [">/=", ">=", "≥"] {
+            assert_eq!(kinds(source)[..2], [Kind::GreaterEqual, Kind::End], "{source}");
+        }
+        // A bare `<` is still a bare `<`, and the `=` after it is still an `=`.
+        assert_eq!(kinds("< =")[..3], [Kind::Less, Kind::Equals, Kind::End]);
+        assert_eq!(kinds("'a' < 'b'")[1], Kind::Less);
     }
 
     #[test]

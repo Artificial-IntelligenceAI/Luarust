@@ -213,10 +213,19 @@ impl Writer {
         // the language being consistent, and is also why this cannot just write two
         // literals and hope.
         if ty == Ty::Bool && self.rng.below(2) == 0 {
-            let op = match self.rng.below(3) {
+            let op = match self.rng.below(6) {
                 0 => "<",
                 1 => ">",
-                _ => "=",
+                2 => "=",
+                // Every spelling has to lex, so all of them get written.
+                3 => ["</=", "<=", "≤"][self.rng.below(3) as usize],
+                4 => [">/=", ">=", "≥"][self.rng.below(3) as usize],
+                // Three spellings of the same thing, all of which have to lex.
+                _ => match self.rng.below(3) {
+                    0 => "!=",
+                    1 => "not=",
+                    _ => "≠",
+                },
             };
             // Either a variable supplies the type, or both sides say what they are. A
             // comparison tells its sides nothing, so one of those has to happen.

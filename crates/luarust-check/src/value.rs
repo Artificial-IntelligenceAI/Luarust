@@ -121,14 +121,21 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
 
 /// Whether an ordering satisfies what was asked of it.
 ///
-/// A NaN is not less than, greater than, or equal to anything, itself included, so all
-/// three answer false for one. That is what unordered means, and it lives here so that
+/// A NaN is not less than, greater than, or equal to anything, itself included, so every
+/// comparison answers false for one — except `!=`, which asks only that they differ, and
+/// a NaN differs from everything. That is what unordered means, and it lives here so that
 /// every execution path decides it the same way.
 pub fn holds(op: CmpOp, ordering: Comparison) -> bool {
     match op {
         CmpOp::Less => ordering == Comparison::Less,
         CmpOp::Greater => ordering == Comparison::Greater,
         CmpOp::Equal => ordering == Comparison::Equal,
+        CmpOp::LessEqual => matches!(ordering, Comparison::Less | Comparison::Equal),
+        CmpOp::GreaterEqual => matches!(ordering, Comparison::Greater | Comparison::Equal),
+        // The one a NaN answers true to. Everything else asks for a particular ordering
+        // and a NaN has none; this asks only that the two are not the same, and a NaN is
+        // not the same as anything, itself included.
+        CmpOp::NotEqual => ordering != Comparison::Equal,
     }
 }
 

@@ -445,12 +445,12 @@ impl<'ctx> Emitter<'ctx> {
         // Counting down is an empty range, so the first thing asked is whether to run at
         // all rather than whether to stop.
         self.builder.position_at_end(check);
-        let past = self.loop_test(counter, slot, ty, limit, runtime::GREATER);
+        let past = self.loop_test(counter, slot, ty, limit, CmpOp::Greater);
         self.builder.build_conditional_branch(past, done, top).expect("a branch");
 
         self.builder.position_at_end(top);
         self.block(body);
-        let finished = self.loop_test(counter, slot, ty, limit, runtime::EQUAL);
+        let finished = self.loop_test(counter, slot, ty, limit, CmpOp::Equal);
         self.builder.build_conditional_branch(finished, done, step).expect("a branch");
 
         // Stepping only after the body, and only below the bound, so a loop can reach the
@@ -481,16 +481,12 @@ impl<'ctx> Emitter<'ctx> {
         slot: usize,
         ty: Ty,
         limit: Emitted<'ctx>,
-        wanted: u64,
+        wanted: CmpOp,
     ) -> inkwell::values::IntValue<'ctx> {
         match counter {
             None => {
                 let held = self.load(slot, ty);
-                if wanted == runtime::GREATER {
-                    self.greater(held, limit.native(), ty)
-                } else {
-                    self.equal(held, limit.native(), ty)
-                }
+                self.relation(held, limit.native(), ty, wanted)
             }
             Some(cell) => self.cells_compare(cell, limit.cell(), wanted),
         }
@@ -553,7 +549,7 @@ impl<'ctx> Emitter<'ctx> {
         self.stop_if_nonzero(outcome, span);
     }
 
-    fn cells_compare(&mut self, a: u64, b: u64, wanted: u64) -> inkwell::values::IntValue<'ctx> {
+    fn cells_compare(&mut self, a: u64, b: u64, op: CmpOp) -> inkwell::values::IntValue<'ctx> {
         let outcome = self
             .builder
             .build_call(
@@ -565,14 +561,7 @@ impl<'ctx> Emitter<'ctx> {
             .try_as_basic_value()
             .expect_basic("comparing returns a value")
             .into_int_value();
-        self.builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                outcome,
-                self.context.i32_type().const_int(wanted, false),
-                "is",
-            )
-            .expect("a compare")
+        self.ordering_matches(outcome, op)
     }
 
     /// Stop the program here if a call came back with anything but zero.
@@ -690,12 +679,7 @@ impl<'ctx> Emitter<'ctx> {
                 let (a, _) = self.expr(lhs);
                 let (b, _) = self.expr(rhs);
                 let truth = if celled(*operands) {
-                    let wanted = match op {
-                        CmpOp::Less => runtime::LESS,
-                        CmpOp::Greater => runtime::GREATER,
-                        CmpOp::Equal => runtime::EQUAL,
-                    };
-                    self.cells_compare(a.cell(), b.cell(), wanted)
+                    self.cells_compare(a.cell(), b.cell(), *op)
                 } else {
                     self.relation(a.native(), b.native(), *operands, *op)
                 };
@@ -836,14 +820,6 @@ impl<'ctx> Emitter<'ctx> {
         }
     }
 
-    fn greater(&self, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>, ty: Ty) -> inkwell::values::IntValue<'ctx> {
-        self.relation(a, b, ty, CmpOp::Greater)
-    }
-
-    fn equal(&self, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>, ty: Ty) -> inkwell::values::IntValue<'ctx> {
-        self.relation(a, b, ty, CmpOp::Equal)
-    }
-
     /// Whether two values stand in a relation — one instruction for the types the machine
     /// can order, and a call for `b16`, whose values are sign-and-magnitude in sixteen
     /// bits and so are neither an integer nor a float comparison.
@@ -855,20 +831,19 @@ impl<'ctx> Emitter<'ctx> {
         op: CmpOp,
     ) -> inkwell::values::IntValue<'ctx> {
         if ty == Ty::B16 {
-            let wanted = match op {
-                CmpOp::Less => runtime::LESS,
-                CmpOp::Greater => runtime::GREATER,
-                CmpOp::Equal => runtime::EQUAL,
-            };
-            return self.compare_by_call(a, b, ty, wanted);
+            return self.compare_by_call(a, b, ty, op);
         }
         if ty.is_float() {
-            // The ordered predicates, so a NaN answers false to all three rather than
-            // sneaking a true out of one of them.
+            // The *ordered* predicates, so a NaN answers false rather than sneaking a
+            // true out of one of them -- except `!=`, which asks only that the two differ,
+            // and an unordered pair does differ.
             let predicate = match op {
                 CmpOp::Less => FloatPredicate::OLT,
                 CmpOp::Greater => FloatPredicate::OGT,
                 CmpOp::Equal => FloatPredicate::OEQ,
+                CmpOp::LessEqual => FloatPredicate::OLE,
+                CmpOp::GreaterEqual => FloatPredicate::OGE,
+                CmpOp::NotEqual => FloatPredicate::UNE,
             };
             return self
                 .builder
@@ -880,7 +855,12 @@ impl<'ctx> Emitter<'ctx> {
             (CmpOp::Less, false) => IntPredicate::ULT,
             (CmpOp::Greater, true) => IntPredicate::SGT,
             (CmpOp::Greater, false) => IntPredicate::UGT,
+            (CmpOp::LessEqual, true) => IntPredicate::SLE,
+            (CmpOp::LessEqual, false) => IntPredicate::ULE,
+            (CmpOp::GreaterEqual, true) => IntPredicate::SGE,
+            (CmpOp::GreaterEqual, false) => IntPredicate::UGE,
             (CmpOp::Equal, _) => IntPredicate::EQ,
+            (CmpOp::NotEqual, _) => IntPredicate::NE,
         };
         self.builder
             .build_int_compare(predicate, a.into_int_value(), b.into_int_value(), "rel")
@@ -893,7 +873,7 @@ impl<'ctx> Emitter<'ctx> {
         a: BasicValueEnum<'ctx>,
         b: BasicValueEnum<'ctx>,
         ty: Ty,
-        wanted: u64,
+        op: CmpOp,
     ) -> inkwell::values::IntValue<'ctx> {
         let i32_t = self.context.i32_type();
         let outcome = self
@@ -911,9 +891,46 @@ impl<'ctx> Emitter<'ctx> {
             .try_as_basic_value()
             .expect_basic("comparing returns a value")
             .into_int_value();
-        self.builder
-            .build_int_compare(IntPredicate::EQ, outcome, i32_t.const_int(wanted, false), "is")
-            .expect("a compare")
+        let _ = i32_t;
+        self.ordering_matches(outcome, op)
+    }
+
+    /// Turn an ordering — less, equal, greater, or unordered — into the answer to one
+    /// particular question about it.
+    fn ordering_matches(
+        &self,
+        ordering: inkwell::values::IntValue<'ctx>,
+        op: CmpOp,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let i32_t = self.context.i32_type();
+        let is = |code: u64, name: &str| {
+            self.builder
+                .build_int_compare(IntPredicate::EQ, ordering, i32_t.const_int(code, false), name)
+                .expect("a compare")
+        };
+        match op {
+            CmpOp::Less => is(runtime::LESS, "lt"),
+            CmpOp::Equal => is(runtime::EQUAL, "eq"),
+            CmpOp::Greater => is(runtime::GREATER, "gt"),
+            CmpOp::LessEqual => {
+                let (a, b) = (is(runtime::LESS, "lt"), is(runtime::EQUAL, "eq"));
+                self.builder.build_or(a, b, "le").expect("an or")
+            }
+            CmpOp::GreaterEqual => {
+                let (a, b) = (is(runtime::GREATER, "gt"), is(runtime::EQUAL, "eq"));
+                self.builder.build_or(a, b, "ge").expect("an or")
+            }
+            // Unordered counts as differing, which is what makes a NaN unequal to itself.
+            CmpOp::NotEqual => self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    ordering,
+                    i32_t.const_int(runtime::EQUAL, false),
+                    "ne",
+                )
+                .expect("a compare"),
+        }
     }
 
     /// Arithmetic, natively where that is certainly the same answer, and by calling back

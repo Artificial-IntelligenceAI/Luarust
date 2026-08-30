@@ -17,7 +17,7 @@ use ir::Checked;
 use luarust_diag::{Diagnostic, Span};
 use luarust_num::binary::{self, Round};
 use luarust_parse::ast::{
-    self, BinOp, CmpOp, Expr as AExpr, Lifetime, PrintItem, Stmt as AStmt, Ty, Visibility,
+    self, BinOp, Expr as AExpr, Lifetime, PrintItem, Stmt as AStmt, Ty, Visibility,
 };
 use std::collections::HashMap;
 use value::{Overflow, Value, format_of};
@@ -486,13 +486,13 @@ impl Checker {
                 let operands = lhs.ty();
 
                 let orderable = operands.is_integer() || operands.is_float();
-                if matches!(op, CmpOp::Less | CmpOp::Greater) && !orderable {
+                if op.orders() && !orderable {
                     self.error(
                         Diagnostic::new("E0220", format!("`{}` cannot be put in order.", operands.word()))
                             .primary(*span, format!("compared with `{}` here", op.word()))
-                            .rule("`<` and `>` order numbers")
-                            .tip("`=` works on anything, since two things of the same type are either the same or not.")
-                            .fix("use `=`, or compare numbers."),
+                            .rule("`<`, `>`, `</=` and `>/=` put numbers in order")
+                            .tip("`=` and `!=` work on anything, since two things of the same type are either the same or not.")
+                            .fix("use `=` or `!=`, or compare numbers."),
                     );
                     return None;
                 }

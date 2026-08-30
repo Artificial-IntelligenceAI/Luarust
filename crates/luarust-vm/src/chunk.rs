@@ -93,6 +93,9 @@ impl Chunk {
                         CmpOp::Less => "less",
                         CmpOp::Greater => "greater",
                         CmpOp::Equal => "equal",
+                        CmpOp::LessEqual => "less.eq",
+                        CmpOp::GreaterEqual => "greater.eq",
+                        CmpOp::NotEqual => "not.equal",
                     },
                     operands.word()
                 ),

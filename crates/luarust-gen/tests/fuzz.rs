@@ -110,11 +110,14 @@ fn a_seed_always_writes_the_same_program() {
 fn the_programs_are_worth_running() {
     // A generator that writes nothing but `print` would pass every agreement test and
     // discover nothing, so check that the interesting constructs actually appear.
-    let all: String = (1..=200).map(|seed| luarust_gen::program(seed).source).collect();
+    let all: String = (1..=800).map(|seed| luarust_gen::program(seed).source).collect();
     for construct in [
         "loop.temp", "loop.perm", "handback", "set [", "math {", " mod ", " div ", "**",
-        // The comparisons, and the two types that are not numbers.
-        " < ", " > ", " = ", "bool", "str",
+        // The comparisons -- every spelling of every one, since a spelling that is never
+        // written is a spelling nobody ever finds out is broken -- and the two types that
+        // are not numbers.
+        " < ", " > ", " = ", " != ", " not= ", " ≠ ",
+        " </= ", " <= ", " ≤ ", " >/= ", " >= ", " ≥ ", "bool", "str",
         // A literal that says what it is.
         "i32 '", "b64 '",
     ] {
