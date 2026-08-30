@@ -182,12 +182,39 @@ mean the same thing:
 | | |
 | --- | --- |
 | `[ ]` | a list — of names, of values, or of things to print |
-| `{ }` | a math block |
-| `( )` | grouping, inside one |
+| `{ }` | a block — the word in front of it says which kind |
+| `( )` | grouping, inside a math block |
 | `' '` | a name — or a literal, where a value is expected and no math block is open |
 | `" "` | text |
 
 You never have to work out which sense a bracket is being used in. It only has one.
+
+## Loops
+
+A loop is written the way a declaration is, because it does the same thing a declaration
+does: a chain saying what kind of loop it is and what type its counter has, then a name,
+then the values that set it going.
+
+```luarust
+var.local.mut.b64 ['sum'] = ['0'];
+
+loop.range.b64 ['i'] = ['1', '100000000'] {
+    set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+}
+
+print['sum' \n];
+```
+
+`loop.range` is what makes those two values bounds rather than two initialisers, and the
+bounds are **inclusive**: that loop runs a hundred million times, one to a hundred
+million, the way a range is read in mathematics.
+
+`'i'` belongs to the loop. It exists between the braces and nowhere else, so nothing
+after the loop can read the value it stopped on.
+
+Notice there is **no semicolon after the closing brace**. A semicolon ends a statement
+that finishes on a value, and a block already says where it ends. `};` would be saying
+it twice.
 
 ## Scope
 
