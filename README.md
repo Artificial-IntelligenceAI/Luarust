@@ -427,3 +427,26 @@ are counted differently on purpose, and both have to be right.
 
 Every error names a rule. The message says what went wrong here; the rule says what is
 true everywhere.
+
+## Using it
+
+```bash
+cargo build --release
+```
+
+```bash
+./target/release/luarust run examples/counting.lr
+```
+
+| command | what it does |
+| --- | --- |
+| `luarust run <file.lr>` | check it, then run it |
+| `luarust check <file.lr>` | check it and stop |
+
+The programs in [`examples/`](examples) all run, and are checked on every push.
+
+Iteration 1 runs on a **tree-walking interpreter**: no bytecode, no compilation, and no
+attempt at speed. That is deliberate. The bytecode VM comes next and the LLVM JIT after
+it, and this interpreter stays exactly as it is — the reference both of them get checked
+against. Three implementations that must agree catch things one careful implementation
+never will.
