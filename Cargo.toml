@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/luarust-diag", "crates/luarust-num"]
+members = ["crates/luarust-diag", "crates/luarust-lex", "crates/luarust-num"]
 
 [workspace.package]
 version = "0.0.0"
