@@ -147,8 +147,20 @@ Most operators have more than one spelling, and they all mean exactly the same t
 | add | `+` | |
 | subtract | `-` | |
 | multiply | `*` | `x` |
-| raise to a power | `**` | `xx` |
+| raise to a power | `**` | `xx` or `pow` |
 | divide | `/` | `÷` or `div` |
+| remainder | `%` | `mod` |
+
+The remainder is the one mathematics and the C family disagree about, and Luarust sides
+with mathematics: the result takes the sign of the **divisor**, not the dividend.
+
+```luarust
+math { -7 mod 3 }     -- 2,  not -1
+math { 7 mod -3 }     -- -2, not 1
+```
+
+So `'i' mod 3` cycles `0 1 2` however `'i'` is signed, which is what anyone counting
+actually wanted.
 
 Words work as operators here because a name is always quoted. `'x'` is a variable and a
 bare `x` cannot be one, so there is nothing for `math { 'a' x 'b' }` to be confused with.
