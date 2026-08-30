@@ -303,11 +303,18 @@ impl Compiler {
     }
 
     /// Put the arguments in consecutive registers, which is how a call hands them over.
+    ///
+    /// Every register is claimed before any is filled. Taking them one at a time looks
+    /// the same and is not: working out an argument can leave the temporary counter
+    /// raised, and then the next argument lands a register or two further along than the
+    /// call is going to look. It cost a fuzzer 46,316 programs to find that.
     fn arguments(&mut self, args: &[Expr], span: Span) -> (Reg, u16) {
         let base = self.next;
-        for arg in args {
-            let reg = self.temp();
+        let claimed: Vec<Reg> = args.iter().map(|_| self.temp()).collect();
+        let mark = self.next;
+        for (arg, reg) in args.iter().zip(claimed) {
             self.expr(arg, reg, span);
+            self.next = mark;
         }
         (base, args.len() as u16)
     }
@@ -357,8 +364,10 @@ impl Compiler {
             }
 
             Expr::Neg { operand, span, .. } => {
+                let mark = self.next;
                 let src = self.operand(operand, *span);
                 self.emit(Op::Neg { dst, src }, *span);
+                self.next = mark;
             }
 
             Expr::Compare { op, operands, lhs, rhs, span } => {

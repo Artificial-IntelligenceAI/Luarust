@@ -16,11 +16,17 @@ use crate::{BinOp, CmpOp, Ty};
 
 /// How deep calls may go before a program is stopped.
 ///
-/// The same number everywhere, and that matters more than the number itself: if the
+/// The same number on every path, and that matters more than the number itself: if the
 /// interpreter gave up at one depth and the machine code at another, the same program
-/// would end two different ways and the three paths would stop being comparable. It is
-/// bounded by the tree-walker, whose frames are the real stack.
-pub const DEPTH_LIMIT: usize = 2_000;
+/// would end two different ways and the three paths would stop being comparable.
+///
+/// It differs between builds because it has to. The tree-walker recurses on the real
+/// stack, and an unoptimised frame is many times the size of an optimised one -- a
+/// generated program recursing 207 deep overflowed a debug build while a release build
+/// took two thousand without noticing. Every path in a given build still shares this one
+/// number, which is the property that matters; what it is depends on how much stack a
+/// frame of that build costs.
+pub const DEPTH_LIMIT: usize = if cfg!(debug_assertions) { 100 } else { 2_000 };
 
 /// The working width every float format fits in. `b256` needs the most.
 pub type Bits = Uint<8>;

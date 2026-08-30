@@ -68,9 +68,12 @@ pub fn program(seed: u64) -> Written {
     let mut writer = Writer {
         rng: Rng::new(seed),
         scope: Vec::new(),
+        funcs: Vec::new(),
         source: String::new(),
         depth: 0,
         names: 0,
+        inside: None,
+        calls: 0,
     };
     writer.program();
     Written { seed, source: writer.source }
@@ -86,16 +89,48 @@ struct Known {
     depth: usize,
 }
 
+/// A function the program has already written.
+#[derive(Clone)]
+struct Signature {
+    name: String,
+    params: Vec<Ty>,
+    /// `None` when it answers nothing.
+    returns: Option<Ty>,
+    /// Whether it calls itself, counting its first argument down.
+    recursive: bool,
+}
+
 struct Writer {
     rng: Rng,
     scope: Vec<Known>,
+    /// Every function written so far. A body may only call these, which is what keeps a
+    /// generated program from recursing by accident and never coming back.
+    funcs: Vec<Signature>,
     source: String,
     depth: usize,
     names: usize,
+    /// What the function being written answers, when one is being written.
+    inside: Option<Option<Ty>>,
+    /// How many calls deep the expression being written is. A call's arguments are values
+    /// like any other, so they may be calls too -- and without a limit here the generator
+    /// writes `f0[f1[f2[…` until it runs out of its own stack.
+    calls: usize,
 }
 
 impl Writer {
     fn program(&mut self) {
+        // Functions first in the file, though they need not be: every signature is read
+        // before any body, so order is only a convenience here.
+        let count = self.rng.below(4);
+        for _ in 0..count {
+            self.func_decl();
+        }
+        // One that calls itself, sometimes. Written from a template rather than at
+        // random, because a randomly recursive function mostly does not come back.
+        if self.rng.below(4) == 0 {
+            self.recursive_func();
+        }
+
         // A handful of variables to work with, then things done to them.
         let openers = 2 + self.rng.below(4);
         for _ in 0..openers {
@@ -117,6 +152,7 @@ impl Writer {
             5 => self.handback(),
             6 if self.depth < 2 => self.loop_stmt(),
             7 if self.depth < 2 => self.if_stmt(),
+            8 if !self.funcs.is_empty() => self.call_stmt(),
             _ => self.print(),
         }
     }
@@ -151,6 +187,125 @@ impl Writer {
         self.depth -= 1;
         let depth = self.depth;
         self.scope.retain(|known| known.depth <= depth);
+    }
+
+    /// A function that answers a value, or nothing, and calls only functions already
+    /// written -- so a generated program always finishes.
+    fn func_decl(&mut self) {
+        let returns = if self.rng.below(5) == 0 { None } else { Some(self.pick_type()) };
+        let name = format!("f{}", self.funcs.len());
+        let count = self.rng.below(3);
+        let params: Vec<Ty> = (0..count).map(|_| self.pick_type()).collect();
+
+        let chain = match returns {
+            Some(ty) => format!("local.{}", ty.word()),
+            None => "local.nothing".to_string(),
+        };
+        let written: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(n, ty)| format!("{} 'p{n}'", ty.word()))
+            .collect();
+        self.line(&format!("fn.{chain} ['{name}'] [{}] {{", written.join(", ")));
+
+        // A body sees its parameters and nothing of the program around it.
+        let outer_scope = std::mem::take(&mut self.scope);
+        let outer_depth = std::mem::replace(&mut self.depth, 1);
+        let outer_inside = self.inside.replace(returns);
+        for (n, ty) in params.iter().enumerate() {
+            self.scope.push(Known { name: format!("p{n}"), ty: *ty, mutable: false, depth: 1 });
+        }
+
+        let statements = self.rng.below(3);
+        for _ in 0..statements {
+            self.statement();
+        }
+        match returns {
+            Some(ty) => {
+                let value = self.value_of(ty);
+                self.line(&format!("return {value};"));
+            }
+            None if self.rng.below(2) == 0 => self.line("return;"),
+            None => {}
+        }
+
+        self.scope = outer_scope;
+        self.depth = outer_depth;
+        self.inside = outer_inside;
+        self.line("}");
+
+        self.funcs.push(Signature { name, params, returns, recursive: false });
+    }
+
+    /// One that calls itself, counted down by a `ui8` so it certainly stops.
+    fn recursive_func(&mut self) {
+        let ty = self.pick_type();
+        let name = format!("f{}", self.funcs.len());
+        let base = self.literal(ty);
+        // Written before the body, so the body may call it -- which is the point.
+        self.funcs.push(Signature {
+            name: name.clone(),
+            params: vec![Ty::U8],
+            returns: Some(ty),
+            recursive: true,
+        });
+
+        self.line(&format!("fn.local.{} ['{name}'] [ui8 'p0'] {{", ty.word()));
+        self.line(&format!("    if [math {{ 'p0' = ui8 |0| }}] {{ return |{base}|; }}"));
+        self.line(&format!("    return {name}[math {{ 'p0' - ui8 |1| }}];"));
+        self.line("}");
+    }
+
+    /// A call to something already written that answers this type, if there is one.
+    fn call_of(&mut self, ty: Ty) -> Option<String> {
+        if self.calls >= 2 {
+            return None;
+        }
+        let usable: Vec<Signature> =
+            self.funcs.iter().filter(|f| f.returns == Some(ty)).cloned().collect();
+        if usable.is_empty() {
+            return None;
+        }
+        let chosen = usable[self.rng.below(usable.len() as u64) as usize].clone();
+        self.calls += 1;
+        let args: Vec<String> = chosen
+            .params
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(n, param)| {
+                // The one that calls itself counts its argument down to nothing, so a
+                // large one would be a deep recursion and a slow fuzzer rather than a
+                // more interesting program.
+                if chosen.recursive && n == 0 {
+                    format!("|{}|", self.rng.below(12))
+                } else {
+                    self.value_of(param)
+                }
+            })
+            .collect();
+        self.calls -= 1;
+        Some(format!("{}[{}]", chosen.name, args.join(", ")))
+    }
+
+    /// `greet[…];` — a function that answers nothing, called for what it does.
+    fn call_stmt(&mut self) {
+        let usable: Vec<Signature> =
+            self.funcs.iter().filter(|f| f.returns.is_none()).cloned().collect();
+        if usable.is_empty() {
+            self.print();
+            return;
+        }
+        let chosen = usable[self.rng.below(usable.len() as u64) as usize].clone();
+        self.calls += 1;
+        let args: Vec<String> = chosen
+            .params
+            .clone()
+            .into_iter()
+            .map(|param| self.value_of(param))
+            .collect();
+        self.calls -= 1;
+        self.line(&format!("{}[{}];", chosen.name, args.join(", ")));
     }
 
     fn declaration(&mut self) {
@@ -245,6 +400,12 @@ impl Writer {
         // are, so `math { 1 < 2 }` has no type in reach and does not compile -- which is
         // the language being consistent, and is also why this cannot just write two
         // literals and hope.
+        // A call is a value like any other, wherever one of its type is wanted.
+        if self.rng.below(4) == 0
+            && let Some(call) = self.call_of(ty)
+        {
+            return call;
+        }
         if ty == Ty::Bool && self.rng.below(2) == 0 {
             return format!("math {{ {} }}", self.condition(0));
         }
