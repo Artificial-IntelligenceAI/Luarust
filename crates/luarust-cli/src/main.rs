@@ -36,6 +36,13 @@ fn main() -> ExitCode {
         Some("verify") => Then::Verify,
         Some("dis") => Then::Disassemble,
         Some("check") => Then::Nothing,
+        Some("fuzz") => {
+            let count = path
+                .as_ref()
+                .and_then(|n| n.to_string_lossy().parse::<u64>().ok())
+                .unwrap_or(1000);
+            return fuzz(count);
+        }
         Some("--help" | "-h" | "help") => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -163,6 +170,65 @@ fn verify(program: &luarust_check::ir::Checked, source: &SourceFile) -> ExitCode
     println!("\n{}", chunk.disassemble());
     let _ = source;
     ExitCode::FAILURE
+}
+
+/// Write programs and insist the two paths agree about every one of them.
+///
+/// Type-directed, so every generated program compiles -- one that did not would be
+/// rejected identically by both paths and would prove nothing.
+fn fuzz(count: u64) -> ExitCode {
+    let mut ran = 0u64;
+    let mut stopped = 0u64;
+
+    for seed in 1..=count {
+        let written = luarust_gen::program(seed);
+        let source = SourceFile::new(format!("seed-{seed}.lr"), written.source.clone());
+
+        let lexed = luarust_lex::lex(source.text());
+        let parsed = luarust_parse::parse(source.text(), &lexed.tokens);
+        let (program, errors) = luarust_check::check(&parsed.program);
+        let refused: Vec<_> =
+            lexed.errors.into_iter().chain(parsed.errors).chain(errors).collect();
+        if !refused.is_empty() {
+            println!("seed {seed}: a generated program did not compile.\n");
+            print!("{}", written.source);
+            print!("{}", luarust_diag::report(&source, &refused));
+            return ExitCode::FAILURE;
+        }
+
+        let mut walked = Vec::new();
+        let walk = luarust_interp::run(&program, &mut walked);
+        let chunk = luarust_vm::compile(&program);
+        let mut vm_out = Vec::new();
+        let vm = luarust_vm::run(&chunk, &mut vm_out);
+
+        let same_ending = match (&walk, &vm) {
+            (Ok(()), Ok(())) => true,
+            (Err(a), Err(b)) => a.fault.code == b.fault.code,
+            _ => false,
+        };
+        if walked != vm_out || !same_ending {
+            println!("seed {seed}: the two paths DISAGREE.\n");
+            print!("{}", written.source);
+            println!("\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
+            println!("the VM printed:\n{}", String::from_utf8_lossy(&vm_out));
+            println!("\ninterpreter: {}", ending(&walk));
+            println!("the VM:      {}", ending(&vm));
+            println!("\n{}", chunk.disassemble());
+            return ExitCode::FAILURE;
+        }
+
+        ran += 1;
+        if walk.is_err() {
+            stopped += 1;
+        }
+    }
+
+    println!(
+        "{ran} programs, all compiled, all agreed. {stopped} of them stopped part way, \
+         and stopped the same way both times."
+    );
+    ExitCode::SUCCESS
 }
 
 fn ending(outcome: &Result<(), luarust_check::value::Stopped>) -> String {

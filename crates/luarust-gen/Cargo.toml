@@ -1,21 +1,18 @@
 [package]
-name = "luarust-cli"
-description = "The luarust command."
+name = "luarust-gen"
+description = "Writing Luarust programs, so that the ways of running one can be made to disagree."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "luarust"
-path = "src/main.rs"
-
 [dependencies]
+luarust-parse = { path = "../luarust-parse" }
+
+[dev-dependencies]
 luarust-check = { path = "../luarust-check" }
 luarust-diag = { path = "../luarust-diag" }
 luarust-interp = { path = "../luarust-interp" }
 luarust-lex = { path = "../luarust-lex" }
-luarust-parse = { path = "../luarust-parse" }
 luarust-vm = { path = "../luarust-vm" }
-luarust-gen = { path = "../luarust-gen" }

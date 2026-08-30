@@ -35,6 +35,15 @@ jobs:
       - name: Test (release)
         run: cargo test --workspace --all-targets --release
 
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Type-directed, so every generated program compiles, and both execution paths have
+      # to agree about every one of them.
+      - run: cargo run --release -p luarust-cli -- fuzz 200000
+
   lint:
     name: clippy
     runs-on: ubuntu-latest
