@@ -498,11 +498,17 @@ and says whether they match, and `luarust fuzz` writes programs and does it in b
 million of them at the last count, all compiling, all agreeing, and the fourteen thousand
 that stopped part way stopping the same way both times.
 
-The JIT **declines** more programs than it takes, on purpose. Integers and `b32`/`b64`
-become native instructions, because those are the cases where LLVM's arithmetic and
-Luarust's own are both correctly rounded and so cannot differ. `b16`, `b128`, `b256`,
-powers, `bool` and `str` are handed back, and the bytecode VM runs them instead. An answer
-the three paths might disagree about is worth less than no answer.
+The JIT takes every program, but it does not compile all of every program. Integers,
+`b32` and `b64` become native instructions, because those are the cases where LLVM's
+arithmetic and Luarust's own are both correctly rounded and so cannot differ. The rest —
+`b16`, `b128`, `b256`, `bool`, `str`, and raising to a power — go back to `luarust-num` by
+way of a call, and `b128`, `b256`, `bool` and `str` do not travel in registers at all: they
+live in numbered cells on the Rust side and the machine code carries the number.
+
+That is not a compromise. Their arithmetic was always going to be a call, because none of
+those formats has hardware anywhere and their answers have to come from the same place the
+other two execution paths get theirs. An answer the three paths might disagree about is
+worth less than no answer.
 
 The JIT needs LLVM 21 and is behind a feature, so everything else builds with no
 dependencies at all:
