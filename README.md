@@ -192,25 +192,66 @@ You never have to work out which sense a bracket is being used in. It only has o
 ## Loops
 
 A loop is written the way a declaration is, because it does the same thing a declaration
-does: a chain saying what kind of loop it is and what type its counter has, then a name,
-then the values that set it going.
+does: a chain saying how long the counter lives, what kind of loop it is, and what type
+the counter has — then a name, then the values that set it going.
 
 ```luarust
-var.local.mut.b64 ['sum'] = ['0'];
-
-loop.range.b64 ['i'] = ['1', '100000000'] {
-    set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+loop.temp.range.ui8 ['i'] = ['1', '5'] {
+    print['i' \n];
 }
+```
 
-print['sum' \n];
+```
+1
+2
+3
+4
+5
 ```
 
 `loop.range` is what makes those two values bounds rather than two initialisers, and the
-bounds are **inclusive**: that loop runs a hundred million times, one to a hundred
-million, the way a range is read in mathematics.
+bounds are **inclusive**: one to five is five passes, the way a range is read in
+mathematics.
 
-`'i'` belongs to the loop. It exists between the braces and nowhere else, so nothing
-after the loop can read the value it stopped on.
+### How long the counter lives
+
+`temp` and `perm` say whether the counter outlives the loop, and one of them has to be
+said:
+
+```luarust
+loop.temp.range.ui8 ['i'] = ['1', '5'] { … }    -- 'i' is gone at the brace
+loop.perm.range.ui8 ['i'] = ['1', '5'] { … }    -- 'i' is still there afterwards
+```
+
+A `perm` counter holds **the last value it actually took** — five, not six. Languages
+that leak their counter usually leave it one past the end, which is a side effect of how
+their loops are built rather than anything a person asked for.
+
+Most languages decide this for you and expect you to know which. Python leaks the
+counter, Rust and Lua scope it away, and neither says so anywhere in the loop. Here it is
+a word you type.
+
+### Something to accumulate into
+
+A counter belongs to its loop either way, so anything that has to survive is declared
+before it:
+
+```luarust
+var.local.mut.ui32 ['total'] = ['0'];
+
+loop.temp.range.ui8 ['i'] = ['1', '10'] {
+    set ['total'] = [math { 'total' + 'i' }];
+}
+
+print["total is " 'total' \n];
+```
+
+```
+total is 55
+```
+
+`total` needs `mut` because the loop changes it, and it is `ui32` rather than `ui8`
+because a sum outgrows its parts.
 
 Notice there is **no semicolon after the closing brace**. A semicolon ends a statement
 that finishes on a value, and a block already says where it ends. `};` would be saying
