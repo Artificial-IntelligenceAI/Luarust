@@ -35,31 +35,31 @@ fn fault(source: &str) -> &'static str {
 #[test]
 fn counting_to_five() {
     assert_eq!(
-        output("loop.temp.range.ui8 ['i'] = ['1', '5'] { print['i' \\n]; }"),
+        output("loop.temp.range.ui8 ['i'] = [|1|, |5|] { print['i' \\n]; }"),
         "1\n2\n3\n4\n5\n"
     );
 }
 
 #[test]
 fn a_range_is_inclusive_at_both_ends() {
-    assert_eq!(output("loop.temp.range.ui8 ['i'] = ['3', '3'] { print['i']; }"), "3");
+    assert_eq!(output("loop.temp.range.ui8 ['i'] = [|3|, |3|] { print['i']; }"), "3");
     // Counting down is an empty range rather than a reversed one.
-    assert_eq!(output("loop.temp.range.ui8 ['i'] = ['5', '1'] { print['i']; }"), "");
+    assert_eq!(output("loop.temp.range.ui8 ['i'] = [|5|, |1|] { print['i']; }"), "");
 }
 
 #[test]
 fn a_loop_reaches_the_top_of_its_type_without_going_past_it() {
     // 255 is every bit of a ui8. A counter that stepped before checking would wrap here
     // and never stop.
-    assert_eq!(output("loop.temp.range.ui8 ['i'] = ['253', '255'] { print['i' \" \"]; }"), "253 254 255 ");
+    assert_eq!(output("loop.temp.range.ui8 ['i'] = [|253|, |255|] { print['i' \" \"]; }"), "253 254 255 ");
 }
 
 #[test]
 fn accumulating_the_readme_way() {
     assert_eq!(
         output(
-            "var.local.mut.ui32 ['total'] = ['0'];\n\
-             loop.temp.range.ui32 ['i'] = ['1', '10'] { handback 'i' as 'total'; }\n\
+            "var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui32 ['i'] = [|1|, |10|] { handback 'i' as 'total'; }\n\
              print[\"total is \" 'total' \\n];"
         ),
         "total is 55\n"
@@ -70,23 +70,23 @@ fn accumulating_the_readme_way() {
 fn a_perm_counter_holds_the_last_value_it_took() {
     // Five, not six. Languages that leak a counter usually leave it one past the end.
     assert_eq!(
-        output("loop.perm.range.ui8 ['i'] = ['1', '5'] { } print['i'];"),
+        output("loop.perm.range.ui8 ['i'] = [|1|, |5|] { } print['i'];"),
         "5"
     );
 }
 
 #[test]
 fn a_number_prints_as_the_value_that_is_stored() {
-    assert_eq!(output("var.local.b16 ['a'] = ['0.1']; print['a'];"), "0.0999755859375");
-    assert_eq!(output("var.local.b32 ['a'] = ['0.1']; print['a'];"), "0.10000000149011612");
-    assert_eq!(output("var.local.b64 ['a'] = ['0.1']; print['a'];"), "0.1");
-    assert_eq!(output("var.local.b16 ['a'] = ['1000']; print['a'];"), "1000");
+    assert_eq!(output("var.local.b16 ['a'] = [|0.1|]; print['a'];"), "0.0999755859375");
+    assert_eq!(output("var.local.b32 ['a'] = [|0.1|]; print['a'];"), "0.10000000149011612");
+    assert_eq!(output("var.local.b64 ['a'] = [|0.1|]; print['a'];"), "0.1");
+    assert_eq!(output("var.local.b16 ['a'] = [|1000|]; print['a'];"), "1000");
 }
 
 #[test]
 fn print_inserts_nothing_at_all() {
     assert_eq!(output("print[\"a\"]; print[\"b\"];"), "ab");
-    assert_eq!(output("var.local.ui8 ['x'] = ['7']; print['x' 'x' 'x'];"), "777");
+    assert_eq!(output("var.local.ui8 ['x'] = [|7|]; print['x' 'x' 'x'];"), "777");
     assert_eq!(output("print[\"a\" \\t \"b\" \\n];"), "a\tb\n");
 }
 
@@ -154,9 +154,9 @@ fn dividing_a_whole_number_by_zero_stops_and_dividing_a_float_does_not() {
 fn the_clock_moves_forward_and_never_back() {
     let out = output(
         "var.local.b64 ['start'] = [time.now];\n\
-         loop.temp.range.ui32 ['i'] = ['1', '20000'] { }\n\
+         loop.temp.range.ui32 ['i'] = [|1|, |20000|] { }\n\
          var.local.b64 ['elapsed'] = [math { time.now - 'start' }];\n\
-         var.local.b64 ['zero'] = ['0'];\n\
+         var.local.b64 ['zero'] = [|0|];\n\
          print['elapsed'];",
     );
     let seconds: f64 = out.parse().expect("a number of seconds");
@@ -168,8 +168,8 @@ fn the_clock_moves_forward_and_never_back() {
 fn the_benchmark_from_the_readme_gives_the_right_answer() {
     // Sum of 1..1,000,000 is 500,000,500,000, and that modulo 1,000,000,007 is 496,500.
     let out = output(
-        "var.local.mut.ui64 ['sum'] = ['0'];\n\
-         loop.temp.range.ui64 ['i'] = ['1', '1000000'] {\n\
+        "var.local.mut.ui64 ['sum'] = [|0|];\n\
+         loop.temp.range.ui64 ['i'] = [|1|, |1000000|] {\n\
              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];\n\
          }\n\
          print['sum'];",
@@ -180,11 +180,11 @@ fn the_benchmark_from_the_readme_gives_the_right_answer() {
 #[test]
 fn a_name_may_be_anything_you_can_type() {
     assert_eq!(
-        output("var.local.str ['🧑‍🧑‍🧒‍🧒'] = ['a family']; print['🧑‍🧑‍🧒‍🧒'];"),
+        output("var.local.str ['🧑‍🧑‍🧒‍🧒'] = [|a family|]; print['🧑‍🧑‍🧒‍🧒'];"),
         "a family"
     );
     assert_eq!(
-        output("var.local.i32 ['a friendly number'] = ['7']; print['a friendly number'];"),
+        output("var.local.i32 ['a friendly number'] = [|7|]; print['a friendly number'];"),
         "7"
     );
 }

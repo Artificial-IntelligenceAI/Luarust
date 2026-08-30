@@ -70,6 +70,11 @@ pub fn text_value(raw: &str) -> String {
     out
 }
 
+/// The text between the bars of a [`Kind::Literal`] token.
+pub fn literal_value(raw: &str) -> &str {
+    raw.strip_prefix('|').and_then(|s| s.strip_suffix('|')).unwrap_or(raw)
+}
+
 /// The text between the quotes of a [`Kind::Name`] token.
 ///
 /// Names are raw: whatever is between the quotes is the name, so it can hold spaces,
@@ -142,6 +147,8 @@ impl<'a> Lexer<'a> {
                 }
 
                 '\'' => self.quoted('\'', Kind::Name),
+                // A written value wears bars, so a name never has to mean two things.
+                '|' => self.quoted('|', Kind::Literal),
                 '"' => self.quoted('"', Kind::Text),
                 '\\' => self.bare_escape(),
 
@@ -244,6 +251,7 @@ impl<'a> Lexer<'a> {
         let span = Span::new(start, self.at);
         let (code, what) = match kind {
             Kind::Text => ("E0001", "text"),
+            Kind::Literal => ("E0004", "a written value"),
             _ => ("E0002", "a name"),
         };
         self.errors.push(
@@ -368,7 +376,7 @@ mod tests {
     #[test]
     fn the_readme_loop_lexes_the_way_it_reads() {
         use Kind::*;
-        let source = "loop.temp.range.ui8 ['i'] = ['1', '5'] {\n    print['i' \\n];\n}\n";
+        let source = "loop.temp.range.ui8 ['i'] = [|1|, |5|] {\n    print['i' \\n];\n}\n";
         clean(source);
         assert_eq!(
             kinds(source),
@@ -376,7 +384,7 @@ mod tests {
                 Word, Dot, Word, Dot, Word, Dot, Word,
                 OpenList, Name, CloseList,
                 Equals,
-                OpenList, Name, Comma, Name, CloseList,
+                OpenList, Literal, Comma, Literal, CloseList,
                 OpenBlock,
                 Word, OpenList, Name, Escape, CloseList, Semicolon,
                 CloseBlock,
@@ -467,22 +475,41 @@ mod tests {
 
     #[test]
     fn a_name_holds_whatever_you_put_in_it() {
-        let source = "var.local.b16 ['🧑‍🧑‍🧒‍🧒'] = ['1'];";
+        let source = "var.local.b16 ['🧑‍🧑‍🧒‍🧒'] = [|1|];";
         clean(source);
         let out = lex(source);
         let name = out.tokens.iter().find(|t| t.kind == Kind::Name).unwrap();
         assert_eq!(name_value(&source[name.span.start..name.span.end]), "🧑‍🧑‍🧒‍🧒");
 
         // Spaces and punctuation too, since none of it means anything in there.
-        let source = "var.local.str ['a friendly, greeting'] = ['hi'];";
+        let source = "var.local.str ['a friendly, greeting'] = [|hi there, you|];";
         clean(source);
         let names: Vec<&str> = texts(source).into_iter().filter(|t| t.starts_with('\'')).collect();
-        assert_eq!(names, ["'a friendly, greeting'", "'hi'"]);
+        assert_eq!(names, ["'a friendly, greeting'"]);
+        // And a written value holds whatever is put in it too.
+        let written: Vec<&str> = texts(source).into_iter().filter(|t| t.starts_with('|')).collect();
+        assert_eq!(written, ["|hi there, you|"]);
+    }
+
+    #[test]
+    fn bars_hold_a_written_value_and_quotes_hold_a_name() {
+        // The whole reason for the bars: a quoted thing is a name wherever it appears,
+        // and never has to be read as a value depending on where it is.
+        assert_eq!(kinds("|5|")[..2], [Kind::Literal, Kind::End]);
+        assert_eq!(kinds("'x'")[..2], [Kind::Name, Kind::End]);
+        assert_eq!(literal_value("|5|"), "5");
+        assert_eq!(literal_value("||"), "", "an empty one is still one");
+
+        // A bar that never closes is a mistake with a name, not a token that swallows the
+        // rest of the file.
+        let out = lex("var.local.i32 ['n'] = [|5];");
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(out.errors[0].code, "E0004");
     }
 
     #[test]
     fn comments_run_to_the_end_of_the_line() {
-        let source = "var.local.b16 ['x'] = ['1'];  -- the number one\nprint['x'];";
+        let source = "var.local.b16 ['x'] = [|1|];  -- the number one\nprint['x'];";
         clean(source);
         assert!(!texts(source).iter().any(|t| t.contains("number one")));
         assert_eq!(kinds(source).iter().filter(|k| **k == Kind::Semicolon).count(), 2);
@@ -506,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_name_keeps_its_backslash_because_it_is_raw() {
-        let source = r"var.local.str ['back\slash'] = ['x'];";
+        let source = r"var.local.str ['back\slash'] = [|x|];";
         clean(source);
         let out = lex(source);
         let name = out.tokens.iter().find(|t| t.kind == Kind::Name).unwrap();
@@ -525,7 +552,7 @@ mod tests {
 
     #[test]
     fn an_unclosed_name_is_reported_separately() {
-        let out = lex("var.local.str ['name = ['x'];");
+        let out = lex("var.local.str ['name = [|x|];");
         assert_eq!(out.errors.len(), 1);
         assert_eq!(out.errors[0].code, "E0002");
     }
@@ -575,7 +602,7 @@ mod tests {
 
     #[test]
     fn every_token_spans_exactly_itself() {
-        let source = "loop.temp.range.ui8 ['i'] = ['1', '5'] { print['i' \\n]; }";
+        let source = "loop.temp.range.ui8 ['i'] = [|1|, |5|] { print['i' \\n]; }";
         let out = clean(source);
         let mut previous_end = 0;
         for token in &out.tokens {

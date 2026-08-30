@@ -120,8 +120,8 @@ fn the_programs_are_worth_running() {
         // are not numbers.
         " < ", " > ", " = ", " != ", " not= ", " ≠ ",
         " </= ", " <= ", " ≤ ", " >/= ", " >= ", " ≥ ", "bool", "str",
-        // A literal that says what it is.
-        "i32 '", "b64 '",
+        // A literal that says what it is, and one that takes its type from context.
+        "i32 |", "b64 |", "= [|",
     ] {
         assert!(all.contains(construct), "the generator never writes `{construct}`");
     }

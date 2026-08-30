@@ -27,14 +27,14 @@ fn output_of(chunk: &luarust_vm::Chunk) -> String {
     String::from_utf8(out).expect("output is text")
 }
 
-const COUNTING: &str = "loop.temp.range.ui8 ['i'] = ['1', '5'] { print['i' \\n]; }";
+const COUNTING: &str = "loop.temp.range.ui8 ['i'] = [|1|, |5|] { print['i' \\n]; }";
 
 const EVERYTHING: &str = "\
-var.local.mut.i64 ['sum'] = ['0'];\n\
+var.local.mut.i64 ['sum'] = [|0|];\n\
 var.local.b64 ['ratio'] = [math { 1 div 3 }];\n\
-var.local.b256 ['wide'] = ['0.1'];\n\
-var.local.str ['who'] = ['🧑‍🧑‍🧒‍🧒'];\n\
-loop.perm.range.i64 ['i'] = ['1', '20'] {\n\
+var.local.b256 ['wide'] = [|0.1|];\n\
+var.local.str ['who'] = [|🧑‍🧑‍🧒‍🧒|];\n\
+loop.perm.range.i64 ['i'] = [|1|, |20|] {\n\
     set ['sum'] = [math { ('sum' + 'i') mod 7 }];\n\
 }\n\
 print['who' \" \" 'sum' \" \" 'ratio' \" \" 'wide' \" \" 'i' \\n];";
@@ -72,7 +72,7 @@ fn the_wide_types_and_the_awkward_names_survive_the_trip() {
 
 #[test]
 fn overflow_policy_travels_too() {
-    let chunk = compiled("defaults.overflow.trap; var.local.ui8 ['x'] = ['1']; print['x'];");
+    let chunk = compiled("defaults.overflow.trap; var.local.ui8 ['x'] = [|1|]; print['x'];");
     let loaded = serialize::read(&serialize::write(&chunk, "t.lr", "")).expect("read");
     assert_eq!(loaded.chunk.overflow, luarust_check::value::Overflow::Trap);
 }

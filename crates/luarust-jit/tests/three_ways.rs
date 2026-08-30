@@ -67,14 +67,14 @@ fn ran(source: &str) -> String {
 
 #[test]
 fn counting() {
-    assert_eq!(ran("loop.temp.range.ui8 ['i'] = ['1', '5'] { print['i' \\n]; }"), "1\n2\n3\n4\n5\n");
+    assert_eq!(ran("loop.temp.range.ui8 ['i'] = [|1|, |5|] { print['i' \\n]; }"), "1\n2\n3\n4\n5\n");
 }
 
 #[test]
 fn accumulating() {
     assert_eq!(
-        ran("var.local.mut.ui32 ['total'] = ['0'];\n\
-             loop.temp.range.ui32 ['i'] = ['1', '10'] { handback 'i' as 'total'; }\n\
+        ran("var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui32 ['i'] = [|1|, |10|] { handback 'i' as 'total'; }\n\
              print[\"total is \" 'total' \\n];"),
         "total is 55\n"
     );
@@ -83,8 +83,8 @@ fn accumulating() {
 #[test]
 fn the_benchmark() {
     assert_eq!(
-        ran("var.local.mut.ui64 ['sum'] = ['0'];\n\
-             loop.temp.range.ui64 ['i'] = ['1', '100000'] {\n\
+        ran("var.local.mut.ui64 ['sum'] = [|0|];\n\
+             loop.temp.range.ui64 ['i'] = [|1|, |100000|] {\n\
                  set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];\n\
              }\n\
              print['sum'];"),
@@ -94,17 +94,17 @@ fn the_benchmark() {
 
 #[test]
 fn the_edges_of_a_range() {
-    assert_eq!(ran("loop.temp.range.ui8 ['i'] = ['3', '3'] { print['i']; }"), "3");
-    assert_eq!(ran("loop.temp.range.ui8 ['i'] = ['5', '1'] { print['i']; }"), "");
-    assert_eq!(ran("loop.temp.range.ui8 ['i'] = ['253','255'] { print['i' \" \"]; }"), "253 254 255 ");
-    assert_eq!(ran("loop.perm.range.ui8 ['i'] = ['1', '5'] { } print['i'];"), "5");
+    assert_eq!(ran("loop.temp.range.ui8 ['i'] = [|3|, |3|] { print['i']; }"), "3");
+    assert_eq!(ran("loop.temp.range.ui8 ['i'] = [|5|, |1|] { print['i']; }"), "");
+    assert_eq!(ran("loop.temp.range.ui8 ['i'] = [|253|,|255|] { print['i' \" \"]; }"), "253 254 255 ");
+    assert_eq!(ran("loop.perm.range.ui8 ['i'] = [|1|, |5|] { } print['i'];"), "5");
 }
 
 #[test]
 fn nested_loops() {
     assert_eq!(
-        ran("loop.temp.range.ui8 ['a'] = ['1','3'] {\n\
-                 loop.temp.range.ui8 ['b'] = ['1','3'] { print['a' 'b' \" \"]; }\n\
+        ran("loop.temp.range.ui8 ['a'] = [|1|,|3|] {\n\
+                 loop.temp.range.ui8 ['b'] = [|1|,|3|] { print['a' 'b' \" \"]; }\n\
              }"),
         "11 12 13 21 22 23 31 32 33 "
     );
@@ -153,16 +153,16 @@ fn float_arithmetic_including_the_signs_of_zero() {
 fn b16_is_taken_now_even_though_it_has_no_instructions() {
     // Carried as its sixteen-bit encoding, worked on by calling back into luarust-num.
     // The README's own number, which is what `b16 '0.1'` actually is.
-    assert_eq!(ran("var.local.b16 ['a'] = ['0.1']; print['a'];"), "0.0999755859375");
+    assert_eq!(ran("var.local.b16 ['a'] = [|0.1|]; print['a'];"), "0.0999755859375");
     assert_eq!(
-        ran("var.local.b16 ['a','b'] = ['1.5','0.25']; var.local.b16 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
+        ran("var.local.b16 ['a','b'] = [|1.5|,|0.25|]; var.local.b16 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
         "1.75"
     );
     // Negating flips the sign bit, so a zero keeps a sign the way it does everywhere else.
     assert_eq!(ran("var.local.b16 ['z'] = [math { -0 }]; print['z'];"), "-0");
     // And ordering, which is neither an integer nor a float comparison at this width.
     assert_eq!(
-        ran("loop.temp.range.b16 ['i'] = ['1', '4'] { print['i' \" \"]; }"),
+        ran("loop.temp.range.b16 ['i'] = [|1|, |4|] { print['i' \" \"]; }"),
         "1 2 3 4 "
     );
     // The remainder, which goes back to luarust-num rather than to the hardware.
@@ -200,30 +200,30 @@ fn a_program_that_stops_stops_the_same_way() {
 fn the_types_with_no_instructions_are_taken_too() {
     // They live in numbered cells on the Rust side and everything done to them is a call,
     // which is what their arithmetic always was. Taken for the coverage, not the speed.
-    assert_eq!(ran("var.local.b128 ['x'] = ['0.1']; print['x'];"), "0.1");
-    assert_eq!(ran("var.local.b256 ['x'] = ['0.1']; print['x'];"), "0.1");
+    assert_eq!(ran("var.local.b128 ['x'] = [|0.1|]; print['x'];"), "0.1");
+    assert_eq!(ran("var.local.b256 ['x'] = [|0.1|]; print['x'];"), "0.1");
     assert_eq!(
-        ran("var.local.b256 ['a','b'] = ['1.5','0.25']; var.local.b256 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
+        ran("var.local.b256 ['a','b'] = [|1.5|,|0.25|]; var.local.b256 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
         "1.75"
     );
     assert_eq!(ran("var.local.b128 ['r'] = [math { -7 mod 3 }]; print['r'];"), "2");
     // Ordering, which is a call as well.
     assert_eq!(
-        ran("loop.temp.range.b128 ['i'] = ['1', '4'] { print['i' \" \"]; }"),
+        ran("loop.temp.range.b128 ['i'] = [|1|, |4|] { print['i' \" \"]; }"),
         "1 2 3 4 "
     );
 }
 
 #[test]
 fn text_and_truth_are_taken_too() {
-    assert_eq!(ran("var.local.str ['who'] = ['🧑‍🧑‍🧒‍🧒']; print['who'];"), "🧑‍🧑‍🧒‍🧒");
+    assert_eq!(ran("var.local.str ['who'] = [|🧑‍🧑‍🧒‍🧒|]; print['who'];"), "🧑‍🧑‍🧒‍🧒");
     assert_eq!(
-        ran("var.local.mut.str ['s'] = ['first']; set ['s'] = ['second']; print['s'];"),
+        ran("var.local.mut.str ['s'] = [|first|]; set ['s'] = [|second|]; print['s'];"),
         "second"
     );
-    assert_eq!(ran("var.local.bool ['t'] = ['true']; print['t'];"), "true");
+    assert_eq!(ran("var.local.bool ['t'] = [|true|]; print['t'];"), "true");
     assert_eq!(
-        ran("var.local.str ['a','b'] = ['one','two']; print['a' \" and \" 'b' \\n];"),
+        ran("var.local.str ['a','b'] = [|one|,|two|]; print['a' \" and \" 'b' \\n];"),
         "one and two\n"
     );
 }
@@ -231,12 +231,12 @@ fn text_and_truth_are_taken_too() {
 #[test]
 fn a_program_mixing_everything_agrees_three_ways() {
     assert_eq!(
-        ran("var.local.str ['who'] = ['world'];\n\
-             var.local.mut.i64 ['sum'] = ['0'];\n\
-             var.local.b16 ['small'] = ['0.1'];\n\
-             var.local.b256 ['wide'] = ['0.1'];\n\
-             var.local.bool ['yes'] = ['true'];\n\
-             loop.temp.range.i64 ['i'] = ['1', '5'] { handback 'i' as 'sum'; }\n\
+        ran("var.local.str ['who'] = [|world|];\n\
+             var.local.mut.i64 ['sum'] = [|0|];\n\
+             var.local.b16 ['small'] = [|0.1|];\n\
+             var.local.b256 ['wide'] = [|0.1|];\n\
+             var.local.bool ['yes'] = [|true|];\n\
+             loop.temp.range.i64 ['i'] = [|1|, |5|] { handback 'i' as 'sum'; }\n\
              print[\"hello \" 'who' \" \" 'sum' \" \" 'small' \" \" 'wide' \" \" 'yes' \\n];"),
         "hello world 15 0.0999755859375 0.1 true\n"
     );
@@ -244,9 +244,9 @@ fn a_program_mixing_everything_agrees_three_ways() {
 
 #[test]
 fn an_if_runs_exactly_one_arm() {
-    let chain = "var.local.i32 ['n'] = ['@'];\n\
-         if [math { 'n' > i32 '10' }] { print[\"big\" \\n]; }\n\
-         else-if [math { 'n' = i32 '10' }] { print[\"ten\" \\n]; }\n\
+    let chain = "var.local.i32 ['n'] = [|@|];\n\
+         if [math { 'n' > i32 |10| }] { print[\"big\" \\n]; }\n\
+         else-if [math { 'n' = i32 |10| }] { print[\"ten\" \\n]; }\n\
          else { print[\"small\" \\n]; }";
     assert_eq!(ran(&chain.replace('@', "12")), "big\n");
     assert_eq!(ran(&chain.replace('@', "10")), "ten\n");
@@ -256,9 +256,9 @@ fn an_if_runs_exactly_one_arm() {
 #[test]
 fn an_if_with_no_else_and_nothing_true_does_nothing() {
     assert_eq!(
-        ran("var.local.i32 ['n'] = ['1'];\n\
+        ran("var.local.i32 ['n'] = [|1|];\n\
              print[\"before \"];\n\
-             if [math { 'n' > i32 '10' }] { print[\"never\"]; }\n\
+             if [math { 'n' > i32 |10| }] { print[\"never\"]; }\n\
              print[\"after\" \\n];"),
         "before after\n"
     );
@@ -271,11 +271,11 @@ fn and_or_and_not_answer_the_way_a_table_says_they_should() {
     for a in ["true", "false"] {
         for b in ["true", "false"] {
             out.push_str(&format!(
-                "print[math {{ bool '{a}' and bool '{b}' }} \" \" math {{ bool '{a}' or bool '{b}' }} \\n];\n"
+                "print[math {{ bool |{a}| and bool |{b}| }} \" \" math {{ bool |{a}| or bool |{b}| }} \\n];\n"
             ));
         }
     }
-    out.push_str("print[math { not bool 'true' } \" \" math { not bool 'false' } \\n];");
+    out.push_str("print[math { not bool |true| } \" \" math { not bool |false| } \\n];");
     assert_eq!(
         ran(&out),
         "true true\nfalse true\nfalse true\nfalse false\nfalse true\n"
@@ -287,9 +287,9 @@ fn a_condition_can_guard_the_one_after_it() {
     // The right side of an `and` is a fault when the left is false. If it were worked out
     // anyway this would stop instead of printing, on every one of the three paths.
     assert_eq!(
-        ran("var.local.i32 ['n'] = ['7'];\n\
-             var.local.i32 ['d'] = ['0'];\n\
-             if [math { 'd' != i32 '0' and 'n' div 'd' > i32 '1' }] { print[\"divided\" \\n]; }\n\
+        ran("var.local.i32 ['n'] = [|7|];\n\
+             var.local.i32 ['d'] = [|0|];\n\
+             if [math { 'd' != i32 |0| and 'n' div 'd' > i32 |1| }] { print[\"divided\" \\n]; }\n\
              else { print[\"guarded\" \\n]; }"),
         "guarded\n"
     );
@@ -300,8 +300,8 @@ fn the_answer_survives_being_written_where_it_came_from() {
     // `set ['f'] = [math { … 'f' … }]` reads `f` after the first half has already been
     // worked out. Building that half where `f` lives would lose it.
     assert_eq!(
-        ran("var.local.mut.bool ['f'] = ['true'];\n\
-             set ['f'] = [math { ('f' and (i32 '1' = i32 '2')) or 'f' }];\n\
+        ran("var.local.mut.bool ['f'] = [|true|];\n\
+             set ['f'] = [math { ('f' and (i32 |1| = i32 |2|)) or 'f' }];\n\
              print['f' \\n];"),
         "true\n"
     );

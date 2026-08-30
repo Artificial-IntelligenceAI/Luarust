@@ -7,15 +7,15 @@
 //!
 //! `'total'` cannot be changed, because its declaration never said it could.
 //!
-//!   2 | var.local.ui32 ['total'] = ['0'];
+//!   2 | var.local.ui32 ['total'] = [|0|];
 //!     |     ~~~~~ declared here, and `mut` is not in the chain
-//!   4 | set ['total'] = ['55'];
+//!   4 | set ['total'] = [|55|];
 //!     |      ^^^^^^^ changed here
 //!
 //! Error code: E0104
 //! Rule(s) broken: a variable changes only if its declaration says `mut`
 //! Tip(s): `mut` goes between the visibility and the type.
-//! Suggested fix(s): line 2 — `var.local.mut.ui32 ['total'] = ['0'];`
+//! Suggested fix(s): line 2 — `var.local.mut.ui32 ['total'] = [|0|];`
 //!
 //! 1 error.
 //! ```
@@ -155,10 +155,10 @@ mod tests {
     use crate::diag::Diagnostic;
     use crate::source::Span;
 
-    const PROGRAM: &str = "var.local.ui32 ['total'] = ['0'];\n\
+    const PROGRAM: &str = "var.local.ui32 ['total'] = [|0|];\n\
                            \n\
-                           loop.temp.range.ui8 ['i'] = ['1', '10'] {\n\
-                           set ['total'] = ['55'];\n\
+                           loop.temp.range.ui8 ['i'] = [|1|, |10|] {\n\
+                           set ['total'] = [|55|];\n\
                            }\n";
 
     fn source() -> SourceFile {
@@ -182,7 +182,7 @@ mod tests {
         .primary(Span::new(changed, changed + 7), "changed here")
         .rule("a variable changes only if its declaration says `mut`")
         .tip("`mut` goes between the visibility and the type.")
-        .fix("line 1 — `var.local.mut.ui32 ['total'] = ['0'];`")
+        .fix("line 1 — `var.local.mut.ui32 ['total'] = [|0|];`")
     }
 
     #[test]
@@ -195,15 +195,15 @@ file: src/main.lr, line: 4, column: 6 (src/main.lr:4:6)
 
 `'total'` cannot be changed, because its declaration never said it could.
 
-  1 | var.local.ui32 ['total'] = ['0'];
+  1 | var.local.ui32 ['total'] = [|0|];
     |     ~~~~~ declared here, and `mut` is not in the chain
-  4 | set ['total'] = ['55'];
+  4 | set ['total'] = [|55|];
     |      ^^^^^^^ changed here
 
 Error code: E0104
 Rule(s) broken: a variable changes only if its declaration says `mut`
 Tip(s): `mut` goes between the visibility and the type.
-Suggested fix(s): line 1 — `var.local.mut.ui32 ['total'] = ['0'];`
+Suggested fix(s): line 1 — `var.local.mut.ui32 ['total'] = [|0|];`
 
 1 error.
 ";
@@ -251,7 +251,7 @@ Suggested fix(s): line 1 — `var.local.mut.ui32 ['total'] = ['0'];`
         // The whole reason the layout is measured in cells: a caret counted in characters
         // would be one column short here, and would sit under the wrong quote.
         let family = "🧑‍🧑‍🧒‍🧒";
-        let text = format!("var.local.b16 ['{family}'] = ['1'];\n");
+        let text = format!("var.local.b16 ['{family}'] = [|1|];\n");
         let src = SourceFile::new("src/main.lr", text.clone());
         let at = text.find(family).unwrap();
 

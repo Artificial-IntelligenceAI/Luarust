@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn the_two_columns_agree_while_the_text_is_ascii() {
-        let f = file("var.local.b16 ['x'] = ['1'];");
+        let f = file("var.local.b16 ['x'] = [|1|];");
         for offset in 0..f.text().len() {
             let at = f.position(offset);
             assert_eq!(at.column, at.byte_column, "at byte {offset}");
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn the_two_columns_part_company_at_an_emoji() {
         // This is the case the whole three-measurement design exists for.
-        let line = format!("var.local.b16 ['{FAMILY}'] = ['1'];");
+        let line = format!("var.local.b16 ['{FAMILY}'] = [|1|];");
         let f = file(&line);
         let bracket = line.find("] =").unwrap();
 
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_caret_is_laid_out_in_cells_not_characters() {
-        let line = format!("var.local.b16 ['{FAMILY}'] = ['1'];");
+        let line = format!("var.local.b16 ['{FAMILY}'] = [|1|];");
         let f = file(&line);
         let name_start = line.find(FAMILY).unwrap();
         let span = Span::new(name_start, name_start + FAMILY.len());
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn positions_on_a_later_line_restart_their_columns() {
-        let f = file("var.local.b16 ['x'] = ['1'];\nprint['x' \\n];");
+        let f = file("var.local.b16 ['x'] = [|1|];\nprint['x' \\n];");
         let print_at = f.text().find("print").unwrap();
         let at = f.position(print_at);
         assert_eq!((at.line, at.column, at.byte_column), (2, 1, 1));

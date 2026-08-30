@@ -68,6 +68,8 @@ pub enum Kind {
     Number,
     /// `'…'` — a name, or a literal where a value is expected.
     Name,
+    /// A written value, between bars: `|5|`.
+    Literal,
     /// `"…"` — text.
     Text,
     /// `\n` and friends, written outside the quotes.
@@ -105,6 +107,7 @@ impl Kind {
             Kind::Word => "a word",
             Kind::Number => "a number",
             Kind::Name => "a name",
+            Kind::Literal => "a written value",
             Kind::Text => "text",
             Kind::Escape => "an escape",
             Kind::End => "the end of the file",

@@ -13,7 +13,7 @@ pub mod ast;
 
 use ast::*;
 use luarust_diag::{Diagnostic, Span};
-use luarust_lex::{Kind, Token, name_value, text_value};
+use luarust_lex::{Kind, Token, literal_value, name_value, text_value};
 
 /// A parsed file, and whatever could not be understood in it.
 pub struct Parsed {
@@ -640,14 +640,21 @@ impl<'a> Parser<'a> {
     /// Something standing where a value stands: a literal, a math block, or the clock.
     fn value_expr(&mut self) -> Result<Expr> {
         match self.peek_kind() {
-            // In a value slot the quotes hold a literal, to be read as whatever type the
-            // annotation asks for -- not a variable.
-            Kind::Name => {
+            // Bars hold a written value, read as whatever type is being asked for.
+            Kind::Literal => {
                 let token = self.advance();
                 Ok(Expr::Literal {
-                    text: name_value(self.text(token)).to_string(),
+                    text: literal_value(self.text(token)).to_string(),
                     span: token.span,
                 })
+            }
+            // Quotes hold a name, here as everywhere else, so this reads the variable.
+            Kind::Name => {
+                let token = self.advance();
+                Ok(Expr::Name(Ident {
+                    text: name_value(self.text(token)).to_string(),
+                    span: token.span,
+                }))
             }
             Kind::Word if self.word() == Some("math") => {
                 let start = self.advance().span;
@@ -662,9 +669,9 @@ impl<'a> Parser<'a> {
                 self.fail(
                     Diagnostic::new("E0111", "a value was expected here.")
                         .primary(found.span, format!("{} is here instead", found.kind.describe()))
-                        .rule("a value is a literal in quotes, a `math { }` block, or `time.now`")
+                        .rule("a value is a written value in bars, a name in quotes, a `math { }` block, or `time.now`")
                         .tip("arithmetic only happens inside `math { }`, so `1 + 2` on its own is not a value.")
-                        .fix("write a quoted literal, or wrap the arithmetic in `math { … }`."),
+                        .fix("write `|…|`, a name in quotes, or wrap the arithmetic in `math { … }`."),
                 )
             }
         }
@@ -869,15 +876,25 @@ impl<'a> Parser<'a> {
                 if self
                     .word()
                     .and_then(Ty::from_word)
-                    .is_some_and(|_| self.peek_at(1).kind == Kind::Name) =>
+                    .is_some_and(|_| self.peek_at(1).kind == Kind::Literal) =>
             {
                 let ty_token = self.advance();
                 let ty = Ty::from_word(self.text(ty_token)).expect("just checked");
                 let value = self.advance();
                 Ok(Expr::TypedLiteral {
                     ty,
-                    text: name_value(self.text(value)).to_string(),
+                    text: literal_value(self.text(value)).to_string(),
                     span: ty_token.span.to(value.span),
+                })
+            }
+
+            // A written value with no type in front of it, taking its type from whatever
+            // is expecting it -- exactly as a bare number does.
+            Kind::Literal => {
+                let token = self.advance();
+                Ok(Expr::Literal {
+                    text: literal_value(self.text(token)).to_string(),
+                    span: token.span,
                 })
             }
 
@@ -901,8 +918,8 @@ impl<'a> Parser<'a> {
                 self.fail(
                     Diagnostic::new("E0113", "something to calculate with was expected here.")
                         .primary(found.span, format!("{} is here instead", found.kind.describe()))
-                        .rule("a math block calculates with numbers, variables in quotes, and groups in `( )`")
-                        .fix("write a number, a variable in quotes, or a group in `( )`."),
+                        .rule("a math block calculates with numbers, written values in bars, variables in quotes, and groups in `( )`")
+                        .fix("write a number, a `|…|`, a variable in quotes, or a group in `( )`."),
                 )
             }
         }
@@ -940,7 +957,7 @@ mod tests {
     /// An expression as a nested list, so precedence is visible at a glance.
     fn show(expr: &Expr) -> String {
         match expr {
-            Expr::Literal { text, .. } => format!("'{text}'"),
+            Expr::Literal { text, .. } => format!("|{text}|"),
             Expr::Name(name) => name.text.clone(),
             Expr::Number { text, .. } => text.clone(),
             Expr::TimeNow { .. } => "time.now".to_string(),
@@ -950,7 +967,7 @@ mod tests {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }
             Expr::Math { inner, .. } => show(inner),
-            Expr::TypedLiteral { ty, text, .. } => format!("{}'{text}'", ty.word()),
+            Expr::TypedLiteral { ty, text, .. } => format!("{}|{text}|", ty.word()),
             Expr::Compare { op, lhs, rhs, .. } => {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }
@@ -974,7 +991,7 @@ mod tests {
     #[test]
     fn the_readme_counting_program_parses() {
         let program = clean(
-            "loop.temp.range.ui8 ['i'] = ['1', '5'] {\n    print['i' \\n];\n}\n",
+            "loop.temp.range.ui8 ['i'] = [|1|, |5|] {\n    print['i' \\n];\n}\n",
         );
         assert_eq!(program.stmts.len(), 1);
         let Stmt::Loop(loop_stmt) = &program.stmts[0] else { panic!("not a loop") };
@@ -988,8 +1005,8 @@ mod tests {
     #[test]
     fn the_readme_accumulating_program_parses() {
         let program = clean(
-            "var.local.mut.ui32 ['total'] = ['0'];\n\
-             loop.temp.range.ui8 ['i'] = ['1', '10'] {\n\
+            "var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui8 ['i'] = [|1|, |10|] {\n\
                  handback 'i' as 'total';\n\
              }\n\
              print[\"total is \" 'total' \\n];\n",
@@ -1017,9 +1034,9 @@ mod tests {
     #[test]
     fn the_readme_timing_program_parses() {
         let program = clean(
-            "var.local.mut.ui64 ['sum'] = ['0'];\n\
+            "var.local.mut.ui64 ['sum'] = [|0|];\n\
              var.local.b64 ['start']    = [time.now];\n\
-             loop.temp.range.ui64 ['i'] = ['1', '100000000'] {\n\
+             loop.temp.range.ui64 ['i'] = [|1|, |100000000|] {\n\
                  set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];\n\
              }\n\
              var.local.b64 ['elapsed'] = [math { time.now - 'start' }];\n\
@@ -1035,11 +1052,11 @@ mod tests {
     #[test]
     fn all_three_declaration_forms_say_the_same_thing() {
         // Everything hoisted onto `var`.
-        let a = clean("var.local.mut.b16 ['a', 'b'] = ['1', '2'];");
+        let a = clean("var.local.mut.b16 ['a', 'b'] = [|1|, |2|];");
         // Scope hoisted, types inline.
-        let b = clean("var.local.mut [b16 'a', b16 'b'] = ['1', '2'];");
+        let b = clean("var.local.mut [b16 'a', b16 'b'] = [|1|, |2|];");
         // Nothing hoisted at all.
-        let c = clean("var [local.mut.b16 'a', local.mut.b16 'b'] = ['1', '2'];");
+        let c = clean("var [local.mut.b16 'a', local.mut.b16 'b'] = [|1|, |2|];");
 
         for program in [&a, &b, &c] {
             let Stmt::Var(var) = &program.stmts[0] else { panic!("not a declaration") };
@@ -1055,7 +1072,7 @@ mod tests {
 
     #[test]
     fn hoisted_and_inline_parts_combine() {
-        let program = clean("var.local [str 'a', b16 'b'] = ['hi', '1000'];");
+        let program = clean("var.local [str 'a', b16 'b'] = [|hi|, |1000|];");
         let Stmt::Var(var) = &program.stmts[0] else { panic!("not a declaration") };
         assert_eq!(var.bindings[0].ty, Ty::Str);
         assert_eq!(var.bindings[1].ty, Ty::B16);
@@ -1064,7 +1081,7 @@ mod tests {
 
     #[test]
     fn saying_nothing_about_visibility_means_restricted() {
-        let program = clean("var.b16 ['x'] = ['1'];");
+        let program = clean("var.b16 ['x'] = [|1|];");
         let Stmt::Var(var) = &program.stmts[0] else { panic!("not a declaration") };
         assert_eq!(var.bindings[0].visibility, Visibility::Restricted);
         assert_eq!(var.bindings[0].visibility_span, None);
@@ -1141,7 +1158,7 @@ mod tests {
     #[test]
     fn quotes_mean_a_variable_in_a_math_block_and_a_literal_outside_one() {
         // In the value slot, a literal to be read as b16.
-        let program = clean("var.local.b16 ['x'] = ['1000'];");
+        let program = clean("var.local.b16 ['x'] = [|1000|];");
         let Stmt::Var(var) = &program.stmts[0] else { panic!("not a declaration") };
         assert!(matches!(&var.values[0], Expr::Literal { text, .. } if text == "1000"));
 
@@ -1152,18 +1169,18 @@ mod tests {
 
     #[test]
     fn a_declaration_without_a_type_is_reported() {
-        assert_eq!(codes("var.local ['x'] = ['1'];"), ["E0105"]);
+        assert_eq!(codes("var.local ['x'] = [|1|];"), ["E0105"]);
     }
 
     #[test]
     fn a_word_that_belongs_to_no_slot_is_reported() {
-        let errors = codes("var.local.wobbly.b16 ['x'] = ['1'];");
+        let errors = codes("var.local.wobbly.b16 ['x'] = [|1|];");
         assert_eq!(errors, ["E0102"]);
     }
 
     #[test]
     fn saying_a_thing_twice_is_reported_with_both_places() {
-        let out = parse_str("var.local.global.b16 ['x'] = ['1'];");
+        let out = parse_str("var.local.global.b16 ['x'] = [|1|];");
         assert_eq!(out.errors.len(), 1);
         assert_eq!(out.errors[0].code, "E0103");
         assert_eq!(out.errors[0].labels.len(), 2, "both spellings are pointed at");
@@ -1171,15 +1188,15 @@ mod tests {
 
     #[test]
     fn a_loop_must_say_how_long_its_counter_lives() {
-        assert_eq!(codes("loop.range.ui8 ['i'] = ['1','5'] { }"), ["E0108"]);
-        assert_eq!(codes("loop.temp.ui8 ['i'] = ['1','5'] { }"), ["E0109"]);
-        assert_eq!(codes("loop.temp.range ['i'] = ['1','5'] { }"), ["E0105"]);
+        assert_eq!(codes("loop.range.ui8 ['i'] = [|1|,|5|] { }"), ["E0108"]);
+        assert_eq!(codes("loop.temp.ui8 ['i'] = [|1|,|5|] { }"), ["E0109"]);
+        assert_eq!(codes("loop.temp.range ['i'] = [|1|,|5|] { }"), ["E0105"]);
     }
 
     #[test]
     fn a_statement_that_starts_with_the_wrong_word_is_reported() {
         assert_eq!(codes("wobble ['x'];"), ["E0101"]);
-        assert_eq!(codes("'x' = ['1'];"), ["E0101"]);
+        assert_eq!(codes("'x' = [|1|];"), ["E0101"]);
     }
 
     #[test]
@@ -1199,9 +1216,9 @@ mod tests {
     #[test]
     fn one_bad_statement_does_not_swallow_the_rest() {
         // Three separate problems in one file, all found.
-        let source = "var.local ['a'] = ['1'];\n\
+        let source = "var.local ['a'] = [|1|];\n\
                       wobble ['b'];\n\
-                      var.local.global.b16 ['c'] = ['1'];\n\
+                      var.local.global.b16 ['c'] = [|1|];\n\
                       print['c'];\n";
         let out = parse_str(source);
         assert_eq!(
@@ -1223,7 +1240,7 @@ mod tests {
 
     #[test]
     fn a_name_may_be_anything_at_all() {
-        let program = clean("var.local.b16 ['🧑‍🧑‍🧒‍🧒', 'a friendly greeting'] = ['1', '2'];");
+        let program = clean("var.local.b16 ['🧑‍🧑‍🧒‍🧒', 'a friendly greeting'] = [|1|, |2|];");
         let Stmt::Var(var) = &program.stmts[0] else { panic!("not a declaration") };
         assert_eq!(var.bindings[0].name.text, "🧑‍🧑‍🧒‍🧒");
         assert_eq!(var.bindings[1].name.text, "a friendly greeting");
@@ -1231,7 +1248,7 @@ mod tests {
 
     #[test]
     fn every_node_can_point_at_itself() {
-        let source = "var.local.mut.b16 ['x'] = ['1000'];";
+        let source = "var.local.mut.b16 ['x'] = [|1000|];";
         let program = clean(source);
         let span = program.stmts[0].span();
         assert_eq!(&source[span.start..span.end], source);
@@ -1247,9 +1264,9 @@ mod tests {
     #[test]
     fn an_if_takes_its_arms_in_order() {
         let program = clean(
-            "if ['true'] { print[\"a\"]; }\n\
-             else-if ['false'] { print[\"b\"]; }\n\
-             else-if ['false'] { print[\"c\"]; }\n\
+            "if [|true|] { print[\"a\"]; }\n\
+             else-if [|false|] { print[\"b\"]; }\n\
+             else-if [|false|] { print[\"c\"]; }\n\
              else { print[\"d\"]; }",
         );
         let Stmt::If(if_stmt) = &program.stmts[0] else { panic!("an if") };
@@ -1260,7 +1277,7 @@ mod tests {
 
     #[test]
     fn an_if_needs_neither_an_else_nor_an_else_if() {
-        let program = clean("if ['true'] { print[\"a\"]; }");
+        let program = clean("if [|true|] { print[\"a\"]; }");
         let Stmt::If(if_stmt) = &program.stmts[0] else { panic!("an if") };
         assert_eq!(if_stmt.arms.len(), 1);
         assert!(if_stmt.otherwise.is_none());
@@ -1269,10 +1286,10 @@ mod tests {
     #[test]
     fn nothing_may_follow_the_else() {
         assert_eq!(
-            codes("if ['true'] { } else { } else-if ['true'] { }"),
+            codes("if [|true|] { } else { } else-if [|true|] { }"),
             ["E0117"]
         );
-        assert_eq!(codes("if ['true'] { } else { } else { }"), ["E0118"]);
+        assert_eq!(codes("if [|true|] { } else { } else { }"), ["E0118"]);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 -- The one program every language gets asked to write, which is really a test of `if`.
-loop.temp.range.ui8 ['n'] = ['1', '15'] {
-    if [math { 'n' mod ui8 '15' = ui8 '0' }] {
+loop.temp.range.ui8 ['n'] = [|1|, |15|] {
+    if [math { 'n' mod ui8 |15| = ui8 |0| }] {
         print["fizzbuzz" \n];
-    } else-if [math { 'n' mod ui8 '3' = ui8 '0' }] {
+    } else-if [math { 'n' mod ui8 |3| = ui8 |0| }] {
         print["fizz" \n];
-    } else-if [math { 'n' mod ui8 '5' = ui8 '0' }] {
+    } else-if [math { 'n' mod ui8 |5| = ui8 |0| }] {
         print["buzz" \n];
     } else {
         print['n' \n];

@@ -832,17 +832,17 @@ mod tests {
 
     #[test]
     fn the_readme_programs_all_check() {
-        clean("loop.temp.range.ui8 ['i'] = ['1', '5'] {\n print['i' \\n];\n}\n");
+        clean("loop.temp.range.ui8 ['i'] = [|1|, |5|] {\n print['i' \\n];\n}\n");
         clean(
-            "var.local.mut.ui32 ['total'] = ['0'];\n\
-             loop.temp.range.ui32 ['i'] = ['1', '10'] { handback 'i' as 'total'; }\n\
+            "var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui32 ['i'] = [|1|, |10|] { handback 'i' as 'total'; }\n\
              print[\"total is \" 'total' \\n];\n",
         );
-        clean("var.local.b16 ['a'] = ['0.1'];\nprint['a' \\n];\n");
+        clean("var.local.b16 ['a'] = [|0.1|];\nprint['a' \\n];\n");
         clean(
-            "var.local.mut.ui64 ['sum'] = ['0'];\n\
+            "var.local.mut.ui64 ['sum'] = [|0|];\n\
              var.local.b64 ['start'] = [time.now];\n\
-             loop.temp.range.ui64 ['i'] = ['1', '100'] {\n\
+             loop.temp.range.ui64 ['i'] = [|1|, |100|] {\n\
                  set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];\n\
              }\n\
              var.local.b64 ['elapsed'] = [math { time.now - 'start' }];\n\
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn a_name_that_was_never_declared_is_reported_with_a_guess() {
-        let (_, errors) = run("var.local.b16 ['count'] = ['1'];\nprint['cont'];");
+        let (_, errors) = run("var.local.b16 ['count'] = [|1|];\nprint['cont'];");
         assert_eq!(errors[0].code, "E0208");
         assert!(errors[0].tips[0].contains("'count'"), "{:?}", errors[0].tips);
     }
@@ -860,26 +860,26 @@ mod tests {
     #[test]
     fn a_restricted_variable_cannot_be_touched() {
         // Said by saying nothing, which is the default.
-        let (_, errors) = run("var.b16 ['x'] = ['1'];\nprint['x'];");
+        let (_, errors) = run("var.b16 ['x'] = [|1|];\nprint['x'];");
         assert_eq!(errors[0].code, "E0207");
         // And said out loud.
-        assert_eq!(codes("var.restricted.b16 ['x'] = ['1'];\nprint['x'];"), ["E0207"]);
+        assert_eq!(codes("var.restricted.b16 ['x'] = [|1|];\nprint['x'];"), ["E0207"]);
         // The declaration itself is fine either way.
-        clean("var.b16 ['x'] = ['1'];");
+        clean("var.b16 ['x'] = [|1|];");
     }
 
     #[test]
     fn changing_something_that_never_said_mut_is_reported() {
         assert_eq!(
-            codes("var.local.ui32 ['total'] = ['0'];\nset ['total'] = ['55'];"),
+            codes("var.local.ui32 ['total'] = [|0|];\nset ['total'] = [|55|];"),
             ["E0104"]
         );
-        clean("var.local.mut.ui32 ['total'] = ['0'];\nset ['total'] = ['55'];");
+        clean("var.local.mut.ui32 ['total'] = [|0|];\nset ['total'] = [|55|];");
     }
 
     #[test]
     fn the_two_lists_have_to_be_the_same_length() {
-        let (_, errors) = run("var.local.b16 ['a', 'b', 'c'] = ['1', '2'];");
+        let (_, errors) = run("var.local.b16 ['a', 'b', 'c'] = [|1|, |2|];");
         assert_eq!(errors[0].code, "E0206");
         assert_eq!(errors[0].labels.len(), 2, "both lists are pointed at");
         assert!(errors[0].message.contains("3 names here and 2 values"));
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn nothing_converts_on_its_own() {
         let (_, errors) = run(
-            "var.local.b32 ['a'] = ['1'];\n\
+            "var.local.b32 ['a'] = [|1|];\n\
              var.local.b64 ['b'] = [math { 'a' + 1 }];",
         );
         assert_eq!(errors[0].code, "E0215");
@@ -897,30 +897,30 @@ mod tests {
 
     #[test]
     fn a_value_that_will_not_fit_its_type_is_reported() {
-        let (_, errors) = run("var.local.ui8 ['small'] = ['300'];");
+        let (_, errors) = run("var.local.ui8 ['small'] = [|300|];");
         assert_eq!(errors[0].code, "E0217");
         assert!(errors[0].tips[0].contains("0 to 255"), "{:?}", errors[0].tips);
 
         // A fraction has nowhere to go in a whole number.
-        assert_eq!(codes("var.local.i32 ['x'] = ['1.5'];"), ["E0218"]);
+        assert_eq!(codes("var.local.i32 ['x'] = [|1.5|];"), ["E0218"]);
         // But a float takes it, and one too large becomes an infinity rather than an error.
-        clean("var.local.b16 ['x'] = ['70000'];");
+        clean("var.local.b16 ['x'] = [|70000|];");
     }
 
     #[test]
     fn the_types_that_are_not_built_yet_say_so() {
-        assert_eq!(codes("var.local.d64 ['money'] = ['19.99'];"), ["E0209"]);
-        assert_eq!(codes("var.local.er ['third'] = ['1'];"), ["E0209"]);
+        assert_eq!(codes("var.local.d64 ['money'] = [|19.99|];"), ["E0209"]);
+        assert_eq!(codes("var.local.er ['third'] = [|1|];"), ["E0209"]);
     }
 
     #[test]
     fn the_visibility_default_can_be_made_an_error() {
-        clean("var.b16 ['x'] = ['1'];");
-        let (_, errors) = run("defaults.no-visibility-stated.error;\nvar.b16 ['x'] = ['1'];");
+        clean("var.b16 ['x'] = [|1|];");
+        let (_, errors) = run("defaults.no-visibility-stated.error;\nvar.b16 ['x'] = [|1|];");
         assert_eq!(errors[0].code, "E0202");
         // And it applies to declarations written above it, too.
         assert_eq!(
-            codes("var.b16 ['x'] = ['1'];\ndefaults.no-visibility-stated.error;"),
+            codes("var.b16 ['x'] = [|1|];\ndefaults.no-visibility-stated.error;"),
             ["E0202"]
         );
     }
@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn overflow_is_wrapping_unless_a_default_says_otherwise() {
-        assert_eq!(clean("var.local.b16 ['x'] = ['1'];").overflow, Overflow::Wrap);
+        assert_eq!(clean("var.local.b16 ['x'] = [|1|];").overflow, Overflow::Wrap);
         assert_eq!(clean("defaults.overflow.trap;").overflow, Overflow::Trap);
     }
 
@@ -944,16 +944,16 @@ mod tests {
         let (_, errors) = run("print[math { 1 + 2 }];");
         assert_eq!(errors[0].code, "E0214");
         // A variable brings its own type, so this is fine.
-        clean("var.local.b16 ['x'] = ['1'];\nprint[math { 'x' + 1 }];");
+        clean("var.local.b16 ['x'] = [|1|];\nprint[math { 'x' + 1 }];");
     }
 
     #[test]
     fn a_temp_counter_is_gone_afterwards_and_a_perm_one_is_not() {
         assert_eq!(
-            codes("loop.temp.range.ui8 ['i'] = ['1','5'] { }\nprint['i'];"),
+            codes("loop.temp.range.ui8 ['i'] = [|1|,|5|] { }\nprint['i'];"),
             ["E0208"]
         );
-        clean("loop.perm.range.ui8 ['i'] = ['1','5'] { }\nprint['i'];");
+        clean("loop.perm.range.ui8 ['i'] = [|1|,|5|] { }\nprint['i'];");
     }
 
     #[test]
@@ -972,17 +972,17 @@ mod tests {
 
     #[test]
     fn declaring_the_same_name_twice_in_one_block_is_reported() {
-        let (_, errors) = run("var.local.b16 ['x'] = ['1'];\nvar.local.b16 ['x'] = ['2'];");
+        let (_, errors) = run("var.local.b16 ['x'] = [|1|];\nvar.local.b16 ['x'] = [|2|];");
         assert_eq!(errors[0].code, "E0203");
         // A block of its own is a different matter.
-        clean("var.local.b16 ['x'] = ['1'];\nloop.temp.range.ui8 ['i'] = ['1','2'] { var.local.b16 ['x'] = ['2']; }");
+        clean("var.local.b16 ['x'] = [|1|];\nloop.temp.range.ui8 ['i'] = [|1|,|2|] { var.local.b16 ['x'] = [|2|]; }");
     }
 
     #[test]
     fn handback_needs_both_sides_to_agree() {
         let (_, errors) = run(
-            "var.local.mut.ui32 ['total'] = ['0'];\n\
-             var.local.b16 ['bit'] = ['1'];\n\
+            "var.local.mut.ui32 ['total'] = [|0|];\n\
+             var.local.b16 ['bit'] = [|1|];\n\
              handback 'bit' as 'total';",
         );
         assert_eq!(errors[0].code, "E0204");
@@ -991,8 +991,8 @@ mod tests {
     #[test]
     fn every_name_becomes_a_slot_and_every_literal_a_value() {
         let checked = clean(
-            "var.local.mut.ui32 ['total'] = ['0'];\n\
-             loop.temp.range.ui32 ['i'] = ['1', '10'] { handback 'i' as 'total'; }\n",
+            "var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui32 ['i'] = [|1|, |10|] { handback 'i' as 'total'; }\n",
         );
         assert_eq!(checked.slots, 2, "total and i");
         let ir::Stmt::Store { slot, value, .. } = &checked.stmts[0] else { panic!("not a store") };
@@ -1004,9 +1004,9 @@ mod tests {
     #[test]
     fn every_mistake_in_a_file_is_found_at_once() {
         let (_, errors) = run(
-            "var.local.ui8 ['small'] = ['300'];\n\
-             var.local.b16 ['x'] = ['1'];\n\
-             set ['x'] = ['2'];\n\
+            "var.local.ui8 ['small'] = [|300|];\n\
+             var.local.b16 ['x'] = [|1|];\n\
+             set ['x'] = [|2|];\n\
              print['nope'];\n",
         );
         assert_eq!(
@@ -1016,23 +1016,35 @@ mod tests {
     }
     #[test]
     fn a_condition_has_to_be_a_question() {
-        // A written `'true'` is a `bool` literal; a variable is read the way a variable
-        // is read anywhere else in the language, through `math`.
-        clean("if ['true'] { print[\"y\"]; }");
-        clean("var.local.bool ['f'] = ['true']; if [math { 'f' }] { print[\"y\"]; }");
-        clean("var.local.i32 ['n'] = ['1']; if [math { 'n' > i32 '0' }] { print[\"y\"]; }");
+        clean("if [|true|] { print[\"y\"]; }");
+        // A name in quotes is a name here too, so a bool on its own is a whole condition.
+        clean("var.local.bool ['f'] = [|true|]; if ['f'] { print[\"y\"]; }");
+        clean("var.local.i32 ['n'] = [|1|]; if [math { 'n' > i32 |0| }] { print[\"y\"]; }");
         // A number is not a question, however true it looks in other languages.
-        assert_eq!(codes("var.local.i32 ['n'] = ['1']; if [math { 'n' }] { print[\"y\"]; }"), ["E0221"]);
-        assert_eq!(codes("var.local.str ['s'] = ['hi']; if [math { 's' }] { print[\"y\"]; }"), ["E0221"]);
+        assert_eq!(codes("var.local.i32 ['n'] = [|1|]; if ['n'] { print[\"y\"]; }"), ["E0221"]);
+        assert_eq!(codes("var.local.str ['s'] = [|hi|]; if ['s'] { print[\"y\"]; }"), ["E0221"]);
+    }
+
+    #[test]
+    fn a_value_slot_can_simply_name_a_variable() {
+        // Bars for what is written, quotes for what is named -- so copying one variable
+        // into another needs no `math` wrapped around a single name.
+        let checked = clean("var.local.i32 ['a'] = [|5|];\nvar.local.i32 ['b'] = ['a'];");
+        assert!(matches!(&checked.stmts[1], ir::Stmt::Store { value: ir::Expr::Load { .. }, .. }));
+        // And the types still have to agree, since nothing converts on its own.
+        assert_eq!(
+            codes("var.local.i32 ['a'] = [|5|];\nvar.local.b64 ['b'] = ['a'];"),
+            ["E0215"]
+        );
     }
 
     #[test]
     fn and_or_and_not_take_questions_and_answer_one() {
-        clean("var.local.bool ['f'] = [math { bool 'true' and not bool 'false' }];");
-        clean("var.local.i32 ['n'] = ['1'];\nvar.local.bool ['f'] = [math { 'n' > i32 '0' or 'n' < i32 '9' }];");
+        clean("var.local.bool ['f'] = [math { bool |true| and not bool |false| }];");
+        clean("var.local.i32 ['n'] = [|1|];\nvar.local.bool ['f'] = [math { 'n' > i32 |0| or 'n' < i32 |9| }];");
         // A number on either side of `and` is not a question either.
-        assert_eq!(codes("var.local.i32 ['n'] = ['1']; var.local.bool ['f'] = [math { 'n' and bool 'true' }];"), ["E0221"]);
-        assert_eq!(codes("var.local.i32 ['n'] = ['1']; var.local.bool ['f'] = [math { not 'n' }];"), ["E0221"]);
+        assert_eq!(codes("var.local.i32 ['n'] = [|1|]; var.local.bool ['f'] = [math { 'n' and bool |true| }];"), ["E0221"]);
+        assert_eq!(codes("var.local.i32 ['n'] = [|1|]; var.local.bool ['f'] = [math { not 'n' }];"), ["E0221"]);
     }
 
     #[test]
@@ -1040,7 +1052,7 @@ mod tests {
         // Declared inside, used outside: the name is gone at the closing brace, exactly
         // as it is in a loop body.
         assert_eq!(
-            codes("if ['true'] { var.local.i32 ['x'] = ['1']; }\nprint['x'];"),
+            codes("if [|true|] { var.local.i32 ['x'] = [|1|]; }\nprint['x'];"),
             ["E0208"]
         );
     }

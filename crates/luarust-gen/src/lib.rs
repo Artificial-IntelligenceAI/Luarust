@@ -196,7 +196,7 @@ impl Writer {
         let to = from + self.rng.below(4);
 
         self.line(&format!(
-            "loop.{lifetime}.range.{} ['{name}'] = ['{from}', '{to}'] {{",
+            "loop.{lifetime}.range.{} ['{name}'] = [|{from}|, |{to}|] {{",
             ty.word()
         ));
 
@@ -249,7 +249,7 @@ impl Writer {
             return format!("math {{ {} }}", self.condition(0));
         }
         if ty == Ty::Bool || ty == Ty::Str || self.rng.below(3) != 0 {
-            return format!("'{}'", self.literal(ty));
+            return format!("|{}|", self.literal(ty));
         }
         format!("math {{ {} }}", self.arithmetic(ty, 0))
     }
@@ -302,7 +302,7 @@ impl Writer {
         }
         let operands = self.pick_type();
         format!(
-            "{} '{}' {op} {} '{}'",
+            "{} |{}| {op} {} |{}|",
             operands.word(),
             self.literal(operands),
             operands.word(),
@@ -337,7 +337,7 @@ impl Writer {
             Some(known) if self.rng.below(2) == 0 => format!("'{}'", known.name),
             // A literal that says what it is, which is the only kind that works where
             // nothing else supplies a type.
-            _ if self.rng.below(3) == 0 => format!("{} '{}'", ty.word(), self.literal(ty)),
+            _ if self.rng.below(3) == 0 => format!("{} |{}|", ty.word(), self.literal(ty)),
             _ => self.literal(ty),
         }
     }

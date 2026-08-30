@@ -364,7 +364,7 @@ mod tests {
     fn a_caret_lands_under_the_right_thing() {
         // This is the case the renderer will get wrong if it counts characters: the caret
         // has to be pushed by two cells for the emoji, not one.
-        let line = "var.local.b16 ['🧑‍🧑‍🧒‍🧒'] = ['1'];";
+        let line = "var.local.b16 ['🧑‍🧑‍🧒‍🧒'] = [|1|];";
         let upto = &line[..line.find("] =").unwrap()];
         assert_eq!(count(upto), 18, "eighteen characters before the bracket");
         assert_eq!(width(upto), 19, "but nineteen cells, because the emoji is wide");

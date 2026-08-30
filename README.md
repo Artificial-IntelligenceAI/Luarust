@@ -15,23 +15,25 @@ A declaration says the scope and the type up front, then takes a list of names a
 list of values. Statements end with a semicolon.
 
 ```luarust
-var.local.str ['name'] = ['Tankun'];
+var.local.str ['name'] = [|Tankun|];
 ```
 
 Names live in quotes, so a name can be anything you can type — spaces, punctuation,
 emoji, whatever you actually wanted to call it:
 
 ```luarust
-var.local.str ['a friendly greeting'] = ['hello'];
-var.local.b16 ['❔']                  = ['1000'];
+var.local.str ['a friendly greeting'] = [|hello|];
+var.local.b16 ['❔']                  = [|1000|];
 ```
 
-Values live in quotes too, and the type is what decides how one reads. The same four
-characters are a number under `b16` and text under `str`:
+Written values wear bars instead, so a quoted thing is a name wherever you meet one and
+never has to be read as a value depending on where it sits. The type is what decides how
+a written value reads — the same four characters are a number under `b16` and text under
+`str`:
 
 ```luarust
-var.local.b16 ['x'] = ['1000'];    -- the number 1000
-var.local.str ['y'] = ['1000'];    -- the text "1000"
+var.local.b16 ['x'] = [|1000|];    -- the number 1000
+var.local.str ['y'] = [|1000|];    -- the text "1000"
 ```
 
 ### Several at once
@@ -40,20 +42,20 @@ The brackets hold lists, so one declaration can make several variables that shar
 scope and a type:
 
 ```luarust
-var.local.str ['name', 'name 2', 'name 3'] = ['Tankun', 'Ada', 'Jensen Huang'];
+var.local.str ['name', 'name 2', 'name 3'] = [|Tankun|, |Ada|, |Jensen Huang|];
 ```
 
 Whatever they have in common hoists onto `var`, and whatever they don't goes inline.
 Same scope, different types:
 
 ```luarust
-var.local [str 'a', b16 'b'] = ['hello', '1000'];
+var.local [str 'a', b16 'b'] = [|hello|, |1000|];
 ```
 
 Nothing in common at all:
 
 ```luarust
-var [local.str 'name', local.b16 'x', local.str '❔'] = ['Tankun', '1000', 'idk'];
+var [local.str 'name', local.b16 'x', local.str '❔'] = [|Tankun|, |1000|, |idk|];
 ```
 
 The two lists have to be the same length. Three names and two values is an error, and
@@ -65,7 +67,7 @@ write.
 `var` makes a variable. `set` changes one that already exists:
 
 ```luarust
-var.local.mut.b16 ['x'] = ['1000'];
+var.local.mut.b16 ['x'] = [|1000|];
 set ['x'] = [math { 'x' + 1 }];
 ```
 
@@ -77,14 +79,14 @@ than the line you wrote it on.
 the same lists as everything else:
 
 ```luarust
-var.local.mut.b16 ['a', 'b'] = ['1', '2'];
-set ['a', 'b'] = ['10', '20'];
+var.local.mut.b16 ['a', 'b'] = [|1|, |2|];
+set ['a', 'b'] = [|10|, |20|];
 ```
 
 `mut` hoists like the rest of the chain, so names that share it say it once:
 
 ```luarust
-var.local.mut [b16 'a', b64 'b'] = ['1', '2'];
+var.local.mut [b16 'a', b64 'b'] = [|1|, |2|];
 ```
 
 ### Adding to something
@@ -106,7 +108,7 @@ existing. The target has to be `mut`, the same as any other change.
 `print` takes its items in brackets, juxtaposed rather than separated by anything:
 
 ```luarust
-var.local.b16 ['x'] = ['1000'];
+var.local.b16 ['x'] = [|1000|];
 print["x is equal to " 'x' \n];
 ```
 
@@ -120,7 +122,7 @@ A number prints as the value that is actually stored, not as the text that was w
 to make it. `b16` carries eleven bits of significand, and most decimals are not in it:
 
 ```luarust
-var.local.b16 ['a'] = ['0.1'];
+var.local.b16 ['a'] = [|0.1|];
 print['a' \n];                 -- 0.0999755859375
 ```
 
@@ -133,7 +135,7 @@ Arithmetic happens inside `math { }` and nowhere else. A math block stands where
 value stands:
 
 ```luarust
-var.local.b16 ['x', 'y'] = ['3', '4'];
+var.local.b16 ['x', 'y'] = [|3|, |4|];
 var.local.b16 ['z']      = [math { 'x' + 'y' }];
 print['z' \n];                                     -- 7
 ```
@@ -145,20 +147,19 @@ though, are written bare:
 var.local.b16 ['z'] = [math { 'x' + 1 }];
 ```
 
-Quotes exist so that a type annotation can decide what a literal means — `'1000'` is a
-number under `b16` and text under `str`. Inside a math block there is nothing left to
-decide, so the quotes come off. A bare number takes its type from its surroundings, and
-`'1'` in a math block would be a variable named `1`.
+Bars exist so that a type annotation can decide what a written value means — `|1000|` is a
+number under `b16` and text under `str`. A bare number takes its type from its
+surroundings and needs no bars at all, so inside a math block you rarely see them.
 
 Where nothing supplies a type, a value can say what it is:
 
 ```luarust
-var.local.bool ['yes'] = [math { ui32 '12' < ui32 '13' }];
+var.local.bool ['yes'] = [math { ui32 |12| < ui32 |13| }];
 ```
 
 A comparison tells its two sides nothing about themselves — that is the point of one — so
 without this there would be nowhere for `12` to get a type from. It is still a literal and
-still checked: `ui8 '300'` is out of range, and a stated type may not disagree with one
+still checked: `ui8 |300|` is out of range, and a stated type may not disagree with one
 already expected.
 
 Grouping is `( )`, because `[ ]` and `{ }` are both spoken for:
@@ -188,7 +189,7 @@ Most operators have more than one spelling, and they all mean exactly the same t
 after a number, so `15%` is fifteen hundredths:
 
 ```luarust
-var.local.d64 ['price'] = ['19.99'];
+var.local.d64 ['price'] = [|19.99|];
 var.local.d64 ['vat']   = [math { 'price' x 20% }];
 ```
 
@@ -211,7 +212,7 @@ actually wanted.
 Six of them, and they answer `bool`:
 
 ```luarust
-var.local.i32 ['a', 'b'] = ['3', '5'];
+var.local.i32 ['a', 'b'] = [|3|, |5|];
 
 var.local.bool ['less']    = [math { 'a' <   'b' }];    -- true
 var.local.bool ['more']    = [math { 'a' >   'b' }];    -- false
@@ -263,8 +264,8 @@ bare `x` cannot be one, so there is nothing for `math { 'a' x 'b' }` to be confu
 truthiness anywhere: a number is not a question and Luarust will say so.
 
 ```luarust
-var.local.bool ['in range'] = [math { 'n' > i32 '0' and 'n' < i32 '100' }];
-var.local.bool ['outside']  = [math { 'n' < i32 '0' or  'n' > i32 '99'  }];
+var.local.bool ['in range'] = [math { 'n' > i32 |0| and 'n' < i32 |100| }];
+var.local.bool ['outside']  = [math { 'n' < i32 |0| or  'n' > i32 |99|  }];
 var.local.bool ['missing']  = [math { not 'in range' }];
 ```
 
@@ -277,13 +278,13 @@ optimisation you are being told about for interest — it is what lets a conditi
 the one after it:
 
 ```luarust
-if [math { 'd' != i32 '0' and 'n' div 'd' > i32 '1' }] { … }
+if [math { 'd' != i32 |0| and 'n' div 'd' > i32 |1| }] { … }
 ```
 
 With `d` at zero the division never happens, so the program does not stop. If both sides
 were always worked out there would be no way to write that at all.
 
-That is five kinds of bracket, and the reason it works is that no two of them ever
+That is six kinds of bracket, and the reason it works is that no two of them ever
 mean the same thing:
 
 | | |
@@ -291,19 +292,20 @@ mean the same thing:
 | `[ ]` | a list — of names, of values, of things to print, or a condition |
 | `{ }` | a block — the word in front of it says which kind |
 | `( )` | grouping, inside a math block |
-| `' '` | a name — or a literal, where a value is expected or a type is stated |
-| `" "` | text |
+| `' '` | a name — always |
+| `\| \|` | a written value — always |
+| `" "` | text, in a print list |
 
 You never have to work out which sense a bracket is being used in. It only has one.
 
 ## Deciding
 
 ```luarust
-var.local.i32 ['n'] = ['12'];
+var.local.i32 ['n'] = [|12|];
 
-if [math { 'n' > i32 '10' }] {
+if [math { 'n' > i32 |10| }] {
     print["big" \n];
-} else-if [math { 'n' = i32 '10' }] {
+} else-if [math { 'n' = i32 |10| }] {
     print["exactly ten" \n];
 } else {
     print["small" \n];
@@ -323,13 +325,10 @@ because a loop *introduces a counter* and somebody has to say whether it outlive
 block. An `if` introduces nothing, so a variable declared inside an arm is simply gone at
 the closing brace.
 
-One wart, stated rather than hidden: a condition is a value slot, so `'flag'` in it is a
-**literal** and not the variable `flag` — exactly as `['true']` is a literal everywhere
-else. To ask about a variable, read it the way variables are read anywhere in this
-language:
+A condition may be a variable on its own, since a name in quotes is a name everywhere:
 
 ```luarust
-if [math { 'flag' }] { … }
+if ['flag'] { … }
 ```
 
 ## Loops
@@ -339,7 +338,7 @@ does: a chain saying how long the counter lives, what kind of loop it is, and wh
 the counter has — then a name, then the values that set it going.
 
 ```luarust
-loop.temp.range.ui8 ['i'] = ['1', '5'] {
+loop.temp.range.ui8 ['i'] = [|1|, |5|] {
     print['i' \n];
 }
 ```
@@ -362,8 +361,8 @@ mathematics.
 said:
 
 ```luarust
-loop.temp.range.ui8 ['i'] = ['1', '5'] { … }    -- 'i' is gone at the brace
-loop.perm.range.ui8 ['i'] = ['1', '5'] { … }    -- 'i' is still there afterwards
+loop.temp.range.ui8 ['i'] = [|1|, |5|] { … }    -- 'i' is gone at the brace
+loop.perm.range.ui8 ['i'] = [|1|, |5|] { … }    -- 'i' is still there afterwards
 ```
 
 A `perm` counter holds **the last value it actually took** — five, not six. Languages
@@ -380,9 +379,9 @@ A counter belongs to its loop either way, so anything that has to survive is dec
 before it:
 
 ```luarust
-var.local.mut.ui32 ['total'] = ['0'];
+var.local.mut.ui32 ['total'] = [|0|];
 
-loop.temp.range.ui32 ['i'] = ['1', '10'] {
+loop.temp.range.ui32 ['i'] = [|1|, |10|] {
     handback 'i' as 'total';
 }
 
@@ -408,10 +407,10 @@ it twice.
 type is asked of it. Take it twice and subtract to find out how long something took.
 
 ```luarust
-var.local.mut.ui64 ['sum'] = ['0'];
+var.local.mut.ui64 ['sum'] = [|0|];
 var.local.b64 ['start']    = [time.now];
 
-loop.temp.range.ui64 ['i'] = ['1', '100000000'] {
+loop.temp.range.ui64 ['i'] = [|1|, |100000000|] {
     set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
 }
 
@@ -434,10 +433,10 @@ is not what a timer is for.
 Every declaration carries one of four, and the first three mean what they usually mean:
 
 ```luarust
-var.local.str      ['name'] = ['Tankun'];   -- the block it is written in, and no further
-var.global.str     ['name'] = ['Tankun'];   -- the whole program
-var.public.str     ['name'] = ['Tankun'];   -- and exported, so importers see it too
-var.restricted.str ['name'] = ['Tankun'];   -- nobody, anywhere, on purpose
+var.local.str      ['name'] = [|Tankun|];   -- the block it is written in, and no further
+var.global.str     ['name'] = [|Tankun|];   -- the whole program
+var.public.str     ['name'] = [|Tankun|];   -- and exported, so importers see it too
+var.restricted.str ['name'] = [|Tankun|];   -- nobody, anywhere, on purpose
 ```
 
 **`restricted`** means the variable exists, it holds its value, and nothing is allowed
@@ -446,7 +445,7 @@ to touch it. The declaration compiles. Every use of it does not.
 You can say it out loud, as above. It is also what you get by saying nothing:
 
 ```luarust
-var.str ['name'] = ['Tankun'];   -- declared, and unusable
+var.str ['name'] = [|Tankun|];   -- declared, and unusable
 ```
 
 This is a joke, and it is also the default, so if you would rather hear about it where
@@ -570,15 +569,15 @@ file: /Users/ts/hello/src/main.lr, line: 4, column: 6 (src/main.lr:4:6)
 
 `'total'` cannot be changed, because its declaration never said it could.
 
-  2 | var.local.ui32 ['total'] = ['0'];
+  2 | var.local.ui32 ['total'] = [|0|];
     |     ~~~~~ declared here, and `mut` is not in the chain
-  4 | set ['total'] = ['55'];
+  4 | set ['total'] = [|55|];
     |      ^^^^^^^ changed here
 
 Error code: E0104
 Rule(s) broken: a variable changes only if its declaration says `mut`
 Tip(s): `mut` goes between the visibility and the type.
-Suggested fix(s): line 2 — `var.local.mut.ui32 ['total'] = ['0'];`
+Suggested fix(s): line 2 — `var.local.mut.ui32 ['total'] = [|0|];`
 
 1 error.
 ```

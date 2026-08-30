@@ -1,7 +1,7 @@
 -- A number prints as the value that is stored, not the text that was written.
-var.local.b16 ['a'] = ['0.1'];
-var.local.b32 ['b'] = ['0.1'];
-var.local.b64 ['c'] = ['0.1'];
+var.local.b16 ['a'] = [|0.1|];
+var.local.b32 ['b'] = [|0.1|];
+var.local.b64 ['c'] = [|0.1|];
 
 print["b16 0.1 is " 'a' \n];
 print["b32 0.1 is " 'b' \n];

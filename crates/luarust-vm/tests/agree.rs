@@ -54,7 +54,7 @@ fn agreed(source: &str) -> String {
 #[test]
 fn counting() {
     assert_eq!(
-        agreed("loop.temp.range.ui8 ['i'] = ['1', '5'] { print['i' \\n]; }"),
+        agreed("loop.temp.range.ui8 ['i'] = [|1|, |5|] { print['i' \\n]; }"),
         "1\n2\n3\n4\n5\n"
     );
 }
@@ -63,8 +63,8 @@ fn counting() {
 fn accumulating() {
     assert_eq!(
         agreed(
-            "var.local.mut.ui32 ['total'] = ['0'];\n\
-             loop.temp.range.ui32 ['i'] = ['1', '10'] { handback 'i' as 'total'; }\n\
+            "var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui32 ['i'] = [|1|, |10|] { handback 'i' as 'total'; }\n\
              print[\"total is \" 'total' \\n];"
         ),
         "total is 55\n"
@@ -73,13 +73,13 @@ fn accumulating() {
 
 #[test]
 fn the_awkward_edges_of_a_range() {
-    assert_eq!(agreed("loop.temp.range.ui8 ['i'] = ['3', '3'] { print['i']; }"), "3");
-    assert_eq!(agreed("loop.temp.range.ui8 ['i'] = ['5', '1'] { print['i']; }"), "");
+    assert_eq!(agreed("loop.temp.range.ui8 ['i'] = [|3|, |3|] { print['i']; }"), "3");
+    assert_eq!(agreed("loop.temp.range.ui8 ['i'] = [|5|, |1|] { print['i']; }"), "");
     assert_eq!(
-        agreed("loop.temp.range.ui8 ['i'] = ['253', '255'] { print['i' \" \"]; }"),
+        agreed("loop.temp.range.ui8 ['i'] = [|253|, |255|] { print['i' \" \"]; }"),
         "253 254 255 "
     );
-    assert_eq!(agreed("loop.perm.range.ui8 ['i'] = ['1', '5'] { } print['i'];"), "5");
+    assert_eq!(agreed("loop.perm.range.ui8 ['i'] = [|1|, |5|] { } print['i'];"), "5");
 }
 
 #[test]
@@ -88,8 +88,8 @@ fn nested_loops() {
     // register too early would come apart.
     assert_eq!(
         agreed(
-            "loop.temp.range.ui8 ['a'] = ['1', '3'] {\n\
-                 loop.temp.range.ui8 ['b'] = ['1', '3'] { print['a' 'b' \" \"]; }\n\
+            "loop.temp.range.ui8 ['a'] = [|1|, |3|] {\n\
+                 loop.temp.range.ui8 ['b'] = [|1|, |3|] { print['a' 'b' \" \"]; }\n\
              }"
         ),
         "11 12 13 21 22 23 31 32 33 "
@@ -114,7 +114,7 @@ fn arithmetic_of_every_shape() {
 fn every_float_width_agrees() {
     for ty in ["b16", "b32", "b64", "b128", "b256"] {
         let source = format!(
-            "var.local.{ty} ['a'] = ['0.1'];\n\
+            "var.local.{ty} ['a'] = [|0.1|];\n\
              var.local.{ty} ['b'] = [math {{ 'a' + 'a' }}];\n\
              var.local.{ty} ['c'] = [math {{ 'b' x 'b' div 'a' }}];\n\
              print['a' \" \" 'b' \" \" 'c'];"
@@ -130,7 +130,7 @@ fn a_value_written_into_itself() {
     // before reading both sides would give the wrong number.
     assert_eq!(
         agreed(
-            "var.local.mut.i32 ['sum'] = ['10'];\n\
+            "var.local.mut.i32 ['sum'] = [|10|];\n\
              set ['sum'] = [math { 'sum' x 'sum' + 'sum' }];\n\
              print['sum'];"
         ),
@@ -149,8 +149,8 @@ fn faults_happen_in_the_same_place_both_ways() {
 fn the_benchmark_agrees() {
     assert_eq!(
         agreed(
-            "var.local.mut.ui64 ['sum'] = ['0'];\n\
-             loop.temp.range.ui64 ['i'] = ['1', '100000'] {\n\
+            "var.local.mut.ui64 ['sum'] = [|0|];\n\
+             loop.temp.range.ui64 ['i'] = [|1|, |100000|] {\n\
                  set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];\n\
              }\n\
              print['sum'];"
