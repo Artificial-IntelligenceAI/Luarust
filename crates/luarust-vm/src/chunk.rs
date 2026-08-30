@@ -5,9 +5,9 @@
 //! the compiler numbered slots for its variables anyway — so the registers are half
 //! allocated before compilation starts.
 
-use luarust_check::value::{Overflow, Value};
+use luarust_core::value::{Overflow, Value};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, CmpOp, Ty};
+use luarust_core::{BinOp, CmpOp, Ty};
 
 /// Which register. Sixteen bits is far more than any program in this language will want.
 pub type Reg = u16;

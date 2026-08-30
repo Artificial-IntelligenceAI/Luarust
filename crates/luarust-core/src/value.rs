@@ -12,7 +12,7 @@
 use luarust_diag::{Diagnostic, Span};
 use luarust_num::Uint;
 use luarust_num::binary::{self, Comparison, Format, Round};
-use luarust_parse::ast::{BinOp, CmpOp, Ty};
+use crate::{BinOp, CmpOp, Ty};
 
 /// The working width every float format fits in. `b256` needs the most.
 pub type Bits = Uint<8>;
@@ -399,8 +399,8 @@ fn does_not_fit(ty: Ty) -> Fault {
     Fault::new(
         "R0005",
         format!("this does not fit in `{}`.", ty.word()),
-        "with `defaults.overflow.trap`, a whole number must fit the width it is stored at",
-        format!("use a wider type than `{}`, or drop `defaults.overflow.trap` and let it wrap.", ty.word()),
+        "with overflow set to trap, a whole number must fit the width it is stored at",
+        format!("use a wider type than `{}`, or let overflow wrap.", ty.word()),
     )
 }
 
@@ -590,7 +590,7 @@ pub fn negate(value: &Value, overflow: Overflow) -> Result<Value, Fault> {
                 return Err(Fault::new(
                     "R0005",
                     format!("negating this does not fit in `{}`.", ty.word()),
-                    "with `defaults.overflow.trap`, a whole number must fit the width it is stored at",
+                    "with overflow set to trap, a whole number must fit the width it is stored at",
                     "use a wider type, or a signed one.",
                 ));
             }

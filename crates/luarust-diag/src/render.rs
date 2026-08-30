@@ -56,7 +56,16 @@ pub fn diagnostic(source: &SourceFile, diag: &Diagnostic) -> String {
 
     if !diag.labels.is_empty() {
         out.push('\n');
-        out.push_str(&snippet(source, diag));
+        if source.has_text() {
+            out.push_str(&snippet(source, diag));
+        } else {
+            // The line is known and the line cannot be shown. Say which, rather than
+            // printing an empty frame and letting it look like an empty line.
+            let _ = writeln!(
+                out,
+                "  (this was built without its source, so the line above cannot be shown.)\n"
+            );
+        }
     }
 
     out.push('\n');

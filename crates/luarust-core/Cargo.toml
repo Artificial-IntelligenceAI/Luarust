@@ -1,0 +1,9 @@
+[package]
+name = "luarust-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+luarust-diag = { path = "../luarust-diag" }
+luarust-num = { path = "../luarust-num" }

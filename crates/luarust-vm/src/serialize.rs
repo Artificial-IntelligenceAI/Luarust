@@ -10,10 +10,15 @@
 //! whatever the machine underneath is, so a file written on one architecture reads
 //! identically on another. That is the entire promise.
 //!
-//! **The source travels with it.** A chunk carries the text it was compiled from, which
-//! costs a few kilobytes and buys the thing that would otherwise be lost: a program that
-//! stops half way through can still point at the line that did it, on a machine that has
-//! never seen the source.
+//! **The source travels with it, unless it is told not to.** A chunk carries the text it
+//! was compiled from, which costs a few kilobytes and buys the thing that would otherwise
+//! be lost: a program that stops half way through can still point at the line that did
+//! it, on a machine that has never seen the source.
+//!
+//! A project that would rather not ship its source says so in `Luarust.toml`, and then
+//! the chunk carries the line table instead -- four bytes per line of the original. That
+//! is enough to say which line stopped and in which column, and not enough to say what
+//! was written there. Giving up the text should not mean giving up the line number.
 //!
 //! **Nothing read from a file is trusted.** Every index is checked against what it
 //! indexes before the chunk is handed back, because a corrupt file must produce a
@@ -21,17 +26,17 @@
 //! nobody vouched for.
 
 use crate::chunk::{Chunk, Op};
-use luarust_check::value::{Overflow, Value};
+use luarust_core::value::{Overflow, Value};
 use luarust_diag::Span;
 use luarust_num::Uint;
-use luarust_parse::ast::{BinOp, CmpOp, Ty};
+use luarust_core::{BinOp, CmpOp, Ty};
 
 /// What every Luarust chunk begins with.
 pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -74,13 +79,35 @@ impl std::fmt::Display for Broken {
 
 /// Write a chunk out, with the source it came from.
 pub fn write(chunk: &Chunk, path: &str, source: &str) -> Vec<u8> {
+    write_with(chunk, path, source, true)
+}
+
+/// Write a chunk out, saying whether the source text goes with it.
+///
+/// With `embed_source` off the text stays behind and only its line table travels, so a
+/// fault still names its line and column and simply cannot quote it.
+pub fn write_with(chunk: &Chunk, path: &str, source: &str, embed_source: bool) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, VERSION);
     put_u32(&mut out, u32::from(chunk.overflow == Overflow::Trap));
     put_u32(&mut out, chunk.registers as u32);
     put_str(&mut out, path);
-    put_str(&mut out, source);
+
+    if embed_source {
+        put_u32(&mut out, 1);
+        put_str(&mut out, source);
+    } else {
+        put_u32(&mut out, 0);
+        let starts = line_starts(source);
+        put_u32(&mut out, starts.len() as u32);
+        for start in starts {
+            put_u32(&mut out, start as u32);
+        }
+        // The length is kept even though the text is not, so a column near the end of the
+        // last line is still checked against something real.
+        put_u32(&mut out, source.len() as u32);
+    }
 
     put_u32(&mut out, chunk.consts.len() as u32);
     for value in &chunk.consts {
@@ -262,12 +289,41 @@ fn op_tag(op: BinOp) -> u8 {
 
 // ---- reading -------------------------------------------------------------------
 
-/// A chunk read back, with the source it was compiled from.
+/// A chunk read back, with as much of its source as it was built to carry.
 #[derive(Debug)]
 pub struct Loaded {
     pub chunk: Chunk,
     pub path: String,
-    pub source: String,
+    /// What the program was written in, when the chunk carries it.
+    pub source: Source,
+}
+
+/// What a chunk knows about the file it came from.
+#[derive(Debug)]
+pub enum Source {
+    /// The text itself, so a fault can be quoted.
+    Text(String),
+    /// Only where the lines began, so a fault can be located but not quoted.
+    Lines { starts: Vec<usize>, len: usize },
+}
+
+impl Source {
+    /// The file this chunk came from, ready to report a fault against.
+    pub fn file(&self, path: impl Into<std::path::PathBuf>) -> luarust_diag::SourceFile {
+        match self {
+            Source::Text(text) => luarust_diag::SourceFile::new(path, text.clone()),
+            Source::Lines { starts, len } => {
+                luarust_diag::SourceFile::without_text(path, starts.clone(), *len)
+            }
+        }
+    }
+}
+
+/// Where each line of a text begins, counted in bytes.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.bytes().enumerate().filter(|(_, b)| *b == b'\n').map(|(at, _)| at + 1));
+    starts
 }
 
 /// Read a chunk, checking everything in it.
@@ -285,7 +341,27 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     let overflow = if cursor.u32()? == 0 { Overflow::Wrap } else { Overflow::Trap };
     let registers = cursor.u32()? as usize;
     let path = cursor.text()?;
-    let source = cursor.text()?;
+    let source = match cursor.u32()? {
+        1 => Source::Text(cursor.text()?),
+        0 => {
+            let count = cursor.u32()?;
+            let mut starts = Vec::with_capacity(count.min(65536) as usize);
+            for _ in 0..count {
+                starts.push(cursor.u32()? as usize);
+            }
+            let len = cursor.u32()? as usize;
+            // A line table that runs backwards, or off the end of the file it describes,
+            // would put a fault at a position that never existed.
+            if starts.first() != Some(&0)
+                || starts.windows(2).any(|pair| pair[0] >= pair[1])
+                || starts.last().is_some_and(|last| *last > len)
+            {
+                return Err(Broken::OutOfRange { what: "a line start", index: 0, of: len });
+            }
+            Source::Lines { starts, len }
+        }
+        value => return Err(Broken::Unknown { what: "source kind", value: value.into() }),
+    };
 
     let count = cursor.u32()?;
     let mut consts = Vec::with_capacity(count.min(4096) as usize);

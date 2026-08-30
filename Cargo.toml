@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/luarust-check",
     "crates/luarust-cli",
+    "crates/luarust-conf",
+    "crates/luarust-core",
     "crates/luarust-diag",
     "crates/luarust-gen",
     "crates/luarust-interp",
@@ -10,18 +12,22 @@ members = [
     "crates/luarust-lex",
     "crates/luarust-num",
     "crates/luarust-parse",
+    "crates/luarust-run",
     "crates/luarust-vm",
 ]
 
 default-members = [
     "crates/luarust-check",
     "crates/luarust-cli",
+    "crates/luarust-conf",
+    "crates/luarust-core",
     "crates/luarust-diag",
     "crates/luarust-gen",
     "crates/luarust-interp",
     "crates/luarust-lex",
     "crates/luarust-num",
     "crates/luarust-parse",
+    "crates/luarust-run",
     "crates/luarust-vm",
 ]
 

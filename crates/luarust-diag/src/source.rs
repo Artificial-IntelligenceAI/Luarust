@@ -60,9 +60,25 @@ pub struct SourceFile {
     text: String,
     /// Byte offset of the first character of each line.
     line_starts: Vec<usize>,
+    /// How long the text was, for a file whose text was not kept. `None` when it was.
+    absent_len: Option<usize>,
 }
 
 impl SourceFile {
+    /// A file whose text was not kept, but whose shape was.
+    ///
+    /// A chunk built without its source still knows where every line began, so a fault in
+    /// it reports the same line and column it always did. What it cannot do is show the
+    /// line, and saying so is better than showing a blank one.
+    pub fn without_text(path: impl Into<PathBuf>, line_starts: Vec<usize>, len: usize) -> Self {
+        Self { path: path.into(), text: String::new(), line_starts, absent_len: Some(len) }
+    }
+
+    /// Whether the text itself is here, as opposed to only the shape of it.
+    pub fn has_text(&self) -> bool {
+        self.absent_len.is_none()
+    }
+
     pub fn new(path: impl Into<PathBuf>, text: impl Into<String>) -> Self {
         let text = text.into();
         let mut line_starts = vec![0];
@@ -72,7 +88,7 @@ impl SourceFile {
                 .filter(|(_, b)| *b == b'\n')
                 .map(|(i, _)| i + 1),
         );
-        Self { path: path.into(), text, line_starts }
+        Self { path: path.into(), text, line_starts, absent_len: None }
     }
 
     pub fn path(&self) -> &Path {
@@ -123,17 +139,28 @@ impl SourceFile {
 
     /// Where an offset is, in all three measurements at once.
     pub fn position(&self, offset: usize) -> Position {
-        let offset = offset.min(self.text.len());
+        let offset = offset.min(self.len());
         let line = self.line_of(offset);
         let line_start = self.line_starts[line - 1];
-        // Only ever slice on a boundary; a span that lands mid-character would otherwise
-        // panic here rather than at whatever produced it.
-        let prefix = &self.text[line_start..offset];
+
+        // Without the text, the line and the byte column are still exact and the grapheme
+        // column cannot be: counting graphemes means having the characters. It answers the
+        // byte column for both rather than inventing a number.
+        let Some(prefix) = self.text.get(line_start..offset) else {
+            let bytes = offset - line_start;
+            return Position { line, column: bytes + 1, byte_column: bytes + 1 };
+        };
+
         Position {
             line,
             column: grapheme::count(prefix) + 1,
             byte_column: prefix.len() + 1,
         }
+    }
+
+    /// How long the file was, whether or not its text was kept.
+    fn len(&self) -> usize {
+        self.absent_len.unwrap_or(self.text.len())
     }
 
     /// The `file:line:column` form, carrying the byte column.

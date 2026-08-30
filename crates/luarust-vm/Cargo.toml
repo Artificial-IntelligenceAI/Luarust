@@ -7,11 +7,18 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = ["compile"]
+# Off, the crate is a runtime: it loads a chunk and runs it, and the lexer, parser and
+# checker are not linked in at all.
+compile = ["dep:luarust-check", "dep:luarust-parse"]
+
 [dependencies]
-luarust-check = { path = "../luarust-check" }
+luarust-check = { path = "../luarust-check", optional = true }
+luarust-core = { path = "../luarust-core" }
 luarust-diag = { path = "../luarust-diag" }
 luarust-num = { path = "../luarust-num" }
-luarust-parse = { path = "../luarust-parse" }
+luarust-parse = { path = "../luarust-parse", optional = true }
 
 [dev-dependencies]
 luarust-gen = { path = "../luarust-gen" }

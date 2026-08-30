@@ -11,7 +11,10 @@
 //! any of it out again.
 
 pub mod ir;
-pub mod value;
+
+// `value` moved down to `luarust-core`, because a program needs it while it runs and
+// needs the checker only before it does. It is still named from here.
+pub use luarust_core::value;
 
 use ir::Checked;
 use luarust_diag::{Diagnostic, Span};
@@ -34,13 +37,34 @@ struct Var {
     visibility_at: Option<Span>,
 }
 
-/// Check a parsed program.
+/// What a project has already decided, before a file says anything about itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Start {
+    pub overflow: Overflow,
+    pub visibility_required: bool,
+}
+
+impl Default for Start {
+    fn default() -> Self {
+        Start { overflow: Overflow::Wrap, visibility_required: false }
+    }
+}
+
+/// Check a parsed program, with nothing decided beforehand.
 pub fn check(program: &ast::Program) -> (Checked, Vec<Diagnostic>) {
+    check_with(program, Start::default())
+}
+
+/// Check a parsed program that a project already had settings for.
+///
+/// A `defaults.` line in the file still wins, because whatever a file says about itself
+/// is the last word on it.
+pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnostic>) {
     let mut checker = Checker {
         scopes: vec![HashMap::new()],
         slots: 0,
-        overflow: Overflow::Wrap,
-        visibility_required: false,
+        overflow: start.overflow,
+        visibility_required: start.visibility_required,
         errors: Vec::new(),
     };
 

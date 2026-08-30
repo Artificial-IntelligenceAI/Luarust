@@ -125,8 +125,8 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
         runtime::DOES_NOT_FIT => Fault {
             code: "R0005",
             message: "this does not fit the width it is stored at.".into(),
-            rule: "with `defaults.overflow.trap`, a whole number must fit the width it is stored at",
-            fix: "use a wider type, or drop `defaults.overflow.trap` and let it wrap.".into(),
+            rule: "with overflow set to trap, a whole number must fit the width it is stored at",
+            fix: "use a wider type, or let overflow wrap.".into(),
         },
         _ => Fault {
             code: "R0011",

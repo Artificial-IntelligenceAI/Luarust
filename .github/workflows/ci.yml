@@ -37,6 +37,35 @@ jobs:
       - name: Test (release)
         run: cargo test --workspace --exclude luarust-jit --all-targets --release
 
+  footprint:
+    name: footprint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The rule is that nothing goes onto the machine that runs a program unless that
+      # program uses it. A dependency added in the wrong place would break that silently,
+      # so it is checked rather than remembered.
+      - name: The runtime carries no front end
+        run: |
+          tree=$(cargo tree -p luarust-run --edges normal --prefix none)
+          echo "$tree"
+          for crate in luarust-lex luarust-parse luarust-check luarust-gen luarust-jit; do
+            if echo "$tree" | grep -q "^$crate "; then
+              echo "::error::luarust-run links $crate, which a program does not need to run."
+              exit 1
+            fi
+          done
+
+      - name: The VM builds as a runtime, with no compiler in it
+        run: cargo build -p luarust-vm --no-default-features
+
+      - name: How big the two of them are
+        run: |
+          cargo build --release -p luarust-cli -p luarust-run
+          strip target/release/luarust target/release/luarust-run
+          ls -l target/release/luarust target/release/luarust-run | awk '{print $9, $5}'
+
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest

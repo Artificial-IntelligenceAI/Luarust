@@ -107,6 +107,13 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
     };
     let source = SourceFile::new(path.clone(), text);
 
+    // What the project decided applies to every file in it. A `defaults.` line inside the
+    // file still overrules it, which the checker handles by starting from these.
+    let project = match project_settings(&path) {
+        Ok(project) => project,
+        Err(code) => return code,
+    };
+
     // Each stage runs only if the one before it had nothing to say, because a parser fed
     // broken tokens invents problems that are not really there.
     let mut errors: Vec<Diagnostic> = Vec::new();
@@ -118,7 +125,11 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         let parsed = luarust_parse::parse(source.text(), &lexed.tokens);
         errors.extend(parsed.errors);
         if errors.is_empty() {
-            let (program, problems) = luarust_check::check(&parsed.program);
+            let start = luarust_check::Start {
+                overflow: project.overflow,
+                visibility_required: project.visibility_required,
+            };
+            let (program, problems) = luarust_check::check_with(&parsed.program, start);
             errors.extend(problems);
             checked = Some(program);
         }
@@ -140,10 +151,11 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
 
         Then::Build => {
             let chunk = luarust_vm::compile(&program);
-            let bytes = luarust_vm::serialize::write(
+            let bytes = luarust_vm::serialize::write_with(
                 &chunk,
                 &path.display().to_string(),
                 source.text(),
+                project.embed_source,
             );
             let out = path.with_extension("lrc");
             match std::fs::write(&out, &bytes) {
@@ -225,7 +237,7 @@ fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
             ExitCode::SUCCESS
         }
         Then::Run => {
-            let source = SourceFile::new(loaded.path.clone(), loaded.source.clone());
+            let source = loaded.source.file(loaded.path.clone());
             let mut out = std::io::stdout().lock();
             finish(luarust_vm::run(&loaded.chunk, &mut out), &mut out, &source)
         }
@@ -238,6 +250,31 @@ fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Find and read the `Luarust.toml` for a file, if its project has one.
+///
+/// A project file that is wrong stops the build. It decides how every file in the project
+/// is compiled, so guessing past a mistake in it would quietly compile the wrong thing.
+fn project_settings(path: &Path) -> Result<luarust_conf::Project, ExitCode> {
+    let Some(found) = luarust_conf::find(path) else {
+        return Ok(luarust_conf::Project::default());
+    };
+    let text = match std::fs::read_to_string(&found) {
+        Ok(text) => text,
+        Err(why) => {
+            eprintln!("{} could not be read: {why}", found.display());
+            return Err(ExitCode::from(2));
+        }
+    };
+
+    let (project, errors) = luarust_conf::read(&text);
+    if !errors.is_empty() {
+        let file = SourceFile::new(found, text);
+        eprint!("{}", luarust_diag::report(&file, &errors));
+        return Err(ExitCode::FAILURE);
+    }
+    Ok(project)
 }
 
 fn finish(

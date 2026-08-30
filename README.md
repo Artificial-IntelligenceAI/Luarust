@@ -404,11 +404,52 @@ A Luarust source file is `.lr`. Settings for a whole project live beside them in
 ```toml
 [defaults]
 no-visibility-stated = "error"
+overflow = "trap"
+
+[build]
+embed-source = false
 ```
 
 Anything under `[defaults]` applies to every file in the project, so a preference you
 hold everywhere is written once. A `defaults.` line at the top of a file still wins for
 that file — whatever a file says about itself is the last word on it.
+
+`[build]` is about what gets delivered rather than what gets accepted. `embed-source`
+decides whether a compiled chunk carries the text it was built from. With it off, the
+chunk carries the line table instead — four bytes per line — so a fault still reports
+its exact line and column and simply cannot quote them:
+
+```
+file: src/main.lr, line: 3, column: 25 (src/main.lr:3:25)
+
+this does not fit in `ui8`.
+
+  (this was built without its source, so the line above cannot be shown.)
+```
+
+Luarust reads this file itself rather than through a TOML library, and understands the
+part of it shown here. A mistake in it stops the build and is reported the same way a
+mistake in a source file is, because it decides how every file in the project is built.
+
+## What ships
+
+Nothing goes onto the machine that runs a program unless that program uses it. There is
+no garbage collector, and a program in integers and the hardware floats never allocates
+at all: the only heap in a value is the one strings and the wide floats need.
+
+That rule is why there are two binaries and not one.
+
+| | stripped | what it is |
+|---|---|---|
+| `luarust` | 712 KB | the toolchain — lexes, parses, checks, compiles, runs, disassembles |
+| `luarust-run` | 461 KB | a chunk, and nothing else |
+| `luarust` with the JIT | 32 MB | the above plus LLVM |
+
+`luarust-run` takes a `.lrc` and runs it. It cannot compile, because a chunk already is
+compiled, and it has no lexer, parser, checker, program generator or JIT linked into it
+at all — those are facts about writing Luarust, not about running it. LLVM is fifty times
+the size of everything in this repository put together, which is the clearest possible
+argument that a JIT is a development tool and never part of what you hand somebody.
 
 ## Types
 
@@ -516,8 +557,11 @@ cargo build --release
 | `luarust fuzz [count]` | write programs and check the paths agree |
 | `luarust jit <file.lr>` | compile it with LLVM, in memory, and run it |
 | `luarust ir <file.lr>` | show the LLVM IR |
+| `luarust-run <file.lrc>` | run a chunk, and nothing else |
 
 The programs in [`examples/`](examples) all run, and are checked on every push.
+
+`luarust-run` is a separate binary on purpose — see [What ships](#what-ships).
 
 ### Compile once, run anywhere
 
@@ -530,8 +574,9 @@ luarust run hello.lrc
 ```
 
 Everything in it is little-endian whatever machine wrote it, so a chunk built on one
-architecture runs on another. **The source travels inside it**, which costs a few kilobytes
-and buys the thing that would otherwise be lost — a program that stops half way through can
+architecture runs on another. **The source travels inside it** unless `[build]
+embed-source` says otherwise, which costs a few kilobytes and buys the thing that would
+otherwise be lost — a program that stops half way through can
 still point at the line that did it, on a machine that has never seen the source:
 
 ```

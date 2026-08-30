@@ -11,6 +11,7 @@ repository.workspace = true
 luarust-lex = { path = "../luarust-lex" }
 
 [dependencies]
+luarust-core = { path = "../luarust-core" }
 luarust-diag = { path = "../luarust-diag" }
 luarust-num = { path = "../luarust-num" }
 luarust-parse = { path = "../luarust-parse" }

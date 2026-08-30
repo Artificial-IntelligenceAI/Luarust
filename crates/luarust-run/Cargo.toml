@@ -1,0 +1,13 @@
+[package]
+name = "luarust-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "luarust-run"
+path = "src/main.rs"
+
+[dependencies]
+luarust-diag = { path = "../luarust-diag" }
+luarust-vm = { path = "../luarust-vm", default-features = false }

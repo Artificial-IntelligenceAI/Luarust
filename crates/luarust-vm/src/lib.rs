@@ -13,14 +13,18 @@
 //! the same code, not because two people were careful.
 
 pub mod chunk;
+/// Turning a checked program into a chunk -- which a machine that only *runs* chunks has
+/// no use for, so it is a feature and not a fact.
+#[cfg(feature = "compile")]
 pub mod compile;
 pub mod serialize;
 
 pub use chunk::{Chunk, Op};
+#[cfg(feature = "compile")]
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
-use luarust_check::value::{
+use luarust_core::value::{
     Stopped, Value, binary_op, compare, format_of, holds, int_op, negate,
 };
 use luarust_num::binary::{self, Comparison, Round};

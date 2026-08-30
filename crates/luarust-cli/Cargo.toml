@@ -20,6 +20,7 @@ jit = ["dep:luarust-jit"]
 [dependencies]
 luarust-jit = { path = "../luarust-jit", optional = true }
 luarust-check = { path = "../luarust-check" }
+luarust-conf = { path = "../luarust-conf" }
 luarust-diag = { path = "../luarust-diag" }
 luarust-interp = { path = "../luarust-interp" }
 luarust-lex = { path = "../luarust-lex" }

@@ -84,6 +84,7 @@ dependencies = [
 name = "luarust-check"
 version = "0.0.0"
 dependencies = [
+ "luarust-core",
  "luarust-diag",
  "luarust-lex",
  "luarust-num",
@@ -95,6 +96,7 @@ name = "luarust-cli"
 version = "0.0.0"
 dependencies = [
  "luarust-check",
+ "luarust-conf",
  "luarust-diag",
  "luarust-gen",
  "luarust-interp",
@@ -102,6 +104,22 @@ dependencies = [
  "luarust-lex",
  "luarust-parse",
  "luarust-vm",
+]
+
+[[package]]
+name = "luarust-conf"
+version = "0.0.0"
+dependencies = [
+ "luarust-core",
+ "luarust-diag",
+]
+
+[[package]]
+name = "luarust-core"
+version = "0.0.0"
+dependencies = [
+ "luarust-diag",
+ "luarust-num",
 ]
 
 [[package]]
@@ -161,8 +179,17 @@ version = "0.0.0"
 name = "luarust-parse"
 version = "0.0.0"
 dependencies = [
+ "luarust-core",
  "luarust-diag",
  "luarust-lex",
+]
+
+[[package]]
+name = "luarust-run"
+version = "0.0.0"
+dependencies = [
+ "luarust-diag",
+ "luarust-vm",
 ]
 
 [[package]]
@@ -170,6 +197,7 @@ name = "luarust-vm"
 version = "0.0.0"
 dependencies = [
  "luarust-check",
+ "luarust-core",
  "luarust-diag",
  "luarust-gen",
  "luarust-interp",

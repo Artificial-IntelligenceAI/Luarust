@@ -1,3 +1,7 @@
+// These exercise the compiler, so they are only here when it is. Built as a runtime the
+// crate has no front end to feed it a program.
+#![cfg(feature = "compile")]
+
 //! The interpreter and the VM, on the same programs, insisting on the same answers.
 //!
 //! This is the reason the tree-walker is being kept. On its own it proves nothing — it is

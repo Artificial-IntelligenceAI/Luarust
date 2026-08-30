@@ -1,3 +1,7 @@
+// These exercise the compiler, so they are only here when it is. Built as a runtime the
+// crate has no front end to feed it a program.
+#![cfg(feature = "compile")]
+
 //! Writing a chunk out and reading it back.
 //!
 //! Two things are being checked. That a program written on one machine is the same program
@@ -5,7 +9,7 @@
 //! file which is *not* a valid chunk produces a complaint rather than a crash, because
 //! "run anywhere" means chunks will arrive from places nobody vouched for.
 
-use luarust_vm::serialize::{self, Broken};
+use luarust_vm::serialize::{self, Broken, Source};
 
 fn compiled(source: &str) -> luarust_vm::Chunk {
     let lexed = luarust_lex::lex(source);
@@ -43,7 +47,10 @@ fn a_chunk_written_out_reads_back_the_same() {
         let loaded = serialize::read(&bytes).expect("it read back");
 
         assert_eq!(loaded.path, "test.lr");
-        assert_eq!(loaded.source, source, "the source travels with the chunk");
+        let Source::Text(travelled) = &loaded.source else {
+            panic!("the source travels with the chunk");
+        };
+        assert_eq!(travelled, source);
         assert_eq!(loaded.chunk.code, chunk.code);
         assert_eq!(loaded.chunk.consts, chunk.consts);
         assert_eq!(loaded.chunk.texts, chunk.texts);
@@ -163,4 +170,43 @@ fn every_generated_program_survives_the_trip() {
             "seed {seed} ended differently after a round trip"
         );
     }
+}
+
+#[test]
+fn a_chunk_can_be_written_without_its_source_and_still_know_the_line() {
+    let chunk = compiled(EVERYTHING);
+    let with = serialize::write_with(&chunk, "test.lr", EVERYTHING, true);
+    let without = serialize::write_with(&chunk, "test.lr", EVERYTHING, false);
+    assert!(without.len() < with.len(), "dropping the source should make it smaller");
+
+    let loaded = serialize::read(&without).expect("it read back");
+    let Source::Lines { starts, len } = &loaded.source else {
+        panic!("only the line table should have travelled");
+    };
+    assert_eq!(starts.len(), EVERYTHING.lines().count());
+    assert_eq!(*len, EVERYTHING.len());
+    // The text is gone and the program is not: it still runs, and it runs the same.
+    assert_eq!(output_of(&loaded.chunk), output_of(&chunk));
+
+    // And every span in it still lands on the line it always did.
+    let full = luarust_diag::SourceFile::new("test.lr", EVERYTHING);
+    let thin = loaded.source.file("test.lr");
+    for span in &loaded.chunk.spans {
+        assert_eq!(
+            thin.position(span.start).line,
+            full.position(span.start).line,
+            "line of {span:?}"
+        );
+    }
+    assert!(!thin.has_text());
+}
+
+#[test]
+fn a_line_table_that_could_not_have_come_from_a_file_is_refused() {
+    let chunk = compiled(COUNTING);
+    let mut bytes = serialize::write_with(&chunk, "t.lr", COUNTING, false);
+    // The first line has to begin at nought. Say it began somewhere else.
+    let table = 8 + 4 + 4 + 4 + (4 + "t.lr".len()) + 4 + 4;
+    bytes[table..table + 4].copy_from_slice(&7u32.to_le_bytes());
+    assert!(serialize::read(&bytes).is_err(), "a bogus line table must be refused");
 }
