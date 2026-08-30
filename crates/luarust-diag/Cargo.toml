@@ -1,0 +1,10 @@
+[package]
+name = "luarust-diag"
+description = "Source positions, grapheme-aware columns, and the shape of a Luarust error."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
