@@ -23,7 +23,20 @@ thread_local! {
     /// always going to be a call, because `b128` and `b256` have no hardware anywhere and
     /// their answers have to come from the same place the other two execution paths get
     /// theirs.
-    static CELLS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    /// One frame of cells per call in progress. The compiled code always names a cell by
+    /// its offset inside the frame it is running in, which is what makes a function that
+    /// calls itself safe: each call gets its own row and nobody overwrites a caller's.
+    static FRAMES: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
+    /// Cells nothing writes to, shared by every frame. Their numbers carry [`CONSTANT`].
+    static CONSTANTS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    /// What each function's frame starts out holding, so entering one is a clone.
+    static TEMPLATES: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
+    /// Celled arguments, staged by the caller in its own frame and taken by the callee in
+    /// its new one. Going through here is what saves compiled code from ever having to
+    /// name a cell in a frame other than its own.
+    static PENDING: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    /// A celled answer, on its way from the frame that made it to the frame that asked.
+    static ANSWER: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// What the running program has printed. Collected rather than streamed, because a
     /// callback cannot easily be handed the caller's writer.
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -31,19 +44,78 @@ thread_local! {
     static STARTED: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 
+/// Set on a cell number that means a constant rather than an offset into a frame.
+pub const CONSTANT: u64 = 1 << 63;
+
 /// Begin a run: forget the last one's output, restart the clock, and lay out the cells.
-pub fn begin(cells: Vec<Value>) {
+pub fn begin(constants: Vec<Value>, main_frame: Vec<Value>, templates: Vec<Vec<Value>>) {
     OUTPUT.with(|out| out.borrow_mut().clear());
     STARTED.with(|at| *at.borrow_mut() = Some(Instant::now()));
-    CELLS.with(|table| *table.borrow_mut() = cells);
+    CONSTANTS.with(|table| *table.borrow_mut() = constants);
+    TEMPLATES.with(|table| *table.borrow_mut() = templates);
+    PENDING.with(|queue| queue.borrow_mut().clear());
+    ANSWER.with(|slot| *slot.borrow_mut() = None);
+    FRAMES.with(|frames| *frames.borrow_mut() = vec![main_frame]);
 }
 
 fn cell(index: u64) -> Value {
-    CELLS.with(|table| table.borrow()[index as usize].clone())
+    if index & CONSTANT != 0 {
+        return CONSTANTS.with(|table| table.borrow()[(index & !CONSTANT) as usize].clone());
+    }
+    FRAMES.with(|frames| {
+        frames.borrow().last().expect("a frame is always open")[index as usize].clone()
+    })
 }
 
 fn put(index: u64, value: Value) {
-    CELLS.with(|table| table.borrow_mut()[index as usize] = value);
+    debug_assert!(index & CONSTANT == 0, "a constant cell is never written to");
+    FRAMES.with(|frames| {
+        frames.borrow_mut().last_mut().expect("a frame is always open")[index as usize] = value;
+    });
+}
+
+/// Stage one celled argument, read from the caller's frame.
+pub extern "C" fn cell_stage(index: u64) {
+    let value = cell(index);
+    PENDING.with(|queue| queue.borrow_mut().push(value));
+}
+
+/// Enter a function: a fresh frame, with the staged arguments already in its first cells.
+pub extern "C" fn cells_enter(routine: u64) {
+    let mut frame = TEMPLATES.with(|table| table.borrow()[routine as usize].clone());
+    PENDING.with(|queue| {
+        for (at, value) in queue.borrow_mut().drain(..).enumerate() {
+            frame[at] = value;
+        }
+    });
+    FRAMES.with(|frames| frames.borrow_mut().push(frame));
+}
+
+/// Leave a function, keeping one cell's value for whoever asked.
+pub extern "C" fn cells_leave_with(index: u64) {
+    let value = cell(index);
+    ANSWER.with(|slot| *slot.borrow_mut() = Some(value));
+    FRAMES.with(|frames| {
+        frames.borrow_mut().pop();
+    });
+}
+
+/// Leave a function that had nothing to give back.
+pub extern "C" fn cells_leave() {
+    FRAMES.with(|frames| {
+        frames.borrow_mut().pop();
+    });
+}
+
+/// Take the answer a call left, into a cell of the frame that asked for it.
+pub extern "C" fn cell_take_answer(dst: u64) {
+    let value = ANSWER.with(|slot| slot.borrow_mut().take()).expect("a call left an answer");
+    put(dst, value);
+}
+
+/// How deep the frames go, so compiled code can stop where the other two paths stop.
+pub extern "C" fn call_depth() -> u64 {
+    FRAMES.with(|frames| frames.borrow().len() as u64)
 }
 
 /// Copy one cell into another.
@@ -194,6 +266,7 @@ pub const OK: i64 = 0;
 pub const DIVIDE_BY_ZERO: i64 = 1;
 pub const REMAINDER_BY_ZERO: i64 = 2;
 pub const DOES_NOT_FIT: i64 = 3;
+pub const TOO_DEEP: i64 = 4;
 pub const OTHER: i64 = 4;
 
 /// Print a piece of text.

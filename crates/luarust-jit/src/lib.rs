@@ -47,12 +47,7 @@ pub struct Declined {
 /// function that called itself would overwrite the cells its caller was still using. The
 /// fix is a stack of cells rather than a fixed row of them; until then a program with
 /// functions in it goes to the VM, which has no such problem.
-pub fn accepts(program: &Checked) -> Result<(), Declined> {
-    if !program.funcs.is_empty() {
-        return Err(Declined {
-            because: "it has functions, and cells are not yet per-call".to_string(),
-        });
-    }
+pub fn accepts(_program: &Checked) -> Result<(), Declined> {
     Ok(())
 }
 
@@ -76,7 +71,7 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
 
     let mut emitter = Emitter::new(&context, &module, &engine, program);
-    emitter.emit(program);
+    emitter.emit(program, &module);
     let spans = std::mem::take(&mut emitter.spans);
 
     let compiled = unsafe {
@@ -85,7 +80,7 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped
             .map_err(|why| Declined { because: format!("the compiled program was lost: {why}") })?
     };
 
-    runtime::begin(emitter.cells);
+    runtime::begin(emitter.constants, emitter.main_frame, emitter.templates);
     let outcome = unsafe { compiled.call() };
     let _ = out.write_all(&runtime::taken());
     let _ = out.flush();
@@ -102,7 +97,7 @@ pub fn emit_ir(program: &Checked) -> Result<String, Declined> {
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
     let mut emitter = Emitter::new(&context, &module, &engine, program);
-    emitter.emit(program);
+    emitter.emit(program, &module);
     Ok(module.print_to_string().to_string())
 }
 
@@ -130,6 +125,15 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
             message: "this takes a remainder against zero.".into(),
             rule: "a remainder against zero is not a number",
             fix: "check the divisor before taking a remainder.".into(),
+        },
+        runtime::TOO_DEEP => Fault {
+            code: "R0011",
+            message: format!(
+                "this has called itself {} deep.",
+                luarust_check::value::DEPTH_LIMIT
+            ),
+            rule: "a call may only go so deep before the program is stopped",
+            fix: "give the recursion a case that stops, or write it as a loop.".into(),
         },
         runtime::DOES_NOT_FIT => Fault {
             code: "R0005",
@@ -174,7 +178,12 @@ impl<'ctx> Emitted<'ctx> {
 struct Emitter<'ctx> {
     context: &'ctx Context,
     builder: Builder<'ctx>,
+    /// The function being emitted into. Blocks are appended to this one.
     main: FunctionValue<'ctx>,
+    /// One LLVM function per Luarust function, all declared before any is filled in, so a
+    /// call may name one that has not been emitted yet -- which is what lets two of them
+    /// call each other.
+    funcs: Vec<FunctionValue<'ctx>>,
     /// One `alloca` per variable, in the order the checker numbered them. Celled
     /// variables never touch theirs.
     slots: Vec<PointerValue<'ctx>>,
@@ -182,9 +191,19 @@ struct Emitter<'ctx> {
     /// anywhere else is stack allocated on every pass of whatever loop it is inside, which
     /// a ten-million-iteration program notices immediately by running out of stack.
     out_slot: PointerValue<'ctx>,
-    /// What the cells start out holding. Handed to the runtime before the program runs.
-    cells: Vec<Value>,
-    /// Which cell each celled variable lives in.
+    /// Where a call leaves an answer the machine can hold. Read straight after the call,
+    /// so one slot serves every call site -- and it is an entry-block `alloca`, because
+    /// one made inside a loop grows the stack once per pass.
+    answer_slot: PointerValue<'ctx>,
+    /// Cells nothing writes to, shared by every frame.
+    constants: Vec<Value>,
+    /// What the frame being emitted starts out holding.
+    frame: Vec<Value>,
+    /// One finished frame layout per function.
+    templates: Vec<Vec<Value>>,
+    /// The top level's frame.
+    main_frame: Vec<Value>,
+    /// Which cell each celled variable lives in, within the frame being emitted.
     slot_cells: std::collections::HashMap<usize, u64>,
     /// Where each fault can happen, so a code can be turned back into a place.
     spans: Vec<Span>,
@@ -204,6 +223,12 @@ struct Helpers<'ctx> {
     cell_compare: FunctionValue<'ctx>,
     cell_time_now: FunctionValue<'ctx>,
     print_cell: FunctionValue<'ctx>,
+    cell_stage: FunctionValue<'ctx>,
+    cells_enter: FunctionValue<'ctx>,
+    cells_leave: FunctionValue<'ctx>,
+    cells_leave_with: FunctionValue<'ctx>,
+    cell_take_answer: FunctionValue<'ctx>,
+    call_depth: FunctionValue<'ctx>,
 }
 
 impl<'ctx> Emitter<'ctx> {
@@ -283,6 +308,44 @@ impl<'ctx> Emitter<'ctx> {
         );
         engine.add_global_mapping(&cell_time_now, runtime::cell_time_now as *const () as usize);
 
+        let cell_stage = module.add_function(
+            "luarust_cell_stage",
+            void_t.fn_type(&[i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_stage, runtime::cell_stage as *const () as usize);
+
+        let cells_enter = module.add_function(
+            "luarust_cells_enter",
+            void_t.fn_type(&[i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cells_enter, runtime::cells_enter as *const () as usize);
+
+        let cells_leave =
+            module.add_function("luarust_cells_leave", void_t.fn_type(&[], false), None);
+        engine.add_global_mapping(&cells_leave, runtime::cells_leave as *const () as usize);
+
+        let cells_leave_with = module.add_function(
+            "luarust_cells_leave_with",
+            void_t.fn_type(&[i64_t.into()], false),
+            None,
+        );
+        engine
+            .add_global_mapping(&cells_leave_with, runtime::cells_leave_with as *const () as usize);
+
+        let cell_take_answer = module.add_function(
+            "luarust_cell_take_answer",
+            void_t.fn_type(&[i64_t.into()], false),
+            None,
+        );
+        engine
+            .add_global_mapping(&cell_take_answer, runtime::cell_take_answer as *const () as usize);
+
+        let call_depth =
+            module.add_function("luarust_call_depth", i64_t.fn_type(&[], false), None);
+        engine.add_global_mapping(&call_depth, runtime::call_depth as *const () as usize);
+
         let print_cell =
             module.add_function("luarust_print_cell", void_t.fn_type(&[i64_t.into()], false), None);
         engine.add_global_mapping(&print_cell, runtime::print_cell as *const () as usize);
@@ -303,6 +366,7 @@ impl<'ctx> Emitter<'ctx> {
         }
 
         let out_slot = builder.build_alloca(context.i64_type(), "fallback.out").expect("a slot");
+        let answer_slot = builder.build_alloca(context.i64_type(), "call.answer").expect("a slot");
 
         Self {
             context,
@@ -310,9 +374,14 @@ impl<'ctx> Emitter<'ctx> {
             main,
             slots,
             out_slot,
+            answer_slot,
             spans: Vec::new(),
             overflow: program.overflow,
-            cells: Vec::new(),
+            funcs: Vec::new(),
+            constants: Vec::new(),
+            frame: Vec::new(),
+            templates: Vec::new(),
+            main_frame: Vec::new(),
             slot_cells: std::collections::HashMap::new(),
             helpers: Helpers {
                 print_text,
@@ -326,15 +395,275 @@ impl<'ctx> Emitter<'ctx> {
                 cell_compare,
                 cell_time_now,
                 print_cell,
+                cell_stage,
+                cells_enter,
+                cells_leave,
+                cells_leave_with,
+                cell_take_answer,
+                call_depth,
             },
         }
     }
 
-    fn emit(&mut self, program: &Checked) {
+    fn emit(&mut self, program: &Checked, module: &Module<'ctx>) {
+        // Declared first, all of them, so a call may name a function whose body has not
+        // been written yet -- which is what two functions calling each other needs.
+        let i64_t = self.context.i64_type();
+        for (index, func) in program.funcs.iter().enumerate() {
+            // A celled parameter travels through the runtime rather than as an argument,
+            // so it takes no place in the signature. Every other one is a machine word.
+            let mut params: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
+            // A function answering a value the machine can hold writes it through a
+            // pointer the *caller* owns, since the callee's own stack is gone by then.
+            if func.returns.is_some_and(|ty| !celled(ty)) {
+                params.push(self.context.ptr_type(Default::default()).into());
+            }
+            for ty in &func.params {
+                if !celled(*ty) {
+                    // As bits, whatever the type. One shape of parameter, and the callee
+                    // turns it back into whatever it was.
+                    params.push(i64_t.into());
+                }
+            }
+            // Every function answers an `i64`: the fault code, or zero. A value it
+            // answers comes back beside it, through the out slot or through a cell.
+            let signature = i64_t.fn_type(&params, false);
+            let declared = module.add_function(&format!("luarust_fn{index}"), signature, None);
+            self.funcs.push(declared);
+        }
+
+        for (index, func) in program.funcs.iter().enumerate() {
+            self.emit_function(index, func);
+        }
+
+        // Back to the top level, whose frame is the one the program starts in. Taken
+        // after its body is emitted, not before -- that is where its cells come from.
+        self.builder.position_at_end(
+            self.main.get_last_basic_block().expect("main has its entry block"),
+        );
         self.block(&program.stmts);
         self.builder
             .build_return(Some(&self.context.i64_type().const_int(0, false)))
             .expect("a return");
+        self.main_frame = std::mem::take(&mut self.frame);
+    }
+
+    /// One Luarust function as one LLVM function, with its own slots and its own frame.
+    fn emit_function(&mut self, index: usize, func: &luarust_check::ir::Function) {
+        let outer_main = self.main;
+        let outer_slots = std::mem::take(&mut self.slots);
+        let outer_out = self.out_slot;
+        let outer_frame = std::mem::take(&mut self.frame);
+        let outer_cells = std::mem::take(&mut self.slot_cells);
+
+        let function = self.funcs[index];
+        self.main = function;
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        self.slots = (0..func.slots)
+            .map(|n| {
+                self.builder
+                    .build_alloca(self.context.i64_type(), &format!("slot{n}"))
+                    .expect("a stack slot")
+            })
+            .collect();
+        self.out_slot =
+            self.builder.build_alloca(self.context.i64_type(), "fallback.out").expect("a slot");
+        let outer_answer = self.answer_slot;
+        self.answer_slot =
+            self.builder.build_alloca(self.context.i64_type(), "call.answer").expect("a slot");
+
+        // The celled parameters get the first cells of the frame, in order, because that
+        // is where `cells_enter` puts the arguments the caller staged.
+        for (n, ty) in func.params.iter().enumerate() {
+            if celled(*ty) {
+                let cell = self.new_cell(Value::zero(*ty));
+                self.slot_cells.insert(n, cell);
+            }
+        }
+
+        let routine = self.context.i64_type().const_int(index as u64, false);
+        self.builder
+            .build_call(self.helpers.cells_enter, &[routine.into()], "")
+            .expect("a call");
+
+        // The native parameters arrive as arguments, and go straight into their slots.
+        let mut argument = u32::from(func.returns.is_some_and(|ty| !celled(ty)));
+        for (n, ty) in func.params.iter().enumerate() {
+            if celled(*ty) {
+                continue;
+            }
+            let bits = function.get_nth_param(argument).expect("a parameter");
+            argument += 1;
+            self.builder.build_store(self.slots[n], bits).expect("a store");
+        }
+
+        self.guard_depth(func.span);
+        self.block(&func.body);
+
+        // A function that answers nothing may simply reach its end; one that answers a
+        // value cannot, and the checker has already refused any that could.
+        self.leave(None, func.returns);
+
+        self.templates.push(std::mem::take(&mut self.frame));
+        self.frame = outer_frame;
+        self.slot_cells = outer_cells;
+        self.slots = outer_slots;
+        self.out_slot = outer_out;
+        self.answer_slot = outer_answer;
+        self.main = outer_main;
+    }
+
+    /// A call: stage what has to travel through the runtime, pass the rest as arguments,
+    /// and carry a fault out of the callee unchanged.
+    fn emit_call(
+        &mut self,
+        func: usize,
+        args: &[Expr],
+        span: Span,
+        answers: Option<Ty>,
+    ) -> Option<(Emitted<'ctx>, Ty)> {
+        // Every argument is worked out before any is staged. Staging as we go would let
+        // an argument that is itself a call take the ones already queued.
+        let emitted: Vec<(Emitted<'ctx>, Ty)> = args.iter().map(|arg| self.expr(arg)).collect();
+
+        let mut natives: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for (value, ty) in &emitted {
+            match value {
+                Emitted::Cell(index) => {
+                    let number = self.cell_number(*index);
+                    self.builder
+                        .build_call(self.helpers.cell_stage, &[number.into()], "")
+                        .expect("a call");
+                }
+                Emitted::Native(native) => natives.push(self.to_bits(*native, *ty).into()),
+            }
+        }
+
+        let wants_pointer = answers.is_some_and(|ty| !celled(ty));
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        if wants_pointer {
+            call_args.push(self.answer_slot.into());
+        }
+        call_args.extend(natives);
+
+        let outcome = self
+            .builder
+            .build_call(self.funcs[func], &call_args, "call")
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("a function answers a fault code")
+            .into_int_value();
+        self.carry_fault(outcome);
+
+        let ty = answers?;
+        if celled(ty) {
+            let cell = self.new_cell(Value::zero(ty));
+            let number = self.cell_number(cell);
+            self.builder
+                .build_call(self.helpers.cell_take_answer, &[number.into()], "")
+                .expect("a call");
+            return Some((Emitted::Cell(cell), ty));
+        }
+
+        let bits = self
+            .builder
+            .build_load(self.context.i64_type(), self.answer_slot, "answered")
+            .expect("a load")
+            .into_int_value();
+        let _ = span;
+        Some((Emitted::Native(self.of_bits(bits, ty)), ty))
+    }
+
+    /// Hand a callee's fault straight out. It already knows where it happened, so nothing
+    /// is added to it -- the line reported is the line that actually faulted.
+    fn carry_fault(&mut self, outcome: inkwell::values::IntValue<'ctx>) {
+        let failed = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                outcome,
+                self.context.i64_type().const_zero(),
+                "failed",
+            )
+            .expect("a compare");
+        let stop = self.context.append_basic_block(self.main, "carried");
+        let carry_on = self.context.append_basic_block(self.main, "no.fault");
+        self.builder.build_conditional_branch(failed, stop, carry_on).expect("a branch");
+
+        self.builder.position_at_end(stop);
+        self.builder.build_return(Some(&outcome)).expect("a return");
+        self.builder.position_at_end(carry_on);
+    }
+
+    /// Stop before the frames go deeper than the other two paths allow.
+    fn guard_depth(&mut self, span: Span) {
+        let depth = self
+            .builder
+            .build_call(self.helpers.call_depth, &[], "depth")
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("it answers how deep the frames go")
+            .into_int_value();
+        let limit = self
+            .context
+            .i64_type()
+            .const_int(luarust_check::value::DEPTH_LIMIT as u64, false);
+        let too_deep = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGT, depth, limit, "too.deep")
+            .expect("a comparison");
+
+        let stop = self.context.append_basic_block(self.main, "too.deep");
+        let carry_on = self.context.append_basic_block(self.main, "deep.enough");
+        self.builder.build_conditional_branch(too_deep, stop, carry_on).expect("a branch");
+
+        self.builder.position_at_end(stop);
+        let code = self.fault_marker(span, runtime::TOO_DEEP);
+        // The frame this call pushed is left behind on purpose: the program is over, and
+        // the runtime is laid out fresh before the next one.
+        self.builder
+            .build_return(Some(&self.context.i64_type().const_int(code as u64, false)))
+            .expect("a return");
+
+        self.builder.position_at_end(carry_on);
+    }
+
+    /// Leave the function that is being emitted, giving back what it answers.
+    fn leave(&mut self, value: Option<(Emitted<'ctx>, Ty)>, returns: Option<Ty>) {
+        match (value, returns) {
+            (Some((Emitted::Cell(index), _)), Some(_)) => {
+                let cell = self.cell_number(index);
+                self.builder
+                    .build_call(self.helpers.cells_leave_with, &[cell.into()], "")
+                    .expect("a call");
+                self.builder
+                    .build_return(Some(&self.context.i64_type().const_zero()))
+                    .expect("a return");
+            }
+            (Some((Emitted::Native(native), ty)), Some(_)) => {
+                let bits = self.to_bits(native, ty);
+                let answer = self.main.get_nth_param(0).expect("the answer pointer");
+                self.builder
+                    .build_store(answer.into_pointer_value(), bits)
+                    .expect("a store");
+                self.builder
+                    .build_call(self.helpers.cells_leave, &[], "")
+                    .expect("a call");
+                self.builder
+                    .build_return(Some(&self.context.i64_type().const_zero()))
+                    .expect("a return");
+            }
+            _ => {
+                self.builder
+                    .build_call(self.helpers.cells_leave, &[], "")
+                    .expect("a call");
+                self.builder
+                    .build_return(Some(&self.context.i64_type().const_zero()))
+                    .expect("a return");
+            }
+        }
     }
 
     /// Note where a fault could happen, and give back the value to return if it does.
@@ -425,9 +754,20 @@ impl<'ctx> Emitter<'ctx> {
 
             Stmt::If { arms, otherwise, .. } => self.if_stmt(arms, otherwise),
 
-            // `accepts` has already turned away any program that has these in it.
-            Stmt::Return { .. } | Stmt::Call { .. } => {
-                unreachable!("a program with functions is declined before it gets here")
+            Stmt::Return { value, span } => {
+                let answered = value.as_ref().map(|expr| self.expr(expr));
+                let returns = answered.as_ref().map(|(_, ty)| *ty);
+                self.leave(answered, returns);
+                // Nothing after a `return` runs, but LLVM still wants somewhere to put
+                // it, so it goes in a block with no way in.
+                let after = self.context.append_basic_block(self.main, "after.return");
+                self.builder.position_at_end(after);
+                let _ = span;
+            }
+
+            // Called for what it does. Whatever it answers is dropped here.
+            Stmt::Call { func, args, span } => {
+                self.emit_call(*func, args, *span, None);
             }
         }
     }
@@ -545,15 +885,17 @@ impl<'ctx> Emitter<'ctx> {
 
     // ---- cells ------------------------------------------------------------------
 
-    /// A new cell, holding this to begin with.
+    /// A new cell in the frame being emitted, holding this to begin with.
     fn new_cell(&mut self, initial: Value) -> u64 {
-        self.cells.push(initial);
-        (self.cells.len() - 1) as u64
+        self.frame.push(initial);
+        (self.frame.len() - 1) as u64
     }
 
-    /// A cell holding a constant, which nothing ever writes to.
+    /// A cell holding a constant. Constants are shared by every frame, so their numbers
+    /// carry a bit that says to look somewhere other than the frame.
     fn constant_cell(&mut self, value: Value) -> u64 {
-        self.new_cell(value)
+        self.constants.push(value);
+        (self.constants.len() - 1) as u64 | runtime::CONSTANT
     }
 
     /// The cell a celled variable lives in, made the first time it is stored to.
@@ -770,9 +1112,9 @@ impl<'ctx> Emitter<'ctx> {
                 (Emitted::Native(widened.into()), Ty::Bool)
             }
 
-            Expr::Call { .. } => {
-                unreachable!("a program with functions is declined before it gets here")
-            }
+            Expr::Call { func, args, ty, span } => self
+                .emit_call(*func, args, *span, Some(*ty))
+                .expect("a call in a value position answers a value"),
 
             Expr::Not { operand, .. } => {
                 let held = self.truth(operand);
@@ -855,6 +1197,11 @@ impl<'ctx> Emitter<'ctx> {
             .build_load(self.context.i64_type(), self.slots[slot], "load")
             .expect("a load")
             .into_int_value();
+        self.of_bits(raw, ty)
+    }
+
+    /// The other direction from [`Self::to_bits`]: bits back into whatever they hold.
+    fn of_bits(&self, raw: inkwell::values::IntValue<'ctx>, ty: Ty) -> BasicValueEnum<'ctx> {
         match ty {
             Ty::B64 => self.builder.build_bit_cast(raw, self.context.f64_type(), "f").expect("a cast"),
             Ty::B32 => {

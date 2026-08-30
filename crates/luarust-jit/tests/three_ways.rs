@@ -308,6 +308,71 @@ fn the_answer_survives_being_written_where_it_came_from() {
 }
 
 #[test]
+fn a_function_answers_the_same_thing_three_ways() {
+    assert_eq!(
+        ran("fn.local.i32 ['bigger'] [i32 'a', i32 'b'] {\n\
+                 if [math { 'a' > 'b' }] { return 'a'; }\n\
+                 return 'b';\n\
+             }\n\
+             print[bigger[|3|, |9|] \\n];"),
+        "9\n"
+    );
+}
+
+#[test]
+fn recursion_reaches_the_same_answer_three_ways() {
+    assert_eq!(
+        ran("fn.local.ui64 ['fact'] [ui64 'n'] {\n\
+                 if [math { 'n' </= ui64 |1| }] { return |1|; }\n\
+                 return math { 'n' * fact[math { 'n' - ui64 |1| }] };\n\
+             }\n\
+             print[fact[|10|] \\n];"),
+        "3628800\n"
+    );
+}
+
+#[test]
+fn two_functions_may_call_each_other() {
+    // Neither can be written above the other, so this only works because every signature
+    // is read before any body is.
+    assert_eq!(
+        ran("fn.local.bool ['even'] [ui32 'n'] {\n\
+                 if [math { 'n' = ui32 |0| }] { return |true|; }\n\
+                 return odd[math { 'n' - ui32 |1| }];\n\
+             }\n\
+             fn.local.bool ['odd'] [ui32 'n'] {\n\
+                 if [math { 'n' = ui32 |0| }] { return |false|; }\n\
+                 return even[math { 'n' - ui32 |1| }];\n\
+             }\n\
+             print[even[|7|] \\n];"),
+        "false\n"
+    );
+}
+
+#[test]
+fn a_celled_value_survives_being_carried_through_calls() {
+    // The case the JIT's cells had to become per-call for: a `b256` held across a call
+    // that makes one of its own. Sharing one row of cells would lose the caller's.
+    assert_eq!(
+        ran("fn.local.b256 ['sum'] [b256 'acc', ui32 'n'] {\n\
+                 if [math { 'n' = ui32 |0| }] { return 'acc'; }\n\
+                 return sum[math { 'acc' + b256 |0.1| }, math { 'n' - ui32 |1| }];\n\
+             }\n\
+             print[sum[|0|, |10|] \\n];"),
+        "1\n"
+    );
+}
+
+#[test]
+fn a_function_that_answers_nothing_still_does_its_work() {
+    assert_eq!(
+        ran("fn.local.nothing ['greet'] [str 'who'] { print[\"hello, \" 'who' \\n]; }\n\
+             greet[|Tankun|];"),
+        "hello, Tankun\n"
+    );
+}
+
+#[test]
 fn generated_programs_agree_three_ways() {
     let mut taken = 0;
     let mut declined = 0;

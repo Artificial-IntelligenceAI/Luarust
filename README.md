@@ -700,6 +700,11 @@ arithmetic and Luarust's own are both correctly rounded and so cannot differ. Th
 way of a call, and `b128`, `b256`, `bool` and `str` do not travel in registers at all: they
 live in numbered cells on the Rust side and the machine code carries the number.
 
+Cells are a **stack of frames**, one per call, which is what makes a function that calls
+itself safe: each call gets its own row and nobody can overwrite the one its caller is
+still holding. A celled argument travels through the runtime rather than as a machine
+argument, so compiled code never has to name a cell in a frame other than its own.
+
 That is not a compromise. Their arithmetic was always going to be a call, because none of
 those formats has hardware anywhere and their answers have to come from the same place the
 other two execution paths get theirs. An answer the three paths might disagree about is
