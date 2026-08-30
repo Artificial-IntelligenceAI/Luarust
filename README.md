@@ -796,23 +796,32 @@ folded into a formula, vectorised, or run out of order. Everybody actually loops
 
 | | 100M | vs C |
 | --- | --- | --- |
-| C, clang -O2 | 376 ms | 1× |
-| Rust, rustc -O | 392 ms | 1.04× |
-| Java 17 | 413 ms | 1.10× |
-| **Luarust**, LLVM JIT | **479 ms** | **1.27×** |
-| Lua 5.4 | 751 ms | 2.0× |
+| C, clang -O2 | 375 ms | 1× |
+| Rust, rustc -O | 391 ms | 1.04× |
+| Java 21 | 411 ms | 1.10× |
+| **Luarust**, LLVM JIT | **476 ms** | **1.27×** |
+| Lua 5.4 | 750 ms | 2.0× |
 | LuaJIT | 796 ms | 2.1× |
-| Lust | 1,053 ms | 2.8× |
-| Luarust, bytecode VM | 4,868 ms | 12.9× |
-| Luarust, tree-walker | 11,865 ms | 31.6× |
+| Lust | 1,052 ms | 2.8× |
+| Luarust, bytecode VM | 5,111 ms | 13.6× |
+| Luarust, tree-walker | 13,353 ms | 35.6× |
 
-One x86-64 machine, one job, best of three, every one of them printing 15000000.
+One x86-64 machine, one job, best of three. **Every one of them had to print 15000000** —
+the harness works the answer out from the closed form and refuses to report a timing for
+anything that did not produce it. That is not belt-and-braces: the literal syntax changed
+under the benchmark's own source file at one point, and all three Luarust rows spent a
+while reporting five milliseconds, which is what three compiler errors take to print.
 
-Some of that 480 ms is LLVM compiling the program, which happens inside the measurement.
+Some of that 476 ms is LLVM compiling the program, which happens inside the measurement.
 And some of the gap to C is a feature rather than a shortfall: a Luarust loop tests
 whether the counter has *reached* its bound before stepping, rather than stepping and then
-testing, which is what lets `['253', '255']` finish in a `ui8` instead of wrapping round
+testing, which is what lets `[|253|, |255|]` finish in a `ui8` instead of wrapping round
 forever. That is one extra comparison per iteration, on purpose.
+
+The VM and the tree-walker are both slower than they were before functions arrived — the
+VM by about 5% and the tree-walker by about 12%. The VM's run loop now finds its frame
+before every instruction rather than holding one register file for the whole program,
+which is the obvious thing to fix and has not been fixed yet.
 
 Before any of it means anything, each timing is checked for whether it still contains a
 loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a
@@ -821,13 +830,13 @@ times the time:
 
 | | 10M | 100M | ratio |
 | --- | --- | --- | --- |
-| C, clang -O2 | 40 ms | 376 ms | 9.4× |
-| Rust, rustc -O | 42 ms | 392 ms | 9.3× |
-| Java 17 | 80 ms | 413 ms | 5.2× |
-| Luarust JIT | 58 ms | 479 ms | 8.3× |
-| Lua 5.4 | 78 ms | 751 ms | 9.6× |
+| C, clang -O2 | 39 ms | 375 ms | 9.6× |
+| Rust, rustc -O | 41 ms | 391 ms | 9.5× |
+| Java 21 | 76 ms | 411 ms | 5.4× |
+| Luarust JIT | 56 ms | 476 ms | 8.5× |
+| Lua 5.4 | 77 ms | 750 ms | 9.7× |
 | LuaJIT | 82 ms | 796 ms | 9.7× |
-| Lust | 109 ms | 1,053 ms | 9.7× |
+| Lust | 108 ms | 1,052 ms | 9.7× |
 | Luarust VM | 494 ms | 4,868 ms | 9.9× |
 | Luarust tree-walker | 1,205 ms | 11,865 ms | 9.8× |
 
