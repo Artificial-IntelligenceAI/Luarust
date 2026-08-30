@@ -27,8 +27,11 @@ pub struct Written {
 }
 
 /// Every type a generated program declares variables of.
-const DECLARED: [Ty; 16] = [
+const DECLARED: [Ty; 19] = [
     Ty::Er,
+    Ty::D32,
+    Ty::D64,
+    Ty::D128,
     Ty::B16,
     Ty::B32,
     Ty::B64,
@@ -48,8 +51,11 @@ const DECLARED: [Ty; 16] = [
 
 /// The types arithmetic and loops work in. `bool` cannot be counted in or added to, and
 /// neither can `str`.
-const TYPES: [Ty; 14] = [
+const TYPES: [Ty; 17] = [
     Ty::Er,
+    Ty::D32,
+    Ty::D64,
+    Ty::D128,
     Ty::B16,
     Ty::B32,
     Ty::B64,

@@ -130,7 +130,7 @@ fn the_programs_are_worth_running() {
     ] {
         assert!(all.contains(construct), "the generator never writes `{construct}`");
     }
-    for ty in ["b16", "b256", "i8", "ui64", "er"] {
+    for ty in ["b16", "b256", "i8", "ui64", "er", "d32", "d64", "d128"] {
         assert!(all.contains(ty), "the generator never uses `{ty}`");
     }
 }

@@ -1,0 +1,15 @@
+-- Why a decimal float exists. The same arithmetic in the binary format of the same
+-- width, and in the decimal one.
+var.local.b64 ['b'] = [|0.1|];
+var.local.d64 ['d'] = [|0.1|];
+print["b64:  0.1 + 0.2 = " math { 'b' + b64 |0.2| } \n];
+print["d64:  0.1 + 0.2 = " math { 'd' + d64 |0.2| } \n];
+
+var.local.d64 ['price'] = [|19.99|];
+var.local.d64 ['paid'] = [|20.00|];
+print["three at 19.99 is " math { 'price' x d64 |3| } \n];
+print["change from 20.00 is " math { 'paid' - 'price' } \n];
+
+-- And the one that does not round at all, for contrast.
+var.local.er ['third'] = [|1/3|];
+print["a third, exactly: " 'third' "   as d64: " math { d64 |1| div d64 |3| } \n];

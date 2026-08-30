@@ -10,7 +10,7 @@
 //! trapping the same operation with a different ending.
 
 use luarust_diag::{Diagnostic, Span};
-use luarust_num::{Exact, Uint};
+use luarust_num::{Exact, Uint, decimal};
 use luarust_num::binary::{self, Comparison, Format, Round};
 use crate::{BinOp, CmpOp, Ty};
 
@@ -114,6 +114,17 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
             std::cmp::Ordering::Greater => Comparison::Greater,
         };
     }
+    if a.ty() == b.ty()
+        && let Some(fmt) = decimal_of(a.ty())
+    {
+        // Two decimals can be written differently and be worth the same -- `1.0` and
+        // `1.00` -- so this cannot compare the encodings.
+        return decimal::ops::compare(
+            fmt,
+            decimal::unpack(fmt, a.bits().expect("a decimal has bits"), false),
+            decimal::unpack(fmt, b.bits().expect("a decimal has bits"), false),
+        );
+    }
     if let (Some(x), Some(y)) = (a.bits(), b.bits())
         && a.ty() == b.ty()
     {
@@ -163,6 +174,8 @@ pub fn holds(op: CmpOp, ordering: Comparison) -> bool {
 pub fn one_of(ty: Ty) -> Value {
     if ty == Ty::Er {
         Value::Exact(std::rc::Rc::new(Exact::one()))
+    } else if let Some(fmt) = decimal_of(ty) {
+        Value::float(ty, decimal::text::from_text(fmt, Round::TiesToEven, false, "1").expect("one reads"))
     } else if ty.is_integer() {
         Value::int(ty, 1)
     } else {
@@ -171,7 +184,17 @@ pub fn one_of(ty: Ty) -> Value {
     }
 }
 
-/// The IEEE format a float type denotes.
+/// The IEEE decimal format a type denotes.
+pub fn decimal_of(ty: Ty) -> Option<decimal::Format> {
+    Some(match ty {
+        Ty::D32 => decimal::D32,
+        Ty::D64 => decimal::D64,
+        Ty::D128 => decimal::D128,
+        _ => return None,
+    })
+}
+
+/// The IEEE binary format a float type denotes.
 pub fn format_of(ty: Ty) -> Option<Format> {
     Some(match ty {
         Ty::B16 => Format::B16,
@@ -195,7 +218,7 @@ impl Value {
 
     /// A float, stored narrow or wide according to whether it fits.
     pub fn float(ty: Ty, bits: Bits) -> Value {
-        if matches!(ty, Ty::B128 | Ty::B256) {
+        if matches!(ty, Ty::B128 | Ty::B256 | Ty::D128) {
             Value::Wide { ty, bits: Box::new(bits) }
         } else {
             Value::Num { ty, bits: bits.low64() }
@@ -220,6 +243,8 @@ impl Value {
     pub fn zero(ty: Ty) -> Value {
         if ty == Ty::Er {
             Value::Exact(std::rc::Rc::new(Exact::zero()))
+        } else if let Some(fmt) = decimal_of(ty) {
+            Value::float(ty, decimal::zero(fmt, false, false))
         } else if ty.is_integer() {
             Value::Num { ty, bits: 0 }
         } else if let Some(fmt) = format_of(ty) {
@@ -305,11 +330,36 @@ fn exact_op(op: BinOp, a: &Exact, b: &Exact) -> Result<Value, Fault> {
     }
 }
 
+/// Arithmetic on two decimals.
+///
+/// Nothing here faults. A decimal is a float, so dividing by zero is an infinity and
+/// taking a remainder against one is a NaN, exactly as the binary formats do -- which is
+/// the difference between `d64` and `er`, and worth knowing when choosing between them.
+fn decimal_op(op: BinOp, fmt: decimal::Format, lhs: &Value, rhs: &Value) -> Value {
+    let a = decimal::unpack(fmt, lhs.bits().expect("a decimal has bits"), false);
+    let b = decimal::unpack(fmt, rhs.bits().expect("a decimal has bits"), false);
+    let mode = Round::TiesToEven;
+    let bits = match op {
+        BinOp::Add => decimal::ops::add(fmt, mode, a, b, false),
+        BinOp::Sub => decimal::ops::sub(fmt, mode, a, b, false),
+        BinOp::Mul => decimal::ops::mul(fmt, mode, a, b, false),
+        BinOp::Div => decimal::ops::div(fmt, mode, a, b, false),
+        BinOp::Mod => decimal::ops::rem(fmt, mode, a, b, false),
+        BinOp::Pow => decimal::ops::pow(fmt, mode, a, b, false),
+    };
+    Value::float(lhs.ty(), bits)
+}
+
 /// `lhs op rhs`, both already known to be the same type.
 pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Result<Value, Fault> {
     let ty = lhs.ty();
     if let (Value::Exact(a), Value::Exact(b)) = (lhs, rhs) {
         return exact_op(op, a, b);
+    }
+    if let Some(fmt) = decimal_of(ty)
+        && ty == rhs.ty()
+    {
+        return Ok(decimal_op(op, fmt, lhs, rhs));
     }
     if ty.is_integer() && rhs.ty().is_integer() {
         return integer_op(op, ty, lhs, rhs, overflow);
@@ -650,6 +700,17 @@ fn float_pow(fmt: Format, ty: Ty, base: Bits, exponent: Bits) -> Result<Value, F
 pub fn negate(value: &Value, overflow: Overflow) -> Result<Value, Fault> {
     match value {
         Value::Exact(value) => Ok(Value::Exact(std::rc::Rc::new(value.negated()))),
+        Value::Num { ty, .. } | Value::Wide { ty, .. } if ty.is_decimal() => {
+            // The sign is one bit at the top, whatever else the encoding is doing.
+            let fmt = decimal_of(*ty).expect("a decimal type has a format");
+            let mut bits = value.bits().expect("a decimal has bits");
+            if bits.bit(fmt.bits - 1) {
+                bits.clear_bit(fmt.bits - 1);
+            } else {
+                bits.set_bit(fmt.bits - 1);
+            }
+            Ok(Value::float(*ty, bits))
+        }
         Value::Num { ty, .. } | Value::Wide { ty, .. } if ty.is_float() => {
             let fmt = format_of(*ty).expect("a float type has a format");
             Ok(Value::float(*ty, binary::neg(fmt, value.bits().expect("a float has bits"))))
@@ -682,7 +743,8 @@ impl std::fmt::Display for Value {
     /// `b16`, `b32` and `b64` all fit exactly inside an `f64`, so those are shown exactly.
     /// `b128` and `b256` are shown through `f64` as well, which is **not** exact for them
     /// — printing those at their full width needs arbitrary-precision decimal output,
-    /// which iteration 1 does not have.
+    /// which does not exist here yet. The decimal formats have no such problem: their
+    /// significands are decimal digits already, so writing one out is arranging them.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Str(text) => write!(f, "{text}"),
@@ -691,6 +753,13 @@ impl std::fmt::Display for Value {
             // printing `0.333…` is the one thing this type exists not to do.
             Value::Exact(value) => write!(f, "{value}"),
             _ if self.ty().is_integer() => write!(f, "{}", self.as_i128().unwrap()),
+            // A decimal writes out exactly, always: its significand *is* decimal digits,
+            // so this is arranging them rather than searching for a shortest form.
+            _ if self.ty().is_decimal() => {
+                let fmt = decimal_of(self.ty()).expect("a decimal type has a format");
+                let bits = self.bits().expect("a decimal has bits");
+                write!(f, "{}", decimal::text::to_text(fmt, decimal::unpack(fmt, bits, false)))
+            }
             _ => {
                 let ty = self.ty();
                 let fmt_of = format_of(ty).expect("a float type has a format");

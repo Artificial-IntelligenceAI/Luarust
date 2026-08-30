@@ -225,9 +225,6 @@ impl Checker {
 
         let mut out = Vec::new();
         for (binding, value) in var.bindings.iter().zip(&var.values) {
-            if !self.usable_type(binding.ty, binding.ty_span) {
-                continue;
-            }
             if self.visibility_required && binding.visibility_span.is_none() {
                 self.error(
                     Diagnostic::new("E0202", format!("`'{}'` does not say who can see it.", binding.name.text))
@@ -335,9 +332,6 @@ impl Checker {
     }
 
     fn loop_stmt(&mut self, loop_stmt: &ast::Loop) -> Option<ir::Stmt> {
-        if !self.usable_type(loop_stmt.ty, loop_stmt.ty_span) {
-            return None;
-        }
         if !loop_stmt.ty.is_number() {
             self.error(
                 Diagnostic::new("E0205", format!("a loop cannot count in `{}`.", loop_stmt.ty.word()))
@@ -821,19 +815,6 @@ impl Checker {
         false
     }
 
-    fn usable_type(&mut self, ty: Ty, at: Span) -> bool {
-        if ty.implemented() {
-            return true;
-        }
-        self.error(
-            Diagnostic::new("E0209", format!("`{}` is designed but not built yet.", ty.word()))
-                .primary(at, "asked for here")
-                .rule("iteration 1 has the binary floats, the integers, `bool` and `str`")
-                .tip("the decimal formats and `er` exist in the design and have no implementation behind them.")
-                .fix("use a binary float or an integer for now."),
-        );
-        false
-    }
 
     // ---- values -----------------------------------------------------------------
 
@@ -850,9 +831,6 @@ impl Checker {
             // A literal that says what it is, for the places where nothing else does --
             // a comparison, which tells its two sides nothing, being the main one.
             AExpr::TypedLiteral { ty, text, span } => {
-                if !self.usable_type(*ty, *span) {
-                    return None;
-                }
                 self.agree(*ty, expected, *span)?;
                 self.literal(text, *ty, *span)
             }
@@ -1081,6 +1059,22 @@ impl Checker {
                             .rule("an `er` is a whole number, a decimal, or one number over another")
                             .tip("`|1/3|` is exactly a third, which is why the fraction form is there: no decimal could have written it.")
                             .fix("write something like `|3|`, `|-2.5|` or `|1/3|`."),
+                    );
+                    None
+                }
+            };
+        }
+
+        if let Some(fmt) = luarust_core::value::decimal_of(ty) {
+            return match luarust_num::decimal::text::from_text(fmt, Round::TiesToEven, false, text) {
+                Ok(bits) => Some(ir::Expr::Const(Value::float(ty, bits))),
+                Err(_) => {
+                    self.error(
+                        Diagnostic::new("E0218", format!("`{text}` is not a `{}`.", ty.word()))
+                            .primary(at, "written here")
+                            .rule("a decimal float is written the way a number is written")
+                            .tip("`19.99` is exactly nineteen pounds ninety-nine here, which is why the type exists.")
+                            .fix("write a number, as in `|19.99|` or `|1.5e3|`."),
                     );
                     None
                 }
@@ -1325,8 +1319,18 @@ mod tests {
     }
 
     #[test]
-    fn the_types_that_are_not_built_yet_say_so() {
-        assert_eq!(codes("var.local.d64 ['money'] = [|19.99|];"), ["E0209"]);
+    fn every_type_the_language_names_can_be_declared_and_used() {
+        // There is no longer any such thing as a type that is designed and not built, so
+        // this is the list that says so -- and the one that will fail if a type is ever
+        // added to the tower before it works.
+        for ty in [
+            "b16", "b32", "b64", "b128", "b256", "d32", "d64", "d128", "er", "i8", "i16",
+            "i32", "i64", "ui8", "ui16", "ui32", "ui64",
+        ] {
+            clean(&format!("var.local.{ty} ['x'] = [|1|];\nprint[math {{ 'x' + {ty} |1| }}];"));
+        }
+        clean("var.local.bool ['b'] = [|true|]; print['b'];");
+        clean("var.local.str ['s'] = [|hi|]; print['s'];");
     }
 
     #[test]

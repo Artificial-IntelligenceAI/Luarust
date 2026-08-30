@@ -74,13 +74,13 @@ impl Ty {
         }
     }
 
-    /// Whether iteration 1 can actually run this one.
-    pub fn implemented(self) -> bool {
-        !matches!(self, Ty::D32 | Ty::D64 | Ty::D128)
+    pub fn is_float(self) -> bool {
+        matches!(self, Ty::B16 | Ty::B32 | Ty::B64 | Ty::B128 | Ty::B256) || self.is_decimal()
     }
 
-    pub fn is_float(self) -> bool {
-        matches!(self, Ty::B16 | Ty::B32 | Ty::B64 | Ty::B128 | Ty::B256)
+    /// The IEEE 754 decimal formats, whose significands are decimal digits.
+    pub fn is_decimal(self) -> bool {
+        matches!(self, Ty::D32 | Ty::D64 | Ty::D128)
     }
 
     /// Whether arithmetic and ordering work on it, which is wider than "is a float".

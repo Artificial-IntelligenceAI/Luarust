@@ -59,7 +59,11 @@ fn celled(ty: Ty) -> bool {
     // instruction.
     // `er` joins them for a reason the others do not have: it is not merely wide, it is
     // unbounded. There is no register anywhere that could hold one.
-    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str | Ty::Er)
+    //
+    // The decimals join them because no machine here has an instruction for any of them.
+    // A `d64` would fit in a register perfectly well and there would be nothing to do
+    // with it there, so it goes where the arithmetic is.
+    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str | Ty::Er) || ty.is_decimal()
 }
 
 /// Compile a program and run it, or hand it back.

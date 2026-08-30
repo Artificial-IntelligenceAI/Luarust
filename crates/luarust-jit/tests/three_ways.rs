@@ -471,6 +471,52 @@ fn an_exact_rational_refuses_what_it_cannot_answer() {
 }
 
 #[test]
+fn a_decimal_holds_a_tenth_exactly_on_all_three_paths() {
+    assert_eq!(
+        ran("var.local.d64 ['a'] = [|0.1|];\n\
+             var.local.d64 ['b'] = [|0.2|];\n\
+             print[math { 'a' + 'b' } \\n];"),
+        "0.3\n"
+    );
+    // The same sum in the binary format of the same width, for contrast.
+    assert_eq!(
+        ran("var.local.b64 ['a'] = [|0.1|];\n\
+             var.local.b64 ['b'] = [|0.2|];\n\
+             print[math { 'a' + 'b' } \\n];"),
+        "0.30000000000000004\n"
+    );
+}
+
+#[test]
+fn money_keeps_its_cents_on_all_three_paths() {
+    assert_eq!(
+        ran("var.local.d64 ['price'] = [|19.99|];\n\
+             print[math { 'price' x d64 |3| } \" \" math { d64 |20.00| - 'price' } \\n];"),
+        "59.97 0.01\n"
+    );
+}
+
+#[test]
+fn a_decimal_is_a_float_and_behaves_like_one() {
+    // Unlike `er`, which refuses, a decimal has infinities and NaNs.
+    assert_eq!(ran("print[math { d64 |1| div d64 |0| } \\n];"), "inf\n");
+    assert_eq!(ran("print[math { d64 |0| div d64 |0| } \\n];"), "nan\n");
+    // And each width keeps its own number of digits.
+    assert_eq!(ran("print[math { d32 |1| div d32 |3| } \\n];"), "0.3333333\n");
+    assert_eq!(
+        ran("print[math { d128 |1| div d128 |3| } \\n];"),
+        "0.3333333333333333333333333333333333\n"
+    );
+}
+
+#[test]
+fn two_decimals_written_differently_can_be_worth_the_same() {
+    // `1.0` and `1.00` are different encodings of one number, so `=` cannot be a
+    // comparison of the bits.
+    assert_eq!(ran("print[math { d64 |1.0| = d64 |1.00| } \\n];"), "true\n");
+}
+
+#[test]
 fn generated_programs_agree_three_ways() {
     let mut taken = 0;
     let mut declined = 0;

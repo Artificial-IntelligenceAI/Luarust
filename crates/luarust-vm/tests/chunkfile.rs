@@ -175,8 +175,8 @@ fn every_generated_program_survives_the_trip() {
 #[test]
 fn a_chunk_can_be_written_without_its_source_and_still_know_the_line() {
     let chunk = compiled(EVERYTHING);
-    let with = serialize::write_with(&chunk, "test.lr", EVERYTHING, true);
-    let without = serialize::write_with(&chunk, "test.lr", EVERYTHING, false);
+    let with = serialize::write_with(&chunk, "test.lr", EVERYTHING, true, false);
+    let without = serialize::write_with(&chunk, "test.lr", EVERYTHING, false, false);
     assert!(without.len() < with.len(), "dropping the source should make it smaller");
 
     let loaded = serialize::read(&without).expect("it read back");
@@ -204,9 +204,28 @@ fn a_chunk_can_be_written_without_its_source_and_still_know_the_line() {
 #[test]
 fn a_line_table_that_could_not_have_come_from_a_file_is_refused() {
     let chunk = compiled(COUNTING);
-    let mut bytes = serialize::write_with(&chunk, "t.lr", COUNTING, false);
+    let mut bytes = serialize::write_with(&chunk, "t.lr", COUNTING, false, false);
     // The first line has to begin at nought. Say it began somewhere else.
     let table = 8 + 4 + 4 + 4 + (4 + "t.lr".len()) + 4 + 4;
     bytes[table..table + 4].copy_from_slice(&7u32.to_le_bytes());
     assert!(serialize::read(&bytes).is_err(), "a bogus line table must be refused");
+}
+
+#[test]
+fn a_decimal_survives_being_written_either_way() {
+    // The two encodings hold the same numbers, so a chunk written in one and read back
+    // gives the same program -- which is the whole claim that lets it be a setting.
+    let source = "var.local.d64 ['x'] = [|19.99|];\nprint[math { 'x' x d64 |3| } \\n];";
+    let chunk = compiled(source);
+    let bid = serialize::read(&serialize::write_with(&chunk, "t.lr", source, true, false))
+        .expect("bid reads");
+    let dpd = serialize::read(&serialize::write_with(&chunk, "t.lr", source, true, true))
+        .expect("dpd reads");
+    assert_eq!(output_of(&bid.chunk), "59.97\n");
+    assert_eq!(output_of(&dpd.chunk), output_of(&bid.chunk));
+    // And the files really are different, or the setting would be doing nothing.
+    assert_ne!(
+        serialize::write_with(&chunk, "t.lr", source, true, false),
+        serialize::write_with(&chunk, "t.lr", source, true, true)
+    );
 }

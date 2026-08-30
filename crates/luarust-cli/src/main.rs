@@ -156,6 +156,7 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
                 &path.display().to_string(),
                 source.text(),
                 project.embed_source,
+                project.dpd,
             );
             let out = path.with_extension("lrc");
             match std::fs::write(&out, &bytes) {

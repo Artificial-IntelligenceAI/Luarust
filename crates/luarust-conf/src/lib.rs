@@ -21,6 +21,10 @@ pub struct Project {
     pub visibility_required: bool,
     /// `[build] embed-source` — whether a chunk carries the text it was built from.
     pub embed_source: bool,
+    /// `[build] decimal-encoding` — which of IEEE 754's two ways of writing a decimal
+    /// significand a chunk uses. They hold the same numbers, so nothing about arithmetic
+    /// depends on it; it decides the bit pattern that gets written out.
+    pub dpd: bool,
 }
 
 impl Default for Project {
@@ -28,7 +32,12 @@ impl Default for Project {
         // An integer wraps, a declaration that states no visibility is restricted rather
         // than refused, and a chunk carries its source. Each of those is the answer that
         // surprises a beginner least, and each can be turned around.
-        Project { overflow: Overflow::Wrap, visibility_required: false, embed_source: true }
+        Project {
+            overflow: Overflow::Wrap,
+            visibility_required: false,
+            embed_source: true,
+            dpd: false,
+        }
     }
 }
 
@@ -108,7 +117,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Diagnostic::new("C0003", format!("`{key}` is not under any section."))
                     .primary(locate(body, start, trimmed), "written here")
                     .rule("a setting belongs to the section above it")
-                    .tip("`overflow` and `no-visibility-stated` are `[defaults]`; `embed-source` is `[build]`.")
+                    .tip("`overflow` and `no-visibility-stated` are `[defaults]`; `embed-source` and `decimal-encoding` are `[build]`.")
                     .fix("put a section header above it."),
             );
             continue;
@@ -130,13 +139,18 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 "false" => project.embed_source = false,
                 _ => errors.push(bad_value(key, raw, span, "`true` or `false`")),
             },
+            ("build", "decimal-encoding") => match unquote(raw) {
+                Some("bid") => project.dpd = false,
+                Some("dpd") => project.dpd = true,
+                _ => errors.push(bad_value(key, raw, span, "`\"bid\"` or `\"dpd\"`")),
+            },
             _ => errors.push(
                 Diagnostic::new("C0004", format!("`[{section}]` has no `{key}` setting."))
                     .primary(locate(body, start, key), "written here")
                     .rule("a project file sets only settings that exist")
                     .tip(match section.as_str() {
                         "defaults" => "`[defaults]` has `overflow` and `no-visibility-stated`.",
-                        _ => "`[build]` has `embed-source`.",
+                        _ => "`[build]` has `embed-source` and `decimal-encoding`.",
                     })
                     .fix("delete it, or correct the spelling."),
             ),
@@ -209,6 +223,15 @@ mod tests {
         assert_eq!(project.overflow, Overflow::Trap);
         // And what it did not mention is untouched.
         assert!(project.embed_source);
+    }
+
+    #[test]
+    fn the_decimal_encoding_can_be_chosen() {
+        assert!(!clean("[build]\ndecimal-encoding = \"bid\"\n").dpd);
+        assert!(clean("[build]\ndecimal-encoding = \"dpd\"\n").dpd);
+        // BID by default, because it is what the arithmetic works in anyway.
+        assert!(!Project::default().dpd);
+        assert_eq!(codes("[build]\ndecimal-encoding = \"packed\"\n"), ["C0005"]);
     }
 
     #[test]

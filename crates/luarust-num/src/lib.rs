@@ -19,6 +19,7 @@
 pub mod big;
 pub mod exact;
 pub mod binary;
+pub mod decimal;
 pub mod uint;
 
 pub use binary::{Class, Format, Round, Unpacked};

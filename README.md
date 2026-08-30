@@ -533,6 +533,7 @@ overflow = "trap"
 
 [build]
 embed-source = false
+decimal-encoding = "dpd"
 ```
 
 Anything under `[defaults]` applies to every file in the project, so a preference you
@@ -626,8 +627,53 @@ for.
 
 The binary formats are the real IEEE 754 ones rather than approximations of them:
 `b16` is true half precision, and `b256` carries 237 bits of significand, which almost
-nothing else on earth implements. The decimal formats are the ones where `0.1` is
-exactly `0.1` and money keeps its cents.
+nothing else on earth implements.
+
+### The ones where money keeps its cents
+
+`d32`, `d64` and `d128` are the IEEE 754 decimal formats. Their significands are decimal
+digits — seven, sixteen and thirty-four of them — so a tenth is a tenth:
+
+```luarust
+var.local.d64 ['a'] = [|0.1|];
+var.local.b64 ['x'] = [|0.1|];
+print[math { 'a' + d64 |0.2| } \n];    -- 0.3
+print[math { 'x' + b64 |0.2| } \n];    -- 0.30000000000000004
+
+var.local.d64 ['price'] = [|19.99|];
+print[math { 'price' x d64 |3| } \n];         -- 59.97
+print[math { d64 |20.00| - 'price' } \n];     -- 0.01
+```
+
+They are **floats**, not exact rationals, and that is the difference between reaching for
+`d64` and reaching for `er`. A decimal has a fixed number of digits, so a third rounds;
+it has infinities, so dividing by zero answers `inf`; and it has NaNs. `er` has none of
+those and no width either — it says no instead. Both are exact where the other is not:
+
+| | `d64` | `er` |
+| --- | --- | --- |
+| `0.1 + 0.2` | `0.3` | `3/10` |
+| `1 div 3` | `0.3333333333333333` | `1/3` |
+| `1 div 0` | `inf` | an error |
+| how wide | sixteen digits | as wide as it takes |
+
+**`1.0` and `1.00` are different encodings of the same number** — a decimal carries its
+exponent, so it remembers how it was written. They compare equal, because `=` asks what a
+value is worth and not how it was spelled.
+
+The standard gives two ways of writing the significand down: **BID** keeps it as a binary
+integer, **DPD** packs three digits into every ten bits. They hold the same numbers, so
+nothing about arithmetic depends on the choice — which is why it is a setting rather than
+a decision:
+
+```toml
+[build]
+decimal-encoding = "dpd"
+```
+
+Everything computes in BID, because that is what arithmetic wants. DPD is a repacking at
+the edge, so choosing it costs nothing while a program runs and changes only the bytes in
+the chunk.
 
 Two of the eight float types — `b32` and `b64` — are formats the hardware knows. The
 rest Luarust computes itself, to the rounding the standard requires.

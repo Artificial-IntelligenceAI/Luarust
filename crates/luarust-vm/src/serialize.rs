@@ -36,7 +36,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -79,14 +79,20 @@ impl std::fmt::Display for Broken {
 
 /// Write a chunk out, with the source it came from.
 pub fn write(chunk: &Chunk, path: &str, source: &str) -> Vec<u8> {
-    write_with(chunk, path, source, true)
+    write_with(chunk, path, source, true, false)
 }
 
 /// Write a chunk out, saying whether the source text goes with it.
 ///
 /// With `embed_source` off the text stays behind and only its line table travels, so a
 /// fault still names its line and column and simply cannot quote it.
-pub fn write_with(chunk: &Chunk, path: &str, source: &str, embed_source: bool) -> Vec<u8> {
+pub fn write_with(
+    chunk: &Chunk,
+    path: &str,
+    source: &str,
+    embed_source: bool,
+    dpd: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, VERSION);
@@ -109,9 +115,14 @@ pub fn write_with(chunk: &Chunk, path: &str, source: &str, embed_source: bool) -
         put_u32(&mut out, source.len() as u32);
     }
 
+    // Which way the decimals in this chunk are written down. Everything computes in BID,
+    // so this is a repacking at the edge and nothing else -- but it has to travel with
+    // the file, or a chunk written one way and read the other would be nonsense.
+    put_u32(&mut out, u32::from(dpd));
+
     put_u32(&mut out, chunk.consts.len() as u32);
     for value in &chunk.consts {
-        put_value(&mut out, value);
+        put_value(&mut out, value, dpd);
     }
 
     put_u32(&mut out, chunk.texts.len() as u32);
@@ -166,7 +177,9 @@ fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
-fn put_value(out: &mut Vec<u8>, value: &Value) {
+fn put_value(out: &mut Vec<u8>, value: &Value, dpd: bool) {
+    // A decimal is repacked on the way out when the project asked for the other encoding.
+    let value = &recode(value, dpd);
     match value {
         Value::Num { ty, bits } => {
             out.push(0);
@@ -196,6 +209,34 @@ fn put_value(out: &mut Vec<u8>, value: &Value) {
             put_big(out, value.denominator());
         }
     }
+}
+
+/// A decimal from one encoding into the other. Everything else is handed straight back.
+fn recode(value: &Value, dpd: bool) -> Value {
+    if !dpd {
+        return value.clone();
+    }
+    let ty = value.ty();
+    let Some(fmt) = luarust_core::value::decimal_of(ty) else {
+        return value.clone();
+    };
+    let bits = value.bits().expect("a decimal has bits");
+    let taken = luarust_num::decimal::unpack(fmt, bits, false);
+    Value::float(ty, luarust_num::decimal::pack(fmt, taken, true))
+}
+
+/// And back again, on the way in.
+fn decode_value(value: Value, dpd: bool) -> Value {
+    if !dpd {
+        return value;
+    }
+    let ty = value.ty();
+    let Some(fmt) = luarust_core::value::decimal_of(ty) else {
+        return value;
+    };
+    let bits = value.bits().expect("a decimal has bits");
+    let taken = luarust_num::decimal::unpack(fmt, bits, true);
+    Value::float(ty, luarust_num::decimal::pack(fmt, taken, false))
 }
 
 fn put_big(out: &mut Vec<u8>, value: &luarust_num::Big) {
@@ -421,10 +462,12 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
         value => return Err(Broken::Unknown { what: "source kind", value: value.into() }),
     };
 
+    let dpd = cursor.u32()? != 0;
+
     let count = cursor.u32()?;
     let mut consts = Vec::with_capacity(count.min(4096) as usize);
     for _ in 0..count {
-        consts.push(cursor.value()?);
+        consts.push(decode_value(cursor.value()?, dpd));
     }
 
     let count = cursor.u32()?;
