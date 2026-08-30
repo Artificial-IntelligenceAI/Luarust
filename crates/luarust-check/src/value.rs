@@ -99,6 +99,11 @@ impl Value {
         })
     }
 
+    /// Build an integer, cutting it to its width, and say nothing about what was cut.
+    pub fn int(ty: Ty, value: i128) -> Value {
+        Value::from_i128(ty, value).0
+    }
+
     /// Build an integer, cutting it to its width. Reports whether anything was cut off.
     fn from_i128(ty: Ty, value: i128) -> (Value, bool) {
         let width = ty.int_bits().unwrap_or(64);

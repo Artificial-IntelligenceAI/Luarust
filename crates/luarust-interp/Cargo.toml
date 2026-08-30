@@ -1,0 +1,20 @@
+[package]
+name = "luarust-interp"
+description = "Running a checked Luarust program directly, as the reference the other paths answer to."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+luarust-check = { path = "../luarust-check" }
+luarust-diag = { path = "../luarust-diag" }
+luarust-num = { path = "../luarust-num" }
+luarust-parse = { path = "../luarust-parse" }
+
+[dev-dependencies]
+luarust-lex = { path = "../luarust-lex" }
+luarust-check = { path = "../luarust-check" }
+luarust-parse = { path = "../luarust-parse" }
+luarust-diag = { path = "../luarust-diag" }

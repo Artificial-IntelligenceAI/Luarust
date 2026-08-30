@@ -1,0 +1,4 @@
+-- Counting to five, out loud.
+loop.temp.range.ui8 ['i'] = ['1', '5'] {
+    print['i' \n];
+}

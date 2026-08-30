@@ -2,7 +2,9 @@
 resolver = "3"
 members = [
     "crates/luarust-check",
+    "crates/luarust-cli",
     "crates/luarust-diag",
+    "crates/luarust-interp",
     "crates/luarust-lex",
     "crates/luarust-num",
     "crates/luarust-parse",
