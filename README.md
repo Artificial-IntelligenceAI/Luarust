@@ -271,6 +271,33 @@ Notice there is **no semicolon after the closing brace**. A semicolon ends a sta
 that finishes on a value, and a block already says where it ends. `};` would be saying
 it twice.
 
+## Timing
+
+`time.now` is a value: how many seconds the clock has counted, read as whatever float
+type is asked of it. Take it twice and subtract to find out how long something took.
+
+```luarust
+var.local.mut.ui64 ['sum'] = ['0'];
+var.local.b64 ['start']    = [time.now];
+
+loop.temp.range.ui64 ['i'] = ['1', '100000000'] {
+    set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+}
+
+var.local.b64 ['elapsed'] = [math { time.now - 'start' }];
+
+print['sum' " in " 'elapsed' " seconds\n"];
+```
+
+`time.now` is unquoted, so it cannot be mistaken for a variable — a name is always in
+quotes — which is what lets it sit inside a math block next to one.
+
+The clock is **monotonic**: it only ever moves forward, and it does not know what time
+of day it is. A wall clock can step backwards when the machine corrects itself against a
+time server, and a benchmark that reports a negative duration for that reason is worse
+than one that reports nothing. What is lost is the ability to ask what time it is, which
+is not what a timer is for.
+
 ## Scope
 
 Every declaration carries one of four, and the first three mean what they usually mean:
