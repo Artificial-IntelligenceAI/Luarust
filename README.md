@@ -450,3 +450,38 @@ attempt at speed. That is deliberate. The bytecode VM comes next and the LLVM JI
 it, and this interpreter stays exactly as it is — the reference both of them get checked
 against. Three implementations that must agree catch things one careful implementation
 never will.
+
+## How fast it is
+
+Not very, yet, and on purpose.
+
+The benchmark is a dependent chain — `sum = (sum + i) mod 1000000007`, a hundred million
+times. Each value needs the one before it, so it cannot be folded into a formula,
+vectorised, or run out of order. Everybody actually loops.
+
+| | 100M | vs Lua 5.4 |
+| --- | --- | --- |
+| Lua 5.4 | **580 ms** | 1× |
+| Lust | 677 ms | 1.2× |
+| LuaJIT | 722 ms | 1.2× |
+| **Luarust** | **9,627 ms** | **16.6×** |
+
+One x86-64 Xeon, best of three, every one of them printing the same answer.
+
+Before any of that means anything, each timing is checked for whether it still contains a
+loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a
+formula will report a magnificent number for doing nothing. Ten times the work should take
+ten times the time:
+
+| | 10M | 100M | ratio |
+| --- | --- | --- | --- |
+| Lua 5.4 | 67 ms | 580 ms | 8.7× |
+| LuaJIT | 80 ms | 722 ms | 9.0× |
+| Lust | 78 ms | 677 ms | 8.7× |
+| Luarust | 1,100 ms | 9,627 ms | 8.8× |
+
+Everyone comes in a little under ten because process startup stops mattering at the larger
+size. Nobody's loop was deleted.
+
+Sixteen times off is about where a tree-walker sits against a bytecode VM, which is what
+comes next. The `benchmark` workflow in this repository runs the table above.
