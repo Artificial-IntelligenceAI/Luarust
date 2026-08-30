@@ -9,15 +9,16 @@ So, to put it simply. Luarust is a computer language that has **very helpful err
 
 We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.** 
 
-| | | |
+### Why pick Luarust, and why not
+|Why pick Luarust|Why not | |
 | --- | --- | --- |
-| | | |
-| | | |
-| | | |
-| | | |
-| | | |
+|Compile once, run basically anywhere |One of the slowest JIT languages | |
+|high-level |no direct electricity manipulation | |
+|Final product only has the things that is needed (once again, unlike fucking `Go` 🤣) |It doesn't give you everything (e.g. time manipulation) | |
+|Very helpful error messages (hahaha, guess what? Unlike fucking `C` 🤣) |Error messages may be too long | |
+| |Stability is not guaranteed | |
 
-### Why, and why not
+### Why pick Luarust, and why not (no jokes)
 
 | Why pick it | Why not |
 | --- | --- |
