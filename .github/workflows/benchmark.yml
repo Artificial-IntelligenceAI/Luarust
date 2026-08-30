@@ -94,8 +94,8 @@ jobs:
             echo "################  N = $N  ################"
 
             cat > bench.lr <<EOF
-          var.local.mut.ui64 ['sum'] = ['0'];
-          loop.temp.range.ui64 ['i'] = ['1', '$N'] {
+          var.local.mut.i64 ['sum'] = ['0'];
+          loop.temp.range.i64 ['i'] = ['1', '$N'] {
               set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
           }
           print['sum'];
