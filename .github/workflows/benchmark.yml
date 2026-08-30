@@ -33,7 +33,7 @@ jobs:
           set +e
           sudo apt-get install -y -qq lua5.4 luajit >/dev/null 2>&1
           cargo install lust-rs >/dev/null 2>&1
-          lua5.4 -v; luajit -v; lust --version
+          lua5.4 -v; luajit -v; lust --version; java --version | head -1; cc --version | head -1
           exit 0
 
       - name: Run
@@ -51,6 +51,44 @@ jobs:
             done
             printf "%-14s %7s ms   %s\n" "$name" "$best" "$out"
           }
+
+          # The compiled languages read N from the command line so it cannot be folded
+          # away. Luarust has no argv yet, so its N is written into the source -- which
+          # the scaling check below is there to catch if it ever starts to matter.
+          cat > Bench.java <<'EOF'
+          public class Bench {
+              public static void main(String[] args) {
+                  long n = Long.parseLong(args[0]);
+                  long sum = 0;
+                  for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
+                  System.out.print(sum);
+              }
+          }
+          EOF
+          sed -i 's/^          //' Bench.java
+          javac Bench.java
+
+          cat > bench.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              long n = atol(argv[1]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
+              printf("%ld", sum);
+              return argc - argc;
+          }
+          EOF
+          cc -O2 -o bench_c bench.c
+
+          cat > bench.rs <<'EOF'
+          fn main() {
+              let n: i64 = std::env::args().nth(1).unwrap().parse().unwrap();
+              let mut sum: i64 = 0;
+              for i in 1..=n { sum = (sum + i) % 1000000007; }
+              print!("{sum}");
+          }
+          EOF
+          rustc -O -o bench_rs bench.rs
 
           for N in 10000000 100000000; do
             echo "################  N = $N  ################"
@@ -79,6 +117,9 @@ jobs:
           println(tostring(sum))
           EOF
 
+            bench "C, clang -O2"   ./bench_c $N
+            bench "Rust, rustc -O"  ./bench_rs $N
+            bench "Java"           java Bench $N
             bench "Lua 5.4"        lua5.4 bench.lua
             bench "LuaJIT"         luajit bench.lua
             bench "Lust"           lust bench.lust
