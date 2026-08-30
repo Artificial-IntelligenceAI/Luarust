@@ -3,7 +3,7 @@ Project under development, stable use not recommended, stability is **not a guar
 
 **Luarust** is a **Lua ripoff** focused on performance, device support, explicit syntax, and very helpful error messages (unlike fucking `C`, joking 😂).
 
-Luarust's method is focused on compile once, run anywhere (Like Java's), and boosting its performance via JIT compilation, with **LLVM** doing the code generation.
+Luarust's method is focused on compile once, run anywhere (Like Java's), and boosting its performance via JIT compilation, with **LLVM** doing the code generation. And whatever you hand somebody carries **only what that program actually uses** — no garbage collector on a device that never needed one, and the JIT stays on the machine you wrote the thing on, not the machine that runs it.
 
 So, to put it simply. Luarust is a computer language that has **very helpful error messages**, and **could run basically anywhere**, **without sacrificing much performance**.
 
