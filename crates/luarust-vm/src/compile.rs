@@ -14,22 +14,15 @@ use luarust_diag::Span;
 use luarust_parse::ast::BinOp;
 
 /// Compile a checked program.
+///
+/// Twice, on purpose. The first pass exists only to find out which constants the program
+/// uses; the second gives each of them a register of its own, loaded once before anything
+/// runs. Without that, a loop reloads the same constant on every pass — `mod 1000000007`
+/// costs a load and a remainder rather than a remainder — and it is the innermost
+/// instruction in the hottest place a program has.
 pub fn compile(program: &Checked) -> Chunk {
-    let mut compiler = Compiler {
-        chunk: Chunk {
-            code: Vec::new(),
-            spans: Vec::new(),
-            consts: Vec::new(),
-            texts: Vec::new(),
-            registers: program.slots,
-            overflow: program.overflow,
-        },
-        floor: program.slots as Reg,
-        next: program.slots as Reg,
-    };
-    compiler.block(&program.stmts);
-    compiler.emit(Op::Halt, Span::default());
-    compiler.chunk
+    let scouted = Compiler::new(program, Vec::new()).run(program);
+    Compiler::new(program, scouted.consts).run(program)
 }
 
 struct Compiler {
@@ -39,9 +32,46 @@ struct Compiler {
     floor: Reg,
     /// The next free temporary.
     next: Reg,
+    /// The first register holding a constant, once the constants are known.
+    const_base: Reg,
+    /// How many of them there are. Zero on the first pass, when they are not known yet.
+    preloaded: usize,
 }
 
 impl Compiler {
+    fn new(program: &Checked, consts: Vec<Value>) -> Self {
+        let preloaded = consts.len();
+        let base = program.slots as Reg;
+        let temps = base + preloaded as Reg;
+        Self {
+            chunk: Chunk {
+                code: Vec::new(),
+                spans: Vec::new(),
+                consts,
+                texts: Vec::new(),
+                registers: temps as usize,
+                overflow: program.overflow,
+            },
+            floor: temps,
+            next: temps,
+            const_base: base,
+            preloaded,
+        }
+    }
+
+    fn run(mut self, program: &Checked) -> Chunk {
+        // Every constant into its own register, once, before anything else happens.
+        for index in 0..self.preloaded {
+            self.emit(
+                Op::Const { dst: self.const_base + index as Reg, konst: index as u32 },
+                Span::default(),
+            );
+        }
+        self.block(&program.stmts);
+        self.emit(Op::Halt, Span::default());
+        self.chunk
+    }
+
     fn emit(&mut self, op: Op, span: Span) -> usize {
         self.chunk.code.push(op);
         self.chunk.spans.push(span);
@@ -126,12 +156,10 @@ impl Compiler {
                 self.expr(from, counter, *span);
 
                 // The far bound and the step have to outlive the body, so they are taken
-                // before the floor is raised and the body starts handing out its own.
-                let limit = self.temp();
-                self.expr(to, limit, *span);
-                let step = self.temp();
-                let one = self.konst(one_of(*ty));
-                self.emit(Op::Const { dst: step, konst: one }, *span);
+                // before the floor is raised and the body starts handing out its own. A
+                // constant bound needs no register of its own at all -- it already has one.
+                let limit = self.operand(to, *span);
+                let step = self.const_operand(one_of(*ty), *span);
 
                 let outer_floor = self.floor;
                 self.floor = self.next;
@@ -167,13 +195,27 @@ impl Compiler {
     }
 
     /// A register holding this expression's value, without copying when there is already
-    /// one — a variable is read where it lives.
+    /// one — a variable is read where it lives, and so is a constant.
     fn operand(&mut self, expr: &Expr, span: Span) -> Reg {
-        if let Expr::Load { slot, .. } = expr {
-            return *slot as Reg;
+        match expr {
+            Expr::Load { slot, .. } => *slot as Reg,
+            Expr::Const(value) => self.const_operand(value.clone(), span),
+            _ => {
+                let reg = self.temp();
+                self.expr(expr, reg, span);
+                reg
+            }
+        }
+    }
+
+    /// The register a constant already lives in, or a fresh one on the first pass.
+    fn const_operand(&mut self, value: Value, span: Span) -> Reg {
+        let index = self.konst(value);
+        if (index as usize) < self.preloaded {
+            return self.const_base + index as Reg;
         }
         let reg = self.temp();
-        self.expr(expr, reg, span);
+        self.emit(Op::Const { dst: reg, konst: index }, span);
         reg
     }
 
