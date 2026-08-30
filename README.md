@@ -95,7 +95,17 @@ var.local.b16 ['z']      = [math { 'x' + 'y' }];
 print['z' \n];                                     -- 7
 ```
 
-Single quotes mean here what they mean in a print list: `'x'` is the variable.
+Single quotes mean here what they mean in a print list: `'x'` is the variable. Numbers,
+though, are written bare:
+
+```luarust
+var.local.b16 ['z'] = [math { 'x' + 1 }];
+```
+
+Quotes exist so that a type annotation can decide what a literal means — `'1000'` is a
+number under `b16` and text under `str`. Inside a math block there is nothing left to
+decide, so the quotes come off. A bare number takes its type from its surroundings, and
+`'1'` in a math block would be a variable named `1`.
 
 Grouping is `( )`, because `[ ]` and `{ }` are both spoken for:
 
@@ -111,7 +121,7 @@ mean the same thing:
 | `[ ]` | a list — of names, of values, or of things to print |
 | `{ }` | a math block |
 | `( )` | grouping, inside one |
-| `' '` | a name — or a literal, where a value is expected |
+| `' '` | a name — or a literal, where a value is expected and no math block is open |
 | `" "` | text |
 
 You never have to work out which sense a bracket is being used in. It only has one.
