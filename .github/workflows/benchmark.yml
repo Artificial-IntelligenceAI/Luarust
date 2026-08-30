@@ -71,10 +71,11 @@ jobs:
           println(tostring(sum))
           EOF
 
-            bench "Lua 5.4"  lua5.4 bench.lua
-            bench "LuaJIT"   luajit bench.lua
-            bench "Lust"     lust bench.lust
-            bench "Luarust"  ./target/release/luarust run bench.lr
+            bench "Lua 5.4"        lua5.4 bench.lua
+            bench "LuaJIT"         luajit bench.lua
+            bench "Lust"           lust bench.lust
+            bench "Luarust VM"     ./target/release/luarust run bench.lr
+            bench "Luarust interp" ./target/release/luarust interp bench.lr
             echo
           done
           exit 0
