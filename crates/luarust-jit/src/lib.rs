@@ -28,6 +28,7 @@ use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Fault, Overflow, Stopped, Value};
 use luarust_diag::Span;
 use luarust_parse::ast::{BinOp, Ty};
+
 use std::io::Write;
 
 /// Why the JIT handed a program back rather than compiling it.
@@ -49,9 +50,6 @@ pub fn accepts(program: &Checked) -> Result<(), Declined> {
             return Err(Declined { because: format!("`{}` is not compiled yet", e.ty().word()) });
         }
         match e {
-            Expr::Binary { op: BinOp::Pow, .. } => {
-                Err(Declined { because: "raising to a power is not compiled yet".into() })
-            }
             Expr::Binary { lhs, rhs, .. } => expr(lhs).and_then(|()| expr(rhs)),
             Expr::Neg { operand, .. } => expr(operand),
             Expr::Const(value) => match value {

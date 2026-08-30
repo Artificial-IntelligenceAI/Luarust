@@ -111,6 +111,21 @@ fn nested_loops() {
 }
 
 #[test]
+fn raising_to_a_power_is_taken_now() {
+    // Emitted as a call back into luarust-num rather than as instructions, because IEEE
+    // does not require `pow` to be correctly rounded and there is no argument that the
+    // hardware and the software would agree.
+    let math = |e: &str| ran(&format!("var.local.i32 ['r'] = [math {{ {e} }}]; print['r'];"));
+    assert_eq!(math("2 ** 3"), "8");
+    assert_eq!(math("2 ** 3 ** 2"), "512");
+    assert_eq!(math("-2 ** 2"), "-4");
+    assert_eq!(
+        ran("var.local.b64 ['r'] = [math { 1.5 ** 3 }]; print['r'];"),
+        "3.375"
+    );
+}
+
+#[test]
 fn integer_arithmetic() {
     let math = |e: &str| ran(&format!("var.local.i32 ['r'] = [math {{ {e} }}]; print['r'];"));
     assert_eq!(math("2 + 3 * 4"), "14");
@@ -146,7 +161,6 @@ fn what_it_will_not_take_it_says_so_about() {
         ("var.local.b16 ['x'] = ['1']; print['x'];", "b16"),
         ("var.local.b128 ['x'] = ['1']; print['x'];", "b128"),
         ("var.local.b256 ['x'] = ['1']; print['x'];", "b256"),
-        ("var.local.i32 ['x'] = [math { 2 ** 3 }]; print['x'];", "power"),
         ("var.local.str ['x'] = ['hi']; print['x'];", "str"),
     ] {
         match three_ways(source) {
@@ -166,6 +180,9 @@ fn generated_programs_agree_three_ways() {
             Ran::Declined(_) => declined += 1,
         }
     }
-    assert!(taken > 100, "the JIT only took {taken} of 3000, which is too few to prove much");
+    // Printed so a change in what the JIT will take shows up as a number rather than as
+    // a feeling.
+    println!("the JIT took {taken} of 3000 and declined {declined}");
+    assert!(taken > 500, "the JIT only took {taken} of 3000, which is too few to prove much");
     assert!(declined > 0, "it took all 3000, so the declining is not being exercised");
 }
