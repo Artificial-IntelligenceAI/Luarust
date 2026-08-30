@@ -70,9 +70,14 @@ pub fn text_value(raw: &str) -> String {
     out
 }
 
-/// The text between the bars of a [`Kind::Literal`] token.
+/// The text inside a [`Kind::Literal`] token, whichever pair of marks it wore.
 pub fn literal_value(raw: &str) -> &str {
-    raw.strip_prefix('|').and_then(|s| s.strip_suffix('|')).unwrap_or(raw)
+    for mark in ['|', '`'] {
+        if let Some(inner) = raw.strip_prefix(mark).and_then(|s| s.strip_suffix(mark)) {
+            return inner;
+        }
+    }
+    raw
 }
 
 /// The text between the quotes of a [`Kind::Name`] token.
@@ -148,7 +153,9 @@ impl<'a> Lexer<'a> {
 
                 '\'' => self.quoted('\'', Kind::Name),
                 // A written value wears bars, so a name never has to mean two things.
+                // Backticks say the same thing and are easier to reach on most keyboards.
                 '|' => self.quoted('|', Kind::Literal),
+                '`' => self.quoted('`', Kind::Literal),
                 '"' => self.quoted('"', Kind::Text),
                 '\\' => self.bare_escape(),
 
@@ -489,6 +496,18 @@ mod tests {
         // And a written value holds whatever is put in it too.
         let written: Vec<&str> = texts(source).into_iter().filter(|t| t.starts_with('|')).collect();
         assert_eq!(written, ["|hi there, you|"]);
+    }
+
+    #[test]
+    fn a_written_value_may_wear_bars_or_backticks() {
+        for source in ["|5|", "`5`"] {
+            assert_eq!(kinds(source)[..2], [Kind::Literal, Kind::End], "{source}");
+            assert_eq!(literal_value(source), "5");
+        }
+        // Each pair closes on its own mark, so the other one is just a character inside.
+        let source = "`a|b`";
+        assert_eq!(kinds(source)[..2], [Kind::Literal, Kind::End]);
+        assert_eq!(literal_value(source), "a|b");
     }
 
     #[test]

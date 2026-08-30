@@ -48,8 +48,9 @@ var.local.str ['a friendly greeting'] = [|hello|];
 var.local.b16 ['❔']                  = [|1000|];
 ```
 
-Written values wear bars instead, so a quoted thing is a name wherever you meet one and
-never has to be read as a value depending on where it sits. The type is what decides how
+Written values wear bars instead — or backticks, whichever your keyboard likes — so a
+quoted thing is a name wherever you meet one and never has to be read as a value
+depending on where it sits. The type is what decides how
 a written value reads — the same four characters are a number under `b16` and text under
 `str`:
 
@@ -315,7 +316,7 @@ mean the same thing:
 | `{ }` | a block — the word in front of it says which kind |
 | `( )` | grouping, inside a math block |
 | `' '` | a name — always |
-| `\| \|` | a written value — always |
+| `\| \|` or `` ` ` `` | a written value — always |
 | `" "` | text, in a print list |
 
 You never have to work out which sense a bracket is being used in. It only has one.
