@@ -146,7 +146,7 @@ impl Machine {
                         span: *span,
                     }
                 })?;
-                Ok(Value::Float { ty: *ty, bits })
+                Ok(Value::float(*ty, bits))
             }
 
             Expr::Neg { operand, span, .. } => {

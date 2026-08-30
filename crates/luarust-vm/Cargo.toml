@@ -14,5 +14,6 @@ luarust-num = { path = "../luarust-num" }
 luarust-parse = { path = "../luarust-parse" }
 
 [dev-dependencies]
+luarust-num = { path = "../luarust-num" }
 luarust-interp = { path = "../luarust-interp" }
 luarust-lex = { path = "../luarust-lex" }

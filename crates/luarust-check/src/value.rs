@@ -28,14 +28,24 @@ pub enum Overflow {
 }
 
 /// A value, and the type it is.
+///
+/// The shape here is a performance decision, and a measured one. Holding every float at
+/// `b256`'s width made a value 72 bytes, which every register write and every clone then
+/// had to copy — and since both the interpreter and the VM paid it, the VM's advantage
+/// almost vanished into the memcpy. Everything that fits in 64 bits now does: all the
+/// integers, and `b16`, `b32` and `b64`. Only `b128` and `b256` are boxed, so the two
+/// widths nobody uses in a hot loop pay for themselves instead of taxing the ones that
+/// are.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    /// An IEEE binary float, encoded at its own width.
-    Float { ty: Ty, bits: Bits },
-    /// An integer, held in the low bits of a `u64` and read according to its type.
-    Int { ty: Ty, bits: u64 },
+    /// An integer, or a float narrow enough to fit: `b16`, `b32`, `b64`.
+    Num { ty: Ty, bits: u64 },
+    /// `b128` and `b256`, which do not fit.
+    Wide { ty: Ty, bits: Box<Bits> },
     Bool(bool),
-    Str(String),
+    /// Shared, because a string is immutable here and copying one to move it between
+    /// registers would be paying for nothing.
+    Str(std::rc::Rc<str>),
 }
 
 /// Something that went wrong while a program was running.
@@ -80,17 +90,17 @@ impl Stopped {
 /// Lives here rather than in whatever is running the program, so that every execution
 /// path orders things identically instead of nearly identically.
 pub fn compare(a: &Value, b: &Value) -> Comparison {
-    match (a, b) {
-        (Value::Int { .. }, Value::Int { .. }) => {
-            match a.as_i128().unwrap().cmp(&b.as_i128().unwrap()) {
-                std::cmp::Ordering::Less => Comparison::Less,
-                std::cmp::Ordering::Equal => Comparison::Equal,
-                std::cmp::Ordering::Greater => Comparison::Greater,
-            }
-        }
-        (Value::Float { ty, bits: x }, Value::Float { bits: y, .. }) => {
-            let fmt = format_of(*ty).expect("a float type has a format");
-            binary::compare(fmt, *x, *y)
+    if a.ty().is_integer() && b.ty().is_integer() {
+        return match a.as_i128().unwrap().cmp(&b.as_i128().unwrap()) {
+            std::cmp::Ordering::Less => Comparison::Less,
+            std::cmp::Ordering::Equal => Comparison::Equal,
+            std::cmp::Ordering::Greater => Comparison::Greater,
+        };
+    }
+    match (a.bits(), b.bits()) {
+        (Some(x), Some(y)) if a.ty() == b.ty() => {
+            let fmt = format_of(a.ty()).expect("a float type has a format");
+            binary::compare(fmt, x, y)
         }
         _ => Comparison::Unordered,
     }
@@ -102,7 +112,7 @@ pub fn one_of(ty: Ty) -> Value {
         Value::int(ty, 1)
     } else {
         let fmt = format_of(ty).expect("a number has a format");
-        Value::Float { ty, bits: binary::arith::one::<8>(fmt, false) }
+        Value::float(ty, binary::arith::one::<8>(fmt, false))
     }
 }
 
@@ -121,28 +131,51 @@ pub fn format_of(ty: Ty) -> Option<Format> {
 impl Value {
     pub fn ty(&self) -> Ty {
         match self {
-            Value::Float { ty, .. } | Value::Int { ty, .. } => *ty,
+            Value::Num { ty, .. } | Value::Wide { ty, .. } => *ty,
             Value::Bool(_) => Ty::Bool,
             Value::Str(_) => Ty::Str,
         }
     }
 
+    /// A float, stored narrow or wide according to whether it fits.
+    pub fn float(ty: Ty, bits: Bits) -> Value {
+        if matches!(ty, Ty::B128 | Ty::B256) {
+            Value::Wide { ty, bits: Box::new(bits) }
+        } else {
+            Value::Num { ty, bits: bits.low64() }
+        }
+    }
+
+    /// A float's encoding, widened back out. `b16`, `b32` and `b64` all sit in the low
+    /// 64 bits, so this loses nothing.
+    pub fn bits(&self) -> Option<Bits> {
+        match self {
+            Value::Num { ty, bits } if ty.is_float() => Some(Bits::from_u64(*bits)),
+            Value::Wide { bits, .. } => Some(**bits),
+            _ => None,
+        }
+    }
+
+    pub fn text(value: &str) -> Value {
+        Value::Str(std::rc::Rc::from(value))
+    }
+
     /// Zero, of whichever type.
     pub fn zero(ty: Ty) -> Value {
         if ty.is_integer() {
-            Value::Int { ty, bits: 0 }
+            Value::Num { ty, bits: 0 }
         } else if let Some(fmt) = format_of(ty) {
-            Value::Float { ty, bits: binary::zero(fmt, false) }
+            Value::float(ty, binary::zero(fmt, false))
         } else if ty == Ty::Bool {
             Value::Bool(false)
         } else {
-            Value::Str(String::new())
+            Value::text("")
         }
     }
 
     /// An integer's value, sign-extended if its type is signed.
     pub fn as_i128(&self) -> Option<i128> {
-        let Value::Int { ty, bits } = self else { return None };
+        let Value::Num { ty, bits } = self else { return None };
         let width = ty.int_bits()?;
         Some(if ty.is_signed() {
             // Push the sign bit to the top and back down, so the sign extends.
@@ -169,15 +202,18 @@ impl Value {
         } else {
             (0..(1i128 << width)).contains(&value)
         };
-        (Value::Int { ty, bits }, fits)
+        (Value::Num { ty, bits }, fits)
     }
 }
 
 /// `lhs op rhs`, both already known to be the same type.
 pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Result<Value, Fault> {
-    match (lhs, rhs) {
-        (Value::Int { ty, .. }, Value::Int { .. }) => integer_op(op, *ty, lhs, rhs, overflow),
-        (Value::Float { ty, bits: a }, Value::Float { bits: b, .. }) => float_op(op, *ty, *a, *b),
+    let ty = lhs.ty();
+    if ty.is_integer() && rhs.ty().is_integer() {
+        return integer_op(op, ty, lhs, rhs, overflow);
+    }
+    match (lhs.bits(), rhs.bits()) {
+        (Some(a), Some(b)) if ty == rhs.ty() => float_op(op, ty, a, b),
         _ => Err(Fault::new(
             "R0001",
             "these two cannot be combined.",
@@ -261,7 +297,7 @@ fn float_op(op: BinOp, ty: Ty, a: Bits, b: Bits) -> Result<Value, Fault> {
         BinOp::Mod => float_remainder(fmt, a, b),
         BinOp::Pow => return float_pow(fmt, ty, a, b),
     };
-    Ok(Value::Float { ty, bits })
+    Ok(Value::float(ty, bits))
 }
 
 /// Floored remainder, built from the operations that are exact.
@@ -350,17 +386,17 @@ fn float_pow(fmt: Format, ty: Ty, base: Bits, exponent: Bits) -> Result<Value, F
     if e.sign {
         result = binary::div(fmt, mode, one, result);
     }
-    Ok(Value::Float { ty, bits: result })
+    Ok(Value::float(ty, result))
 }
 
 /// Negation. Exact for every value.
 pub fn negate(value: &Value, overflow: Overflow) -> Result<Value, Fault> {
     match value {
-        Value::Float { ty, bits } => {
+        Value::Num { ty, .. } | Value::Wide { ty, .. } if ty.is_float() => {
             let fmt = format_of(*ty).expect("a float type has a format");
-            Ok(Value::Float { ty: *ty, bits: binary::neg(fmt, *bits) })
+            Ok(Value::float(*ty, binary::neg(fmt, value.bits().expect("a float has bits"))))
         }
-        Value::Int { ty, .. } => {
+        Value::Num { ty, .. } => {
             let (negated, fits) = Value::from_i128(*ty, -value.as_i128().unwrap());
             if !fits && overflow == Overflow::Trap {
                 return Err(Fault::new(
@@ -393,11 +429,16 @@ impl std::fmt::Display for Value {
         match self {
             Value::Str(text) => write!(f, "{text}"),
             Value::Bool(value) => write!(f, "{value}"),
-            Value::Int { .. } => write!(f, "{}", self.as_i128().unwrap()),
-            Value::Float { ty, bits } => {
-                let fmt_of = format_of(*ty).expect("a float type has a format");
-                let widened =
-                    binary::convert::<8>(fmt_of, Format::B64, Round::TiesToEven, *bits);
+            _ if self.ty().is_integer() => write!(f, "{}", self.as_i128().unwrap()),
+            _ => {
+                let ty = self.ty();
+                let fmt_of = format_of(ty).expect("a float type has a format");
+                let widened = binary::convert::<8>(
+                    fmt_of,
+                    Format::B64,
+                    Round::TiesToEven,
+                    self.bits().expect("a float has bits"),
+                );
                 let number = f64::from_bits(widened.low64());
                 if number.is_nan() {
                     write!(f, "nan")

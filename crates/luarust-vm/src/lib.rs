@@ -74,7 +74,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     &format!("{seconds:.9}"),
                 )
                 .expect("nine decimal places is a number");
-                registers[dst as usize] = Value::Float { ty, bits };
+                registers[dst as usize] = Value::float(ty, bits);
             }
 
             Op::PrintText { text } => {

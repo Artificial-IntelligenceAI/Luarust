@@ -518,7 +518,7 @@ impl Checker {
     /// Read a written number as the type that is expecting it.
     fn literal(&mut self, text: &str, ty: Ty, at: Span) -> Option<ir::Expr> {
         if ty == Ty::Str {
-            return Some(ir::Expr::Const(Value::Str(text.to_string())));
+            return Some(ir::Expr::Const(Value::text(text)));
         }
         if ty == Ty::Bool {
             return match text {
@@ -539,7 +539,7 @@ impl Checker {
 
         if let Some(fmt) = format_of(ty) {
             return match binary::from_decimal::<8>(fmt, Round::TiesToEven, text) {
-                Ok(bits) => Some(ir::Expr::Const(Value::Float { ty, bits })),
+                Ok(bits) => Some(ir::Expr::Const(Value::float(ty, bits))),
                 Err(why) => {
                     self.error(self.bad_number(text, ty, at, why));
                     None
@@ -575,7 +575,7 @@ impl Checker {
                 } else {
                     (number as u64) & ((1u64 << width) - 1)
                 };
-                Some(ir::Expr::Const(Value::Int { ty, bits }))
+                Some(ir::Expr::Const(Value::Num { ty, bits }))
             }
             Err(_) => {
                 self.error(
@@ -821,7 +821,7 @@ mod tests {
         assert_eq!(checked.slots, 2, "total and i");
         let ir::Stmt::Store { slot, value, .. } = &checked.stmts[0] else { panic!("not a store") };
         assert_eq!(*slot, 0);
-        assert!(matches!(value, ir::Expr::Const(Value::Int { ty: Ty::U32, bits: 0 })));
+        assert!(matches!(value, ir::Expr::Const(Value::Num { ty: Ty::U32, bits: 0 })));
         assert!(matches!(&checked.stmts[1], ir::Stmt::Loop { ty: Ty::U32, .. }));
     }
 
