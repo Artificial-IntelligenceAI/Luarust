@@ -118,6 +118,8 @@ fn the_programs_are_worth_running() {
         // Functions: declared, answering something and nothing, called for a value and
         // called for what they do, and one that calls itself.
         "fn.local.", "fn.local.nothing ", "return ", "return;", "f0[",
+        // Loops that stop on a condition, and both ways of leaving one early.
+        "loop.temp.while.", "loop.perm.while.", "break;", "break when reached ",
         // The comparisons -- every spelling of every one, since a spelling that is never
         // written is a spelling nobody ever finds out is broken -- and the two types that
         // are not numbers.

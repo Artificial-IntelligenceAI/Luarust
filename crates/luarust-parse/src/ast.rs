@@ -218,6 +218,34 @@ pub struct Func {
     pub body: Vec<Stmt>,
 }
 
+/// A `loop.while`'s counter, when it names one. Same shape of decision as a counting
+/// loop's: something is being introduced, so somebody has to say how long it lives.
+#[derive(Clone, Debug)]
+pub struct Counter {
+    pub name: Ident,
+    pub ty: Ty,
+    pub ty_span: Span,
+    pub lifetime: Lifetime,
+    pub lifetime_span: Span,
+}
+
+/// `loop.while [ … ] { … }`, asked again before every pass.
+#[derive(Clone, Debug)]
+pub struct While {
+    pub span: Span,
+    pub counter: Option<Counter>,
+    pub condition: Expr,
+    pub body: Vec<Stmt>,
+}
+
+/// `break;` or `break when reached <value>;`
+#[derive(Clone, Debug)]
+pub struct Break {
+    pub span: Span,
+    /// The value the counter has to have reached, when the break is conditional.
+    pub reached: Option<Expr>,
+}
+
 /// `return;` or `return <value>;`
 #[derive(Clone, Debug)]
 pub struct Return {
@@ -254,6 +282,8 @@ pub enum Stmt {
     If(If),
     Func(Func),
     Return(Return),
+    While(While),
+    Break(Break),
     /// `greet['Tankun'];` — a call written for what it does, not for what it answers.
     Call(Expr),
     Defaults(Defaults),
@@ -270,6 +300,8 @@ impl Stmt {
             Stmt::If(s) => s.span,
             Stmt::Func(s) => s.span,
             Stmt::Return(s) => s.span,
+            Stmt::While(s) => s.span,
+            Stmt::Break(s) => s.span,
             Stmt::Call(s) => s.span(),
             Stmt::Defaults(s) => s.span,
         }

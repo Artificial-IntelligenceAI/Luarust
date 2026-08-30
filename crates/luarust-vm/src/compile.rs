@@ -57,6 +57,9 @@ struct Compiler {
     floor: Reg,
     /// The next free temporary.
     next: Reg,
+    /// Jumps waiting for the end of the loop being compiled, one per `break` inside it.
+    /// A `break` leaves the innermost loop, which is the one on top.
+    breaks: Vec<Vec<usize>>,
     /// The first register holding a constant, once the constants are known.
     const_base: Reg,
     /// How many of them there are. Zero on the first pass, when they are not known yet.
@@ -80,6 +83,7 @@ impl Compiler {
             },
             floor: temps,
             next: temps,
+            breaks: Vec::new(),
             const_base: base,
             preloaded,
         }
@@ -101,6 +105,7 @@ impl Compiler {
             },
             floor: base,
             next: base,
+            breaks: Vec::new(),
             const_base: base,
             // Nothing preloaded, so `const_operand` emits a `Const` where it is used.
             preloaded: 0,
@@ -213,6 +218,7 @@ impl Compiler {
 
                 let outer_floor = self.floor;
                 self.floor = self.next;
+                self.breaks.push(Vec::new());
 
                 // Counting down is an empty range, so leave before running anything.
                 let skip = self.emit(
@@ -237,6 +243,9 @@ impl Compiler {
 
                 self.land(skip);
                 self.land(done);
+                for jump in self.breaks.pop().expect("a loop opened one") {
+                    self.land(jump);
+                }
 
                 self.floor = outer_floor;
                 self.release();
@@ -274,6 +283,48 @@ impl Compiler {
                     self.land(jump);
                 }
                 self.release();
+            }
+
+            // The condition before every pass, and the counter one higher after each.
+            Stmt::While { counter, condition, body, span } => {
+                if let Some((slot, ty)) = counter {
+                    self.expr(&Expr::Const(Value::zero(*ty)), *slot as Reg, *span);
+                }
+
+                let outer_floor = self.floor;
+                self.floor = self.next;
+                self.breaks.push(Vec::new());
+
+                let top = self.here();
+                let mark = self.next;
+                let held = self.operand(condition, *span);
+                let done = self.emit(Op::JumpIfFalse { cond: held, target: 0 }, *span);
+                self.next = mark;
+
+                // Counted at the start of the pass, so afterwards it holds however many
+                // ran rather than one more than that.
+                if let Some((slot, ty)) = counter {
+                    let step = self.const_operand(one_of(*ty), *span);
+                    let reg = *slot as Reg;
+                    self.emit(
+                        Op::Binary { op: BinOp::Add, ty: *ty, dst: reg, lhs: reg, rhs: step },
+                        *span,
+                    );
+                }
+                self.block(body);
+                self.emit(Op::Jump { target: top }, *span);
+
+                self.land(done);
+                for jump in self.breaks.pop().expect("a loop opened one") {
+                    self.land(jump);
+                }
+                self.floor = outer_floor;
+                self.release();
+            }
+
+            Stmt::Break { span } => {
+                let jump = self.emit(Op::Jump { target: 0 }, *span);
+                self.breaks.last_mut().expect("`break` outside a loop was checked for").push(jump);
             }
 
             Stmt::Return { value, span } => {

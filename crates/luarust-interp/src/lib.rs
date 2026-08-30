@@ -37,6 +37,7 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Outcome<()> {
         // Nothing at the top level can return: the checker refuses a `return` outside a
         // function, so there is nothing here for one to mean.
         Flow::Returned(_) => unreachable!("`return` outside a function was checked for"),
+        Flow::Broke => unreachable!("`break` outside a loop was checked for"),
         Flow::Went => Ok(()),
     }
 }
@@ -44,6 +45,7 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Outcome<()> {
 /// What happened after a statement: either the next one runs, or the function is over.
 enum Flow {
     Went,
+    Broke,
     Returned(Option<Value>),
 }
 
@@ -117,6 +119,34 @@ impl Machine<'_> {
                 Ok(Flow::Went)
             }
 
+            // The condition before every pass, and the counter one higher after each.
+            Stmt::While { counter, condition, body, span } => {
+                if let Some((slot, ty)) = counter {
+                    self.slots[*slot] = Some(Value::zero(*ty));
+                }
+                loop {
+                    if !truth(&self.eval(condition, out)?) {
+                        return Ok(Flow::Went);
+                    }
+                    // Counted at the start of the pass, so during the first it is one and
+                    // afterwards it holds however many ran -- the same promise a counting
+                    // loop makes, which never steps past the last value it took.
+                    if let Some((slot, ty)) = counter {
+                        let held = self.slots[*slot].clone().expect("the counter was set");
+                        let next = binary_op(BinOp::Add, &held, &one_of(*ty), self.overflow)
+                            .map_err(|fault| Stopped { fault, span: *span })?;
+                        self.slots[*slot] = Some(next);
+                    }
+                    match self.block(body, out)? {
+                        Flow::Went => {}
+                        Flow::Broke => return Ok(Flow::Went),
+                        returned => return Ok(returned),
+                    }
+                }
+            }
+
+            Stmt::Break { .. } => Ok(Flow::Broke),
+
             Stmt::Return { value, .. } => {
                 let value = match value {
                     Some(expr) => Some(self.eval(expr, out)?),
@@ -153,9 +183,12 @@ impl Machine<'_> {
 
         loop {
             self.slots[slot] = Some(current.clone());
-            // A `return` inside the body leaves the loop and the function together.
-            if let Flow::Returned(value) = self.block(body, out)? {
-                return Ok(Flow::Returned(value));
+            // A `return` inside the body leaves the loop and the function together; a
+            // `break` leaves only the loop.
+            match self.block(body, out)? {
+                Flow::Went => {}
+                Flow::Broke => return Ok(Flow::Went),
+                returned => return Ok(returned),
             }
             if compare(&current, &to) != Comparison::Less {
                 return Ok(Flow::Went);
@@ -207,6 +240,7 @@ impl Machine<'_> {
             Flow::Returned(value) => Ok(value),
             // A function that answers nothing reaching its end is simply over.
             Flow::Went => Ok(None),
+            Flow::Broke => unreachable!("`break` outside a loop was checked for"),
         }
     }
 

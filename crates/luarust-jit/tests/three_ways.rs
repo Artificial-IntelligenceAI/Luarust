@@ -373,6 +373,62 @@ fn a_function_that_answers_nothing_still_does_its_work() {
 }
 
 #[test]
+fn a_while_loop_stops_when_it_is_told_to() {
+    assert_eq!(
+        ran("var.local.mut.ui32 ['n'] = [|1|];\n\
+             loop.while [math { 'n' < ui32 |100| }] {\n\
+                 set ['n'] = [math { 'n' x ui32 |2| }];\n\
+             }\n\
+             print['n' \\n];"),
+        "128\n"
+    );
+}
+
+#[test]
+fn a_while_loop_can_count_its_own_passes() {
+    assert_eq!(
+        ran("loop.temp.while.ui32 ['pass'] [|true|] {\n\
+                 print['pass' \\n];\n\
+                 break when reached |3|;\n\
+             }"),
+        "1\n2\n3\n"
+    );
+}
+
+#[test]
+fn a_perm_counter_afterwards_holds_the_passes_that_ran() {
+    // Counted at the start of the pass, so it is 1 during the first and 4 after four --
+    // not 5. A counting loop makes the same promise: it never steps past the last value.
+    assert_eq!(
+        ran("var.local.mut.ui32 ['n'] = [|1|];\n\
+             loop.perm.while.ui32 ['passes'] [math { 'n' < ui32 |16| }] {\n\
+                 set ['n'] = [math { 'n' x ui32 |2| }];\n\
+             }\n\
+             print['passes' \\n];"),
+        "4\n"
+    );
+    // And a loop that never runs leaves it at nothing.
+    assert_eq!(
+        ran("loop.perm.while.ui32 ['passes'] [|false|] { }\nprint['passes' \\n];"),
+        "0\n"
+    );
+}
+
+#[test]
+fn break_leaves_the_innermost_loop_and_nothing_more() {
+    assert_eq!(
+        ran("loop.temp.range.ui8 ['i'] = [|1|, |3|] {\n\
+                 loop.temp.range.ui8 ['j'] = [|1|, |9|] {\n\
+                     if [math { 'j' > ui8 |2| }] { break; }\n\
+                     print['i' 'j' \" \"];\n\
+                 }\n\
+             }\n\
+             print[\\n];"),
+        "11 12 21 22 31 32 \n"
+    );
+}
+
+#[test]
 fn generated_programs_agree_three_ways() {
     let mut taken = 0;
     let mut declined = 0;

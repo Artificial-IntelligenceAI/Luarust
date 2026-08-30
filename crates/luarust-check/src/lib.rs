@@ -68,6 +68,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         signatures: HashMap::new(),
         funcs: Vec::new(),
         inside: None,
+        loop_counter: None,
         errors: Vec::new(),
     };
 
@@ -107,6 +108,9 @@ struct Checker {
     /// What the function being checked answers, when one is being checked. The outer
     /// `Option` says whether we are in a function at all; the inner, whether it answers.
     inside: Option<Option<Ty>>,
+    /// The innermost loop's counter, when there is a loop. The outer `Option` says
+    /// whether we are in one at all; the inner, whether it counts.
+    loop_counter: Option<Option<(usize, Ty)>>,
     errors: Vec<Diagnostic>,
 }
 
@@ -189,6 +193,12 @@ impl Checker {
                     }
                 }
                 AStmt::If(if_stmt) => out.push(self.if_stmt(if_stmt)),
+                AStmt::While(while_stmt) => out.push(self.while_stmt(while_stmt)),
+                AStmt::Break(break_stmt) => {
+                    if let Some(checked) = self.break_stmt(break_stmt) {
+                        out.push(checked);
+                    }
+                }
                 // Read in their own passes, before and after this one.
                 AStmt::Func(_) => {}
                 AStmt::Return(ret) => {
@@ -360,7 +370,10 @@ impl Checker {
         if loop_stmt.lifetime == Lifetime::Temp {
             self.declare(&loop_stmt.counter.text, counter);
         }
+        let outer = self.loop_counter;
+        self.loop_counter = Some(Some((slot, loop_stmt.ty)));
         let body = self.block(&loop_stmt.body);
+        self.loop_counter = outer;
         self.scopes.pop();
 
         Some(ir::Stmt::Loop { slot, ty: loop_stmt.ty, from, to, body, span: loop_stmt.span })
@@ -449,6 +462,8 @@ impl Checker {
             let outer_slots = std::mem::replace(&mut self.slots, 0);
             let outer_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
             let outer_inside = self.inside.replace(func.returns);
+            // A function is not inside whatever loop its declaration happens to sit in.
+            let outer_loop = self.loop_counter.take();
 
             for param in &func.params {
                 let slot = self.next_slot();
@@ -484,6 +499,7 @@ impl Checker {
             self.slots = outer_slots;
             self.scopes = outer_scopes;
             self.inside = outer_inside;
+            self.loop_counter = outer_loop;
         }
     }
 
@@ -623,6 +639,91 @@ impl Checker {
 
         self.agree(returns, expected, span)?;
         Some(ir::Expr::Call { func: index, ty: returns, args, span })
+    }
+
+    /// `loop.while [ … ] { … }`, with a counter of its passes when it asked for one.
+    fn while_stmt(&mut self, while_stmt: &ast::While) -> ir::Stmt {
+        let condition = self.condition(&while_stmt.condition);
+
+        let counter = while_stmt.counter.as_ref().map(|counter| {
+            let slot = self.next_slot();
+            let var = Var {
+                slot,
+                ty: counter.ty,
+                mutable: false,
+                visibility: Visibility::Local,
+                declared_at: counter.name.span,
+                visibility_at: Some(counter.lifetime_span),
+            };
+            if counter.lifetime == Lifetime::Perm {
+                self.declare(&counter.name.text, var.clone());
+            }
+            (counter, slot, var)
+        });
+
+        self.scopes.push(HashMap::new());
+        if let Some((counter, _, var)) = &counter
+            && counter.lifetime == Lifetime::Temp
+        {
+            self.declare(&counter.name.text, var.clone());
+        }
+
+        let outer = self.loop_counter;
+        self.loop_counter = Some(counter.as_ref().map(|(c, slot, _)| (*slot, c.ty)));
+        let body = self.block(&while_stmt.body);
+        self.loop_counter = outer;
+        self.scopes.pop();
+
+        ir::Stmt::While {
+            counter: counter.map(|(c, slot, _)| (slot, c.ty)),
+            condition: condition.unwrap_or(ir::Expr::Const(Value::Bool(false))),
+            body,
+            span: while_stmt.span,
+        }
+    }
+
+    /// `break;`, or `break when reached x;` which is an `if` around a `break`.
+    fn break_stmt(&mut self, break_stmt: &ast::Break) -> Option<ir::Stmt> {
+        let Some(counter) = self.loop_counter else {
+            self.error(
+                Diagnostic::new("E0133", "there is no loop here to leave.".to_string())
+                    .primary(break_stmt.span, "written here")
+                    .rule("`break` leaves the loop it is written in")
+                    .fix("move it inside a loop."),
+            );
+            return None;
+        };
+
+        let Some(reached) = &break_stmt.reached else {
+            return Some(ir::Stmt::Break { span: break_stmt.span });
+        };
+
+        let Some((slot, ty)) = counter else {
+            self.error(
+                Diagnostic::new("E0134", "this loop has no counter to have reached anything.".to_string())
+                    .primary(break_stmt.span, "written here")
+                    .rule("`break when reached` compares the counter of the loop it is in")
+                    .tip("a `loop.while` counts its passes only if it is given a type and a name.")
+                    .fix("write plain `break;` inside an `if`, or give the loop a counter."),
+            );
+            return None;
+        };
+
+        let value = self.expr(reached, Some(ty))?;
+        Some(ir::Stmt::If {
+            arms: vec![ir::Arm {
+                condition: ir::Expr::Compare {
+                    op: luarust_parse::ast::CmpOp::Equal,
+                    operands: ty,
+                    lhs: Box::new(ir::Expr::Load { slot, ty, span: break_stmt.span }),
+                    rhs: Box::new(value),
+                    span: break_stmt.span,
+                },
+                body: vec![ir::Stmt::Break { span: break_stmt.span }],
+            }],
+            otherwise: Vec::new(),
+            span: break_stmt.span,
+        })
     }
 
     /// Something asked as a question, which has to be a `bool` and nothing else.
@@ -1402,6 +1503,34 @@ mod tests {
         assert_eq!(codes("return |1|;"), ["E0125"]);
         assert_eq!(codes("fn.local.nothing ['f'] [] { return |1|; }"), ["E0126"]);
         assert_eq!(codes("fn.local.i32 ['f'] [] { return; }"), ["E0127", "E0124"]);
+    }
+
+    #[test]
+    fn break_belongs_to_a_loop() {
+        clean("loop.while [|true|] { break; }");
+        clean("loop.temp.range.ui8 ['i'] = [|1|, |3|] { break; }");
+        // An `if` inside a loop is still inside the loop.
+        clean("loop.while [|true|] { if [|true|] { break; } }");
+        assert_eq!(codes("break;"), ["E0133"]);
+        // A function is not inside whatever loop its declaration sits in.
+        assert_eq!(
+            codes("loop.while [|true|] { }\nfn.local.nothing ['f'] [] { break; }"),
+            ["E0133"]
+        );
+    }
+
+    #[test]
+    fn break_when_reached_needs_a_counter_to_compare() {
+        clean("loop.temp.while.ui8 ['n'] [|true|] { break when reached |3|; }");
+        clean("loop.temp.range.ui8 ['i'] = [|1|, |9|] { break when reached |3|; }");
+        // A `while` loop that named no counter has nothing to have reached anything.
+        assert_eq!(codes("loop.while [|true|] { break when reached |3|; }"), ["E0134"]);
+    }
+
+    #[test]
+    fn a_while_loops_condition_is_a_question_like_any_other() {
+        clean("var.local.bool ['f'] = [|true|]; loop.while ['f'] { break; }");
+        assert_eq!(codes("var.local.i32 ['n'] = [|1|]; loop.while ['n'] { break; }"), ["E0221"]);
     }
 
 }

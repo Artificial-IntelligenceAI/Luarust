@@ -172,10 +172,11 @@ impl<'a> Parser<'a> {
             Some("set") => self.set_stmt().map(Stmt::Set),
             Some("handback") => self.handback_stmt().map(Stmt::Handback),
             Some("print") => self.print_stmt().map(Stmt::Print),
-            Some("loop") => self.loop_stmt().map(Stmt::Loop),
+            Some("loop") => self.loop_stmt(),
             Some("if") => self.if_stmt().map(Stmt::If),
             Some("fn") => self.func_decl().map(Stmt::Func),
             Some("return") => self.return_stmt().map(Stmt::Return),
+            Some("break") => self.break_stmt().map(Stmt::Break),
             // Anything else that is a bare word before a list is a call written for its
             // effect. `print` is the one the language ships with; the rest are yours.
             Some(_) if self.peek_at(1).kind == Kind::OpenList => {
@@ -187,14 +188,14 @@ impl<'a> Parser<'a> {
             Some(other) => self.fail(
                 Diagnostic::new("E0101", format!("`{other}` does not begin a statement."))
                     .primary(start.span, "written here")
-                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if`, `fn`, `return` or `defaults`")
+                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if`, `fn`, `return`, `break` or `defaults`")
                     .tip("a name is written in quotes, so a bare word here is being read as a keyword.")
                     .fix("check the spelling, or put the statement's keyword in front of it."),
             ),
             None => self.fail(
                 Diagnostic::new("E0101", "a statement was expected here.")
                     .primary(start.span, format!("{} is here instead", start.kind.describe()))
-                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if`, `fn`, `return` or `defaults`")
+                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if`, `fn`, `return`, `break` or `defaults`")
                     .fix("begin the statement with one of those words."),
             ),
         }
@@ -428,7 +429,8 @@ impl<'a> Parser<'a> {
     }
 
     /// `loop` `.temp|.perm` `.range` `.type` `[` name `]` `=` `[` from `,` to `]` `{` body `}`
-    fn loop_stmt(&mut self) -> Result<Loop> {
+    /// `loop.…` — a counting loop or a conditional one, told apart by the chain.
+    fn loop_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span; // `loop`
         let chain = self.chain_words();
 
@@ -439,18 +441,114 @@ impl<'a> Parser<'a> {
             match word.as_str() {
                 "temp" => lifetime = Some((Lifetime::Temp, *span)),
                 "perm" => lifetime = Some((Lifetime::Perm, *span)),
-                "range" => kind = Some((word.clone(), *span)),
+                "range" | "while" => kind = Some((word.clone(), *span)),
                 other => match Ty::from_word(other) {
                     Some(found) => ty = Some((found, *span)),
                     None => self.errors.push(
                         Diagnostic::new("E0102", format!("`{other}` is not part of a loop."))
                             .primary(*span, "written here")
                             .rule("a loop's chain says how long its counter lives, what kind of loop it is, and the counter's type")
-                            .fix("use `temp` or `perm`, then `range`, then a type."),
+                            .fix("use `temp` or `perm`, then `range` or `while`, then a type."),
                     ),
                 },
             }
         }
+
+        if kind.as_ref().is_some_and(|(word, _)| word == "while") {
+            return self.while_loop(start, lifetime, ty).map(Stmt::While);
+        }
+        self.counting_loop(start, lifetime, kind, ty).map(Stmt::Loop)
+    }
+
+    /// `loop.while [ … ] { … }`, with a counter only if the chain asked for one.
+    fn while_loop(
+        &mut self,
+        start: Span,
+        lifetime: Option<(Lifetime, Span)>,
+        ty: Option<(Ty, Span)>,
+    ) -> Result<While> {
+        let counter = match ty {
+            None => {
+                if let Some((_, span)) = lifetime {
+                    self.errors.push(
+                        Diagnostic::new("E0131", "this loop has no counter to say that about.".to_string())
+                            .primary(span, "written here")
+                            .rule("`temp` and `perm` say how long a counter lives, and a `while` loop only has one if it asks for one")
+                            .tip("`loop.temp.while.ui32 ['n'] [ … ]` counts its passes; `loop.while [ … ]` does not.")
+                            .fix("delete it, or add a type and a name."),
+                    );
+                }
+                None
+            }
+            Some((ty, ty_span)) => {
+                let Some((lifetime, lifetime_span)) = lifetime else {
+                    return self.fail(
+                        Diagnostic::new("E0108", "this loop does not say how long its counter lives.".to_string())
+                            .primary(start, "written here")
+                            .rule("a loop says `temp` or `perm`")
+                            .tip("`temp` means the counter is gone at the closing brace; `perm` means it is still there afterwards, holding the last value it took.")
+                            .fix("write `loop.temp.while…` or `loop.perm.while…`."),
+                    );
+                };
+                self.expect(Kind::OpenList, "a loop names its counter in `[ ]`")?;
+                let token = self.expect(Kind::Name, "a loop's counter is named in quotes")?;
+                let name = Ident {
+                    text: name_value(self.text(token)).to_string(),
+                    span: token.span,
+                };
+                self.expect(Kind::CloseList, "a list of names closes with `]`")?;
+                Some(Counter { name, ty, ty_span, lifetime, lifetime_span })
+            }
+        };
+
+        self.expect(Kind::OpenList, "a condition is asked in `[ ]`")?;
+        let condition = self.value_expr()?;
+        self.expect(Kind::CloseList, "a condition closes with `]`")?;
+        let (body, end) = self.braced_body("a loop")?;
+        Ok(While { span: start.to(end), counter, condition, body })
+    }
+
+    /// `break;` or `break when reached <value>;`
+    fn break_stmt(&mut self) -> Result<Break> {
+        let start = self.advance().span; // `break`
+        if self.eat(Kind::Semicolon) {
+            return Ok(Break { span: start, reached: None });
+        }
+
+        let when = self.peek();
+        if self.word() != Some("when") {
+            return self.fail(
+                Diagnostic::new("E0132", "a `break` either stops, or says when to.".to_string())
+                    .primary(when.span, format!("{} is here instead", when.kind.describe()))
+                    .rule("`break` is followed by `;` or by `when reached`")
+                    .fix("write `break;`, or `break when reached <value>;`."),
+            );
+        }
+        self.advance(); // `when`
+
+        let reached = self.peek();
+        if self.word() != Some("reached") {
+            return self.fail(
+                Diagnostic::new("E0132", "a `break when` says what was reached.".to_string())
+                    .primary(reached.span, format!("{} is here instead", reached.kind.describe()))
+                    .rule("`break` is followed by `;` or by `when reached`")
+                    .fix("write `break when reached <value>;`."),
+            );
+        }
+        self.advance(); // `reached`
+
+        let value = self.value_expr()?;
+        let end = self.expect(Kind::Semicolon, "a statement ends with `;`")?;
+        Ok(Break { span: start.to(end.span), reached: Some(value) })
+    }
+
+    fn counting_loop(
+        &mut self,
+        start: Span,
+        lifetime: Option<(Lifetime, Span)>,
+        kind: Option<(String, Span)>,
+        ty: Option<(Ty, Span)>,
+    ) -> Result<Loop> {
 
         let Some((lifetime, lifetime_span)) = lifetime else {
             return self.fail(
@@ -465,8 +563,11 @@ impl<'a> Parser<'a> {
             return self.fail(
                 Diagnostic::new("E0109", "this loop does not say what kind of loop it is.")
                     .primary(start, "written here")
-                    .rule("a counting loop says `range`")
-                    .fix(format!("write `loop.{}.range…`.", if lifetime == Lifetime::Temp { "temp" } else { "perm" })),
+                    .rule("a counting loop says `range` and a conditional one says `while`")
+                    .fix(format!(
+                        "write `loop.{0}.range…` to count, or `loop.{0}.while…` to keep going while something holds.",
+                        if lifetime == Lifetime::Temp { "temp" } else { "perm" }
+                    )),
             );
         }
         let Some((ty, ty_span)) = ty else {
@@ -1509,6 +1610,43 @@ mod tests {
         let Stmt::Func(func) = &program.stmts[0] else { panic!("a function") };
         let Stmt::Return(ret) = &func.body[0] else { panic!("a return") };
         assert!(ret.value.is_none());
+    }
+
+    #[test]
+    fn a_while_loop_counts_its_passes_only_if_it_asks_to() {
+        let program = clean("loop.while [|true|] { print[\"x\"]; }");
+        let Stmt::While(while_stmt) = &program.stmts[0] else { panic!("a while loop") };
+        assert!(while_stmt.counter.is_none());
+
+        let program = clean("loop.temp.while.ui32 ['n'] [|true|] { print['n']; }");
+        let Stmt::While(while_stmt) = &program.stmts[0] else { panic!("a while loop") };
+        let counter = while_stmt.counter.as_ref().expect("it named one");
+        assert_eq!(counter.name.text, "n");
+        assert_eq!(counter.ty, Ty::U32);
+        assert_eq!(counter.lifetime, Lifetime::Temp);
+    }
+
+    #[test]
+    fn a_while_loop_with_no_counter_has_no_lifetime_to_state() {
+        // `temp` and `perm` are about a counter, and this one has none.
+        assert_eq!(codes("loop.temp.while [|true|] { }"), ["E0131"]);
+        // But one with a counter must say.
+        assert_eq!(codes("loop.while.ui32 ['n'] [|true|] { }"), ["E0108"]);
+    }
+
+    #[test]
+    fn break_either_stops_or_says_when() {
+        let program = clean("loop.while [|true|] { break; }");
+        let Stmt::While(while_stmt) = &program.stmts[0] else { panic!("a while loop") };
+        assert!(matches!(&while_stmt.body[0], Stmt::Break(b) if b.reached.is_none()));
+
+        let program = clean("loop.temp.while.ui8 ['n'] [|true|] { break when reached |3|; }");
+        let Stmt::While(while_stmt) = &program.stmts[0] else { panic!("a while loop") };
+        assert!(matches!(&while_stmt.body[0], Stmt::Break(b) if b.reached.is_some()));
+
+        // Anything else after `break` is a mistake with a name.
+        assert_eq!(codes("loop.while [|true|] { break |3|; }"), ["E0132"]);
+        assert_eq!(codes("loop.while [|true|] { break when |3|; }"), ["E0132"]);
     }
 
 }

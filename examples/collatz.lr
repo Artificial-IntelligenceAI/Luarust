@@ -1,0 +1,13 @@
+-- How many steps the Collatz sequence takes to reach one. Nobody knows a bound, which
+-- is exactly why this cannot be a counting loop.
+var.local.mut.ui64 ['n'] = [|27|];
+
+loop.perm.while.ui32 ['steps'] [math { 'n' != ui64 |1| }] {
+    if [math { 'n' mod ui64 |2| = ui64 |0| }] {
+        set ['n'] = [math { 'n' div ui64 |2| }];
+    } else {
+        set ['n'] = [math { ('n' x ui64 |3|) + ui64 |1| }];
+    }
+}
+
+print["27 reaches 1 in " 'steps' " steps" \n];

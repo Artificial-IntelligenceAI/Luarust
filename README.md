@@ -378,6 +378,47 @@ loop.temp.range.ui8 ['i'] = [|1|, |5|] {
 bounds are **inclusive**: one to five is five passes, the way a range is read in
 mathematics.
 
+### Looping until something changes
+
+A counting loop needs both its bounds before it starts. When you do not know how many
+times, say what has to keep being true instead:
+
+```luarust
+loop.while [math { 'delta' > b64 |0.000001| }] {
+    …
+}
+```
+
+The condition is asked again before every pass. There is no `temp`/`perm` in the chain,
+because there is no counter to say it about — until you ask for one, and then there is:
+
+```luarust
+loop.temp.while.ui32 ['pass'] [|true|] {
+    print["pass " 'pass' \n];
+    break when reached |3|;
+}
+```
+
+`pass` is 1 the first time round, counted at the start of each pass — so afterwards it
+holds however many ran, not one more than that. A loop whose condition was false from the
+start leaves it at nothing. It is a real variable like any other: print it, do arithmetic
+with it, keep it after the loop with `perm`.
+
+**`break` leaves the innermost loop**, in a counting loop as much as a conditional one:
+
+```luarust
+loop.temp.range.ui32 ['i'] = [|1|, count['xs']] {
+    if [math { 'xs'['i'] > ui32 |100| }] {
+        set ['found'] = ['i'];
+        break;
+    }
+}
+```
+
+`break when reached |7|;` is the same thing with the `if` folded in — it compares against
+the counter of the loop it is in, so it is an error in a `while` loop that never asked for
+one. The message says exactly that rather than guessing.
+
 ### How long the counter lives
 
 `temp` and `perm` say whether the counter outlives the loop, and one of them has to be

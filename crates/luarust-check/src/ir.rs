@@ -56,6 +56,17 @@ pub enum Stmt {
     Return { value: Option<Expr>, span: Span },
     /// Call something for what it does. Whatever it answers, if anything, is dropped.
     Call { func: usize, args: Vec<Expr>, span: Span },
+    /// Run the body while the condition holds, asked again before every pass. `counter`
+    /// is the slot counting passes, when the loop asked for one.
+    While {
+        counter: Option<(usize, Ty)>,
+        condition: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    /// Leave the innermost loop. `break when reached` is not here: the checker turns it
+    /// into an `if` around one of these, so nothing downstream has two things to learn.
+    Break { span: Span },
 }
 
 /// One condition and what to do about it.

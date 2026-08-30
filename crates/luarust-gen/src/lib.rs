@@ -73,6 +73,7 @@ pub fn program(seed: u64) -> Written {
         depth: 0,
         names: 0,
         inside: None,
+        loops: 0,
         calls: 0,
     };
     writer.program();
@@ -111,6 +112,9 @@ struct Writer {
     names: usize,
     /// What the function being written answers, when one is being written.
     inside: Option<Option<Ty>>,
+    /// How many loops deep the statement being written is, so a `break` is only written
+    /// where there is something to break out of.
+    loops: usize,
     /// How many calls deep the expression being written is. A call's arguments are values
     /// like any other, so they may be calls too -- and without a limit here the generator
     /// writes `f0[f1[f2[…` until it runs out of its own stack.
@@ -153,6 +157,8 @@ impl Writer {
             6 if self.depth < 2 => self.loop_stmt(),
             7 if self.depth < 2 => self.if_stmt(),
             8 if !self.funcs.is_empty() => self.call_stmt(),
+            9 if self.depth < 2 => self.while_loop(),
+            _ if self.loops > 0 && self.rng.below(6) == 0 => self.break_stmt(),
             _ => self.print(),
         }
     }
@@ -212,6 +218,7 @@ impl Writer {
         let outer_scope = std::mem::take(&mut self.scope);
         let outer_depth = std::mem::replace(&mut self.depth, 1);
         let outer_inside = self.inside.replace(returns);
+        let outer_loops = std::mem::take(&mut self.loops);
         for (n, ty) in params.iter().enumerate() {
             self.scope.push(Known { name: format!("p{n}"), ty: *ty, mutable: false, depth: 1 });
         }
@@ -232,6 +239,7 @@ impl Writer {
         self.scope = outer_scope;
         self.depth = outer_depth;
         self.inside = outer_inside;
+        self.loops = outer_loops;
         self.line("}");
 
         self.funcs.push(Signature { name, params, returns, recursive: false });
@@ -356,6 +364,7 @@ impl Writer {
         ));
 
         self.depth += 1;
+        self.loops += 1;
         let counter = Known { name: name.clone(), ty, mutable: false, depth: self.depth };
         self.scope.push(counter.clone());
 
@@ -365,6 +374,7 @@ impl Writer {
         }
 
         self.depth -= 1;
+        self.loops -= 1;
         // Everything the body declared is out of reach now. A `perm` counter is not.
         let depth = self.depth;
         self.scope.retain(|known| known.depth <= depth);
@@ -373,6 +383,41 @@ impl Writer {
         }
 
         self.line("}");
+    }
+
+    /// A loop that runs while something holds -- and always stops, because the last thing
+    /// in its body counts its own passes and leaves. A generated condition that happened
+    /// never to become false would otherwise be a fuzzer that never finishes.
+    fn while_loop(&mut self) {
+        let lifetime = if self.rng.below(2) == 0 { "temp" } else { "perm" };
+        let name = self.fresh_name();
+        let condition = self.condition(0);
+        self.line(&format!("loop.{lifetime}.while.ui8 ['{name}'] [math {{ {condition} }}] {{"));
+
+        self.depth += 1;
+        self.loops += 1;
+        let counter = Known { name: name.clone(), ty: Ty::U8, mutable: false, depth: self.depth };
+        self.scope.push(counter.clone());
+
+        let body = self.rng.below(3);
+        for _ in 0..body {
+            self.statement();
+        }
+        let passes = 1 + self.rng.below(6);
+        self.line(&format!("break when reached |{passes}|;"));
+
+        self.depth -= 1;
+        self.loops -= 1;
+        let depth = self.depth;
+        self.scope.retain(|known| known.depth <= depth);
+        if lifetime == "perm" {
+            self.scope.push(Known { depth, ..counter });
+        }
+        self.line("}");
+    }
+
+    fn break_stmt(&mut self) {
+        self.line("break;");
     }
 
     fn print(&mut self) {

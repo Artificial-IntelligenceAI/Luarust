@@ -208,6 +208,9 @@ struct Emitter<'ctx> {
     /// Where each fault can happen, so a code can be turned back into a place.
     spans: Vec<Span>,
     overflow: Overflow,
+    /// Where each loop being emitted ends, innermost last, so a `break` knows where to
+    /// branch to.
+    loop_ends: Vec<inkwell::basic_block::BasicBlock<'ctx>>,
     helpers: Helpers<'ctx>,
 }
 
@@ -377,6 +380,7 @@ impl<'ctx> Emitter<'ctx> {
             answer_slot,
             spans: Vec::new(),
             overflow: program.overflow,
+            loop_ends: Vec::new(),
             funcs: Vec::new(),
             constants: Vec::new(),
             frame: Vec::new(),
@@ -513,6 +517,46 @@ impl<'ctx> Emitter<'ctx> {
         self.out_slot = outer_out;
         self.answer_slot = outer_answer;
         self.main = outer_main;
+    }
+
+    /// `loop.while`: ask, run, count, ask again.
+    fn while_stmt(
+        &mut self,
+        counter: Option<(usize, Ty)>,
+        condition: &Expr,
+        body: &[Stmt],
+        span: Span,
+    ) {
+        if let Some((slot, ty)) = counter {
+            let zero = self.constant(&Value::zero(ty));
+            let bits = self.to_bits(zero, ty);
+            self.builder.build_store(self.slots[slot], bits).expect("a store");
+        }
+
+        let check = self.context.append_basic_block(self.main, "while.check");
+        let top = self.context.append_basic_block(self.main, "while.top");
+        let done = self.context.append_basic_block(self.main, "while.done");
+        self.builder.build_unconditional_branch(check).expect("a branch");
+
+        self.builder.position_at_end(check);
+        let held = self.truth(condition);
+        self.builder.build_conditional_branch(held, top, done).expect("a branch");
+
+        self.builder.position_at_end(top);
+        // Counted at the start of the pass, so afterwards it holds however many ran.
+        if let Some((slot, ty)) = counter {
+            let held = self.load(slot, ty);
+            let one = self.one(ty);
+            let next = self.arithmetic(BinOp::Add, held, one, ty, span);
+            let bits = self.to_bits(next, ty);
+            self.builder.build_store(self.slots[slot], bits).expect("a store");
+        }
+        self.loop_ends.push(done);
+        self.block(body);
+        self.loop_ends.pop();
+        self.builder.build_unconditional_branch(check).expect("a branch");
+
+        self.builder.position_at_end(done);
     }
 
     /// A call: stage what has to travel through the runtime, pass the rest as arguments,
@@ -754,6 +798,18 @@ impl<'ctx> Emitter<'ctx> {
 
             Stmt::If { arms, otherwise, .. } => self.if_stmt(arms, otherwise),
 
+            Stmt::While { counter, condition, body, span } => {
+                self.while_stmt(*counter, condition, body, *span)
+            }
+
+            Stmt::Break { .. } => {
+                let end = *self.loop_ends.last().expect("`break` outside a loop was checked for");
+                self.builder.build_unconditional_branch(end).expect("a branch");
+                // Nothing after a `break` runs, and LLVM still wants it somewhere.
+                let after = self.context.append_basic_block(self.main, "after.break");
+                self.builder.position_at_end(after);
+            }
+
             Stmt::Return { value, span } => {
                 let answered = value.as_ref().map(|expr| self.expr(expr));
                 let returns = answered.as_ref().map(|(_, ty)| *ty);
@@ -840,7 +896,9 @@ impl<'ctx> Emitter<'ctx> {
         self.builder.build_conditional_branch(past, done, top).expect("a branch");
 
         self.builder.position_at_end(top);
+        self.loop_ends.push(done);
         self.block(body);
+        self.loop_ends.pop();
         let finished = self.loop_test(counter, slot, ty, limit, CmpOp::Equal);
         self.builder.build_conditional_branch(finished, done, step).expect("a branch");
 
