@@ -85,6 +85,20 @@ set ['a', 'b'] = ['10', '20'];
 var.local.mut [b16 'a', b64 'b'] = ['1', '2'];
 ```
 
+### Adding to something
+
+Adding to a variable is common enough to be worth its own word. Said with `set`, the
+name has to appear twice and the brackets get in the way of a very small idea:
+
+```luarust
+set ['total'] = [math { 'total' + 'i' }];
+handback 'i' as 'total';                     -- the same thing
+```
+
+`handback` adds, and only adds. A running product or a subtraction is a `set` — piling
+operations onto `handback` would cost it the readability that is its whole reason for
+existing. The target has to be `mut`, the same as any other change.
+
 ## Printing
 
 `print` takes its items in brackets, juxtaposed rather than separated by anything:
@@ -240,7 +254,7 @@ before it:
 var.local.mut.ui32 ['total'] = ['0'];
 
 loop.temp.range.ui8 ['i'] = ['1', '10'] {
-    set ['total'] = [math { 'total' + 'i' }];
+    handback 'i' as 'total';
 }
 
 print["total is " 'total' \n];
