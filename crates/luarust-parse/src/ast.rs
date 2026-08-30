@@ -8,7 +8,7 @@ use luarust_diag::Span;
 // These three say nothing about syntax -- they are the types and operators a program
 // still needs while it is running, long after the parser is gone -- so they live in
 // `luarust-core` and are only named from here.
-pub use luarust_core::{BinOp, CmpOp, Ty};
+pub use luarust_core::{BinOp, CmpOp, LogicOp, Ty};
 
 /// A name, as written between its quotes.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -96,6 +96,10 @@ pub enum Expr {
     /// operators become legal.
     Math { inner: Box<Expr>, span: Span },
     /// `a < b`, `a > b`, `a = b`. Answers `bool` whatever its two sides were.
+    /// `and` or `or`. Both sides are conditions, and so is the answer.
+    Logic { op: LogicOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    /// `not`, which turns a condition around.
+    Not { operand: Box<Expr>, span: Span },
     Compare { op: CmpOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
 }
 
@@ -110,7 +114,9 @@ impl Expr {
             | Expr::Binary { span, .. }
             | Expr::Math { span, .. }
             | Expr::TypedLiteral { span, .. }
-            | Expr::Compare { span, .. } => *span,
+            | Expr::Compare { span, .. }
+            | Expr::Logic { span, .. }
+            | Expr::Not { span, .. } => *span,
             Expr::Name(ident) => ident.span,
         }
     }
@@ -181,6 +187,25 @@ pub struct Defaults {
     pub behaviour_span: Span,
 }
 
+/// One `if` or `else-if`: something to ask, and what to do when the answer is yes.
+#[derive(Clone, Debug)]
+pub struct Arm {
+    pub span: Span,
+    pub condition: Expr,
+    pub body: Vec<Stmt>,
+}
+
+/// `if [ … ] { … } else-if [ … ] { … } else { … }`
+///
+/// The `if` and every `else-if` are the same shape, so they are one list. `else` has no
+/// condition, which is the only thing that makes it different.
+#[derive(Clone, Debug)]
+pub struct If {
+    pub span: Span,
+    pub arms: Vec<Arm>,
+    pub otherwise: Option<Vec<Stmt>>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Var(Var),
@@ -188,6 +213,7 @@ pub enum Stmt {
     Handback(Handback),
     Print(Print),
     Loop(Loop),
+    If(If),
     Defaults(Defaults),
 }
 
@@ -199,6 +225,7 @@ impl Stmt {
             Stmt::Handback(s) => s.span,
             Stmt::Print(s) => s.span,
             Stmt::Loop(s) => s.span,
+            Stmt::If(s) => s.span,
             Stmt::Defaults(s) => s.span,
         }
     }

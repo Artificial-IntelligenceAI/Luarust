@@ -113,6 +113,8 @@ fn the_programs_are_worth_running() {
     let all: String = (1..=800).map(|seed| luarust_gen::program(seed).source).collect();
     for construct in [
         "loop.temp", "loop.perm", "handback", "set [", "math {", " mod ", " div ", "**",
+        // Branching, and the three words that join conditions.
+        "if [", "else-if [", "} else {", " and ", " or ", "not (",
         // The comparisons -- every spelling of every one, since a spelling that is never
         // written is a spelling nobody ever finds out is broken -- and the two types that
         // are not numbers.

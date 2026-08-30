@@ -173,18 +173,19 @@ impl<'a> Parser<'a> {
             Some("handback") => self.handback_stmt().map(Stmt::Handback),
             Some("print") => self.print_stmt().map(Stmt::Print),
             Some("loop") => self.loop_stmt().map(Stmt::Loop),
+            Some("if") => self.if_stmt().map(Stmt::If),
             Some("defaults") => self.defaults_stmt().map(Stmt::Defaults),
             Some(other) => self.fail(
                 Diagnostic::new("E0101", format!("`{other}` does not begin a statement."))
                     .primary(start.span, "written here")
-                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop` or `defaults`")
+                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if` or `defaults`")
                     .tip("a name is written in quotes, so a bare word here is being read as a keyword.")
                     .fix("check the spelling, or put the statement's keyword in front of it."),
             ),
             None => self.fail(
                 Diagnostic::new("E0101", "a statement was expected here.")
                     .primary(start.span, format!("{} is here instead", start.kind.describe()))
-                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop` or `defaults`")
+                    .rule("a statement begins with `var`, `set`, `handback`, `print`, `loop`, `if` or `defaults`")
                     .fix("begin the statement with one of those words."),
             ),
         }
@@ -512,6 +513,86 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `if [ … ] { … } else-if [ … ] { … } else { … }`
+    ///
+    /// The `if` and its `else-if`s are the same shape and are kept in one list. `else`
+    /// closes the chain, and nothing may follow it.
+    fn if_stmt(&mut self) -> Result<If> {
+        let start = self.advance().span; // `if`
+        let mut arms = vec![self.arm(start)?];
+        let mut otherwise = None;
+        let mut end = arms[0].span;
+
+        loop {
+            match self.word() {
+                Some("else-if") => {
+                    if otherwise.is_some() {
+                        let at = self.peek().span;
+                        return self.fail(
+                            Diagnostic::new("E0117", "this `else-if` comes after the `else`.")
+                                .primary(at, "written here")
+                                .rule("`else` is the last thing in an `if`, because nothing is left to ask")
+                                .fix("move it above the `else`."),
+                        );
+                    }
+                    let at = self.advance().span;
+                    let arm = self.arm(at)?;
+                    end = arm.span;
+                    arms.push(arm);
+                }
+                Some("else") => {
+                    if otherwise.is_some() {
+                        let at = self.peek().span;
+                        return self.fail(
+                            Diagnostic::new("E0118", "this `if` has two `else`s.")
+                                .primary(at, "written here")
+                                .rule("an `if` has one `else`, which is what happens when nothing else did")
+                                .fix("delete one of them, or make it an `else-if`."),
+                        );
+                    }
+                    let at = self.advance().span;
+                    let body = self.braced_body("an `else`")?;
+                    end = at.to(body.1);
+                    otherwise = Some(body.0);
+                }
+                _ => break,
+            }
+        }
+
+        Ok(If { span: start.to(end), arms, otherwise })
+    }
+
+    /// The `[ condition ] { body }` that an `if` and an `else-if` both are.
+    fn arm(&mut self, start: Span) -> Result<Arm> {
+        self.expect(Kind::OpenList, "a condition is asked in `[ ]`")?;
+        let condition = self.value_expr()?;
+        self.expect(Kind::CloseList, "a condition closes with `]`")?;
+        let (body, end) = self.braced_body("an `if`")?;
+        Ok(Arm { span: start.to(end), condition, body })
+    }
+
+    /// `{ statements }`, and where it ended.
+    fn braced_body(&mut self, whose: &str) -> Result<(Vec<Stmt>, Span)> {
+        self.expect(Kind::OpenBlock, "a body opens with `{`")?;
+        let mut body = Vec::new();
+        while self.peek_kind() != Kind::CloseBlock {
+            if self.peek_kind() == Kind::End {
+                return self.fail(
+                    Diagnostic::new("E0107", format!("{whose} body is never closed."))
+                        .primary(self.peek().span, "the file ends here")
+                        .rule("a block opens with `{` and closes with `}`")
+                        .fix("add a `}` to close it."),
+                );
+            }
+            match self.statement() {
+                Ok(stmt) => body.push(stmt),
+                Err(Failed) => self.recover(),
+            }
+        }
+        let end = self.advance().span; // `}`
+        Ok((body, end))
+    }
+
     /// `defaults.setting.behaviour;`
     fn defaults_stmt(&mut self) -> Result<Defaults> {
         let start = self.advance().span; // `defaults`
@@ -571,7 +652,7 @@ impl<'a> Parser<'a> {
             Kind::Word if self.word() == Some("math") => {
                 let start = self.advance().span;
                 self.expect(Kind::OpenBlock, "`math` takes its arithmetic in `{ }`")?;
-                let inner = self.comparison()?;
+                let inner = self.condition()?;
                 let close = self.expect(Kind::CloseBlock, "a math block closes with `}`")?;
                 Ok(Expr::Math { inner: Box::new(inner), span: start.to(close.span) })
             }
@@ -621,6 +702,46 @@ impl<'a> Parser<'a> {
     /// once, and most languages read it as comparing a `bool` to a number, which is
     /// nonsense — so rather than pick the wrong one quietly, a second comparison is an
     /// error that says the first one is what needs deciding.
+    /// The whole of what a `math` block may hold, loosest first: `or`, then `and`, then
+    /// `not`, then a comparison, then the arithmetic.
+    ///
+    /// `not` binds tighter than `and` and looser than a comparison, so `not 'a' = 'b'`
+    /// asks whether they are *not* equal, which is how it reads aloud.
+    fn condition(&mut self) -> Result<Expr> {
+        let mut lhs = self.conjunction()?;
+        while self.word() == Some("or") {
+            self.advance();
+            let rhs = self.conjunction()?;
+            let span = lhs.span().to(rhs.span());
+            lhs = Expr::Logic { op: LogicOp::Or, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
+    fn conjunction(&mut self) -> Result<Expr> {
+        let mut lhs = self.negation()?;
+        while self.word() == Some("and") {
+            self.advance();
+            let rhs = self.negation()?;
+            let span = lhs.span().to(rhs.span());
+            lhs = Expr::Logic { op: LogicOp::And, lhs: Box::new(lhs), rhs: Box::new(rhs), span };
+        }
+        Ok(lhs)
+    }
+
+    fn negation(&mut self) -> Result<Expr> {
+        // A `not` with something after it turns that around. A `not` with an `=` after it
+        // is the other `not`, the one that spells `!=`, and that is the comparison's to
+        // read -- but it can only appear after something, so it is never seen here.
+        if self.word() == Some("not") && self.peek_at(1).kind != Kind::Equals {
+            let start = self.advance().span;
+            let operand = self.negation()?;
+            let span = start.to(operand.span());
+            return Ok(Expr::Not { operand: Box::new(operand), span });
+        }
+        self.comparison()
+    }
+
     fn comparison(&mut self) -> Result<Expr> {
         let lhs = self.sum()?;
         let op = match (self.peek_kind(), self.word()) {
@@ -770,7 +891,7 @@ impl<'a> Parser<'a> {
             }
             Kind::OpenGroup => {
                 self.advance();
-                let inner = self.comparison()?;
+                let inner = self.condition()?;
                 self.expect(Kind::CloseGroup, "a group opened with `(` closes with `)`")?;
                 Ok(inner)
             }
@@ -833,6 +954,10 @@ mod tests {
             Expr::Compare { op, lhs, rhs, .. } => {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }
+            Expr::Logic { op, lhs, rhs, .. } => {
+                format!("({} {} {})", op.word(), show(lhs), show(rhs))
+            }
+            Expr::Not { operand, .. } => format!("(not {})", show(operand)),
         }
     }
 
@@ -1119,4 +1244,53 @@ mod tests {
         let mutable = var.bindings[0].mutable_span.unwrap();
         assert_eq!(&source[mutable.start..mutable.end], "mut");
     }
+    #[test]
+    fn an_if_takes_its_arms_in_order() {
+        let program = clean(
+            "if ['true'] { print[\"a\"]; }\n\
+             else-if ['false'] { print[\"b\"]; }\n\
+             else-if ['false'] { print[\"c\"]; }\n\
+             else { print[\"d\"]; }",
+        );
+        let Stmt::If(if_stmt) = &program.stmts[0] else { panic!("an if") };
+        // The `if` and both `else-if`s are the same shape, so they are one list.
+        assert_eq!(if_stmt.arms.len(), 3);
+        assert!(if_stmt.otherwise.is_some());
+    }
+
+    #[test]
+    fn an_if_needs_neither_an_else_nor_an_else_if() {
+        let program = clean("if ['true'] { print[\"a\"]; }");
+        let Stmt::If(if_stmt) = &program.stmts[0] else { panic!("an if") };
+        assert_eq!(if_stmt.arms.len(), 1);
+        assert!(if_stmt.otherwise.is_none());
+    }
+
+    #[test]
+    fn nothing_may_follow_the_else() {
+        assert_eq!(
+            codes("if ['true'] { } else { } else-if ['true'] { }"),
+            ["E0117"]
+        );
+        assert_eq!(codes("if ['true'] { } else { } else { }"), ["E0118"]);
+    }
+
+    #[test]
+    fn or_is_looser_than_and_which_is_looser_than_not() {
+        // `a or b and c` is `a or (b and c)`, and `not a and b` is `(not a) and b`.
+        assert_eq!(math("'a' or 'b' and 'c'"), "(or a (and b c))");
+        assert_eq!(math("not 'a' and 'b'"), "(and (not a) b)");
+        // And `not` is looser than a comparison, so it turns the whole comparison around
+        // rather than one side of it.
+        assert_eq!(math("not 'a' = 'b'"), "(not (= a b))");
+    }
+
+    #[test]
+    fn the_two_nots_do_not_collide() {
+        // `not` before something turns it around; `not` before `=` is a way of spelling
+        // `!=`, and it can only ever appear after something.
+        assert_eq!(math("'a' not= 'b'"), "(!= a b)");
+        assert_eq!(math("not 'a' not= 'b'"), "(not (!= a b))");
+    }
+
 }

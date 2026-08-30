@@ -159,6 +159,7 @@ impl Checker {
                         out.push(checked);
                     }
                 }
+                AStmt::If(if_stmt) => out.push(self.if_stmt(if_stmt)),
                 // Already read, before anything else ran.
                 AStmt::Defaults(_) => {}
             }
@@ -322,6 +323,57 @@ impl Checker {
         self.scopes.pop();
 
         Some(ir::Stmt::Loop { slot, ty: loop_stmt.ty, from, to, body, span: loop_stmt.span })
+    }
+
+    /// `if`, its `else-if`s and its `else`.
+    ///
+    /// Each body is its own scope, so a variable declared inside an arm is gone at the
+    /// closing brace. Unlike a loop there is nothing to say about that: an `if` declares
+    /// nothing of its own, so there is no counter whose life anybody has to decide.
+    fn if_stmt(&mut self, if_stmt: &ast::If) -> ir::Stmt {
+        let mut arms = Vec::new();
+        for arm in &if_stmt.arms {
+            let condition = self.condition(&arm.condition);
+            self.scopes.push(HashMap::new());
+            let body = self.block(&arm.body);
+            self.scopes.pop();
+            if let Some(condition) = condition {
+                arms.push(ir::Arm { condition, body });
+            }
+        }
+
+        let otherwise = match &if_stmt.otherwise {
+            Some(body) => {
+                self.scopes.push(HashMap::new());
+                let checked = self.block(body);
+                self.scopes.pop();
+                checked
+            }
+            None => Vec::new(),
+        };
+
+        ir::Stmt::If { arms, otherwise, span: if_stmt.span }
+    }
+
+    /// Something asked as a question, which has to be a `bool` and nothing else.
+    fn condition(&mut self, expr: &AExpr) -> Option<ir::Expr> {
+        // Something that settles its own type is asked what it is, so that a wrong answer
+        // can be called what it is rather than reported as a conversion nobody wanted.
+        // Something that does not -- a written `'true'` -- is told to be a `bool`, since
+        // in a condition nothing else would ever tell it.
+        let expected = if self_typing(expr) { None } else { Some(Ty::Bool) };
+        let checked = self.expr(expr, expected)?;
+        if checked.ty() != Ty::Bool {
+            self.error(
+                Diagnostic::new("E0221", format!("this asks a `{}`, which is not a question.", checked.ty().word()))
+                    .primary(expr.span(), "used as a condition here")
+                    .rule("a condition is a `bool`")
+                    .tip("a comparison answers `bool`, and so does `and`, `or` and `not`.")
+                    .fix("compare it against something, as in `math { 'n' > i32 '0' }`."),
+            );
+            return None;
+        }
+        Some(checked)
     }
 
     // ---- the parts every statement shares ---------------------------------------
@@ -530,6 +582,26 @@ impl Checker {
                 })
             }
 
+            // Both sides of `and`/`or` are questions and so is the answer, which makes
+            // this the one place in the language where nothing has to be inferred.
+            AExpr::Logic { op, lhs, rhs, span } => {
+                self.agree(Ty::Bool, expected, *span)?;
+                let lhs = self.condition(lhs)?;
+                let rhs = self.condition(rhs)?;
+                Some(ir::Expr::Logic {
+                    op: *op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: *span,
+                })
+            }
+
+            AExpr::Not { operand, span } => {
+                self.agree(Ty::Bool, expected, *span)?;
+                let operand = self.condition(operand)?;
+                Some(ir::Expr::Not { operand: Box::new(operand), span: *span })
+            }
+
             AExpr::Binary { op, lhs, rhs, span } => {
                 // Whichever side knows what it is goes first and tells the other, so both
                 // `'x' + 1` and `1 + 'x'` read the 1 as whatever `'x'` is.
@@ -700,7 +772,8 @@ fn self_typing(expr: &AExpr) -> bool {
     match expr {
         AExpr::Name(_) => true,
         AExpr::TypedLiteral { .. } => true,
-        AExpr::Compare { .. } => true,
+        // These three answer `bool` whatever is in them, so they need telling nothing.
+        AExpr::Compare { .. } | AExpr::Logic { .. } | AExpr::Not { .. } => true,
         AExpr::Math { inner, .. } => self_typing(inner),
         AExpr::Unary { operand, .. } => self_typing(operand),
         AExpr::Binary { lhs, rhs, .. } => self_typing(lhs) || self_typing(rhs),
@@ -941,4 +1014,35 @@ mod tests {
             ["E0217", "E0104", "E0208"]
         );
     }
+    #[test]
+    fn a_condition_has_to_be_a_question() {
+        // A written `'true'` is a `bool` literal; a variable is read the way a variable
+        // is read anywhere else in the language, through `math`.
+        clean("if ['true'] { print[\"y\"]; }");
+        clean("var.local.bool ['f'] = ['true']; if [math { 'f' }] { print[\"y\"]; }");
+        clean("var.local.i32 ['n'] = ['1']; if [math { 'n' > i32 '0' }] { print[\"y\"]; }");
+        // A number is not a question, however true it looks in other languages.
+        assert_eq!(codes("var.local.i32 ['n'] = ['1']; if [math { 'n' }] { print[\"y\"]; }"), ["E0221"]);
+        assert_eq!(codes("var.local.str ['s'] = ['hi']; if [math { 's' }] { print[\"y\"]; }"), ["E0221"]);
+    }
+
+    #[test]
+    fn and_or_and_not_take_questions_and_answer_one() {
+        clean("var.local.bool ['f'] = [math { bool 'true' and not bool 'false' }];");
+        clean("var.local.i32 ['n'] = ['1'];\nvar.local.bool ['f'] = [math { 'n' > i32 '0' or 'n' < i32 '9' }];");
+        // A number on either side of `and` is not a question either.
+        assert_eq!(codes("var.local.i32 ['n'] = ['1']; var.local.bool ['f'] = [math { 'n' and bool 'true' }];"), ["E0221"]);
+        assert_eq!(codes("var.local.i32 ['n'] = ['1']; var.local.bool ['f'] = [math { not 'n' }];"), ["E0221"]);
+    }
+
+    #[test]
+    fn an_arm_keeps_what_it_declares_to_itself() {
+        // Declared inside, used outside: the name is gone at the closing brace, exactly
+        // as it is in a loop body.
+        assert_eq!(
+            codes("if ['true'] { var.local.i32 ['x'] = ['1']; }\nprint['x'];"),
+            ["E0208"]
+        );
+    }
+
 }

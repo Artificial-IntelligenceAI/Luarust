@@ -161,3 +161,19 @@ impl CmpOp {
         !matches!(self, CmpOp::Equal | CmpOp::NotEqual)
     }
 }
+
+/// Joining two conditions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogicOp {
+    And,
+    Or,
+}
+
+impl LogicOp {
+    pub fn word(self) -> &'static str {
+        match self {
+            LogicOp::And => "and",
+            LogicOp::Or => "or",
+        }
+    }
+}

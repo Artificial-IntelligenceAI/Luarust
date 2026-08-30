@@ -243,6 +243,71 @@ fn a_program_mixing_everything_agrees_three_ways() {
 }
 
 #[test]
+fn an_if_runs_exactly_one_arm() {
+    let chain = "var.local.i32 ['n'] = ['@'];\n\
+         if [math { 'n' > i32 '10' }] { print[\"big\" \\n]; }\n\
+         else-if [math { 'n' = i32 '10' }] { print[\"ten\" \\n]; }\n\
+         else { print[\"small\" \\n]; }";
+    assert_eq!(ran(&chain.replace('@', "12")), "big\n");
+    assert_eq!(ran(&chain.replace('@', "10")), "ten\n");
+    assert_eq!(ran(&chain.replace('@', "3")), "small\n");
+}
+
+#[test]
+fn an_if_with_no_else_and_nothing_true_does_nothing() {
+    assert_eq!(
+        ran("var.local.i32 ['n'] = ['1'];\n\
+             print[\"before \"];\n\
+             if [math { 'n' > i32 '10' }] { print[\"never\"]; }\n\
+             print[\"after\" \\n];"),
+        "before after\n"
+    );
+}
+
+#[test]
+fn and_or_and_not_answer_the_way_a_table_says_they_should() {
+    // Every row of both truth tables, and both ways of writing each.
+    let mut out = String::new();
+    for a in ["true", "false"] {
+        for b in ["true", "false"] {
+            out.push_str(&format!(
+                "print[math {{ bool '{a}' and bool '{b}' }} \" \" math {{ bool '{a}' or bool '{b}' }} \\n];\n"
+            ));
+        }
+    }
+    out.push_str("print[math { not bool 'true' } \" \" math { not bool 'false' } \\n];");
+    assert_eq!(
+        ran(&out),
+        "true true\nfalse true\nfalse true\nfalse false\nfalse true\n"
+    );
+}
+
+#[test]
+fn a_condition_can_guard_the_one_after_it() {
+    // The right side of an `and` is a fault when the left is false. If it were worked out
+    // anyway this would stop instead of printing, on every one of the three paths.
+    assert_eq!(
+        ran("var.local.i32 ['n'] = ['7'];\n\
+             var.local.i32 ['d'] = ['0'];\n\
+             if [math { 'd' != i32 '0' and 'n' div 'd' > i32 '1' }] { print[\"divided\" \\n]; }\n\
+             else { print[\"guarded\" \\n]; }"),
+        "guarded\n"
+    );
+}
+
+#[test]
+fn the_answer_survives_being_written_where_it_came_from() {
+    // `set ['f'] = [math { … 'f' … }]` reads `f` after the first half has already been
+    // worked out. Building that half where `f` lives would lose it.
+    assert_eq!(
+        ran("var.local.mut.bool ['f'] = ['true'];\n\
+             set ['f'] = [math { ('f' and (i32 '1' = i32 '2')) or 'f' }];\n\
+             print['f' \\n];"),
+        "true\n"
+    );
+}
+
+#[test]
 fn generated_programs_agree_three_ways() {
     let mut taken = 0;
     let mut declined = 0;

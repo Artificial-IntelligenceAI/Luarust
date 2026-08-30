@@ -257,18 +257,80 @@ things of the same type are either the same or they are not.
 Words work as operators here because a name is always quoted. `'x'` is a variable and a
 bare `x` cannot be one, so there is nothing for `math { 'a' x 'b' }` to be confused with.
 
+### Joining conditions
+
+`and`, `or` and `not`, as words. They take `bool` and they answer `bool`, and there is no
+truthiness anywhere: a number is not a question and Luarust will say so.
+
+```luarust
+var.local.bool ['in range'] = [math { 'n' > i32 '0' and 'n' < i32 '100' }];
+var.local.bool ['outside']  = [math { 'n' < i32 '0' or  'n' > i32 '99'  }];
+var.local.bool ['missing']  = [math { not 'in range' }];
+```
+
+`or` is looser than `and`, which is looser than `not`, which is looser than a comparison.
+So `'a' > 'b' and 'c' > 'd'` groups the way it reads, and `not 'a' = 'b'` asks whether
+they are *not* equal rather than turning one side around.
+
+**The right side is not worked out when the left already settled it.** That is not an
+optimisation you are being told about for interest — it is what lets a condition guard
+the one after it:
+
+```luarust
+if [math { 'd' != i32 '0' and 'n' div 'd' > i32 '1' }] { … }
+```
+
+With `d` at zero the division never happens, so the program does not stop. If both sides
+were always worked out there would be no way to write that at all.
+
 That is five kinds of bracket, and the reason it works is that no two of them ever
 mean the same thing:
 
 | | |
 | --- | --- |
-| `[ ]` | a list — of names, of values, or of things to print |
+| `[ ]` | a list — of names, of values, of things to print, or a condition |
 | `{ }` | a block — the word in front of it says which kind |
 | `( )` | grouping, inside a math block |
 | `' '` | a name — or a literal, where a value is expected or a type is stated |
 | `" "` | text |
 
 You never have to work out which sense a bracket is being used in. It only has one.
+
+## Deciding
+
+```luarust
+var.local.i32 ['n'] = ['12'];
+
+if [math { 'n' > i32 '10' }] {
+    print["big" \n];
+} else-if [math { 'n' = i32 '10' }] {
+    print["exactly ten" \n];
+} else {
+    print["small" \n];
+}
+```
+
+The condition goes in `[ ]`, like every other construct's arguments, and the body in
+`{ }`, like every other block. `else-if` is one word — the same hyphen that joins
+`no-visibility-stated` joins this.
+
+Arms are asked in order and exactly one body runs. A condition after the one that held is
+never reached, let alone asked. The `else` is optional, comes last, and there is only ever
+one of it; anything else is an error that says so.
+
+An `if` has no `temp`/`perm` in its chain, and that is not an oversight. A loop needs one
+because a loop *introduces a counter* and somebody has to say whether it outlives the
+block. An `if` introduces nothing, so a variable declared inside an arm is simply gone at
+the closing brace.
+
+One wart, stated rather than hidden: a condition is a value slot, so `'flag'` in it is a
+**literal** and not the variable `flag` — exactly as `['true']` is a literal everywhere
+else. To ask about a variable, read it the way variables are read anywhere in this
+language:
+
+```luarust
+if [math { 'flag' }] { … }
+```
 
 ## Loops
 
@@ -559,7 +621,8 @@ cargo build --release
 | `luarust ir <file.lr>` | show the LLVM IR |
 | `luarust-run <file.lrc>` | run a chunk, and nothing else |
 
-The programs in [`examples/`](examples) all run, and are checked on every push.
+The programs in [`examples/`](examples) all run, and are checked on every push —
+including [`fizzbuzz.lr`](examples/fizzbuzz.lr), which is really a test of `if`.
 
 `luarust-run` is a separate binary on purpose — see [What ships](#what-ships).
 

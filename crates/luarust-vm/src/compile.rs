@@ -11,7 +11,7 @@ use crate::chunk::{Chunk, Op, Reg};
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Value, one_of};
 use luarust_diag::Span;
-use luarust_parse::ast::BinOp;
+use luarust_parse::ast::{BinOp, LogicOp};
 
 /// Compile a checked program.
 ///
@@ -88,7 +88,9 @@ impl Compiler {
         match &mut self.chunk.code[at] {
             Op::Jump { target: t }
             | Op::JumpIfGreater { target: t, .. }
-            | Op::JumpIfEqual { target: t, .. } => *t = target,
+            | Op::JumpIfEqual { target: t, .. }
+            | Op::JumpIfFalse { target: t, .. }
+            | Op::JumpIfTrue { target: t, .. } => *t = target,
             other => panic!("tried to point {other:?} somewhere"),
         }
     }
@@ -191,6 +193,40 @@ impl Compiler {
                 self.floor = outer_floor;
                 self.release();
             }
+
+            // Each arm jumps over the next when its condition held, so exactly one body
+            // runs. The conditions after it are never reached, let alone asked.
+            Stmt::If { arms, otherwise, span } => {
+                let mut leaving = Vec::new();
+                for arm in arms {
+                    let mark = self.next;
+                    let cond = self.operand(&arm.condition, *span);
+                    let skip = self.emit(Op::JumpIfFalse { cond, target: 0 }, *span);
+                    self.next = mark;
+
+                    let outer_floor = self.floor;
+                    self.floor = self.next;
+                    self.block(&arm.body);
+                    self.floor = outer_floor;
+
+                    // Nothing after a body that ran is wanted -- but an `if` with no
+                    // `else` and one arm has nothing to jump over, so it does not.
+                    if arms.len() > 1 || !otherwise.is_empty() {
+                        leaving.push(self.emit(Op::Jump { target: 0 }, *span));
+                    }
+                    self.land(skip);
+                }
+
+                let outer_floor = self.floor;
+                self.floor = self.next;
+                self.block(otherwise);
+                self.floor = outer_floor;
+
+                for jump in leaving {
+                    self.land(jump);
+                }
+                self.release();
+            }
         }
     }
 
@@ -251,6 +287,36 @@ impl Compiler {
                     Op::Compare { op: *op, operands: *operands, dst, lhs: a, rhs: b },
                     *span,
                 );
+                self.next = mark;
+            }
+
+            // The answer is built up in a register of its own and only moved to `dst` at
+            // the end. Going straight into `dst` looks cheaper and is wrong: `dst` is
+            // often the very variable a later side reads, and the left side's answer
+            // would be sitting where that variable used to be. It cost a fuzzer 10,306
+            // programs to say so.
+            Expr::Logic { op, lhs, rhs, span } => {
+                let mark = self.next;
+                let held = self.temp();
+                self.expr(lhs, held, *span);
+
+                // If the left side settled it, the right is jumped over -- not evaluated
+                // and discarded, but never run at all.
+                let settled = match op {
+                    LogicOp::And => self.emit(Op::JumpIfFalse { cond: held, target: 0 }, *span),
+                    LogicOp::Or => self.emit(Op::JumpIfTrue { cond: held, target: 0 }, *span),
+                };
+                self.expr(rhs, held, *span);
+                self.land(settled);
+
+                self.emit(Op::Move { dst, src: held }, *span);
+                self.next = mark;
+            }
+
+            Expr::Not { operand, span } => {
+                let mark = self.next;
+                let src = self.operand(operand, *span);
+                self.emit(Op::Not { dst, src }, *span);
                 self.next = mark;
             }
 

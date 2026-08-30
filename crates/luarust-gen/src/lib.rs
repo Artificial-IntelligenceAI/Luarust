@@ -115,9 +115,42 @@ impl Writer {
             0..=2 => self.declaration(),
             3..=4 => self.assignment(),
             5 => self.handback(),
-            6..=7 if self.depth < 2 => self.loop_stmt(),
+            6 if self.depth < 2 => self.loop_stmt(),
+            7 if self.depth < 2 => self.if_stmt(),
             _ => self.print(),
         }
+    }
+
+    /// `if`, sometimes with `else-if`s, sometimes with an `else`.
+    ///
+    /// Every arm gets a body, because an arm that is never taken and does nothing proves
+    /// nothing about the two ways of running it.
+    fn if_stmt(&mut self) {
+        let arms = 1 + self.rng.below(3);
+        for n in 0..arms {
+            let word = if n == 0 { "if" } else { "} else-if" };
+            let condition = self.condition(0);
+            self.line(&format!("{word} [math {{ {condition} }}] {{"));
+            self.arm_body();
+        }
+
+        if self.rng.below(2) == 0 {
+            self.line("} else {");
+            self.arm_body();
+        }
+        self.line("}");
+    }
+
+    /// The inside of one arm. Whatever it declares is gone at the closing brace.
+    fn arm_body(&mut self) {
+        self.depth += 1;
+        let body = 1 + self.rng.below(3);
+        for _ in 0..body {
+            self.statement();
+        }
+        self.depth -= 1;
+        let depth = self.depth;
+        self.scope.retain(|known| known.depth <= depth);
     }
 
     fn declaration(&mut self) {
@@ -213,39 +246,68 @@ impl Writer {
         // the language being consistent, and is also why this cannot just write two
         // literals and hope.
         if ty == Ty::Bool && self.rng.below(2) == 0 {
-            let op = match self.rng.below(6) {
-                0 => "<",
-                1 => ">",
-                2 => "=",
-                // Every spelling has to lex, so all of them get written.
-                3 => ["</=", "<=", "≤"][self.rng.below(3) as usize],
-                4 => [">/=", ">=", "≥"][self.rng.below(3) as usize],
-                // Three spellings of the same thing, all of which have to lex.
-                _ => match self.rng.below(3) {
-                    0 => "!=",
-                    1 => "not=",
-                    _ => "≠",
-                },
-            };
-            // Either a variable supplies the type, or both sides say what they are. A
-            // comparison tells its sides nothing, so one of those has to happen.
-            if let Some(known) = self.pick_numeric().filter(|_| self.rng.below(2) == 0) {
-                let other = self.arithmetic(known.ty, 1);
-                return format!("math {{ '{}' {op} {other} }}", known.name);
-            }
-            let operands = self.pick_type();
-            return format!(
-                "math {{ {} '{}' {op} {} '{}' }}",
-                operands.word(),
-                self.literal(operands),
-                operands.word(),
-                self.literal(operands)
-            );
+            return format!("math {{ {} }}", self.condition(0));
         }
         if ty == Ty::Bool || ty == Ty::Str || self.rng.below(3) != 0 {
             return format!("'{}'", self.literal(ty));
         }
         format!("math {{ {} }}", self.arithmetic(ty, 0))
+    }
+
+    /// A `bool` expression, as it is written inside a math block.
+    ///
+    /// A truth is either compared into existence or joined out of smaller ones, which is
+    /// all the language offers -- there is no other way to make one.
+    fn condition(&mut self, depth: usize) -> String {
+        if depth < 2 {
+            match self.rng.below(6) {
+                0 => {
+                    let (a, b) = (self.condition(depth + 1), self.condition(depth + 1));
+                    return format!("({a}) and ({b})");
+                }
+                1 => {
+                    let (a, b) = (self.condition(depth + 1), self.condition(depth + 1));
+                    return format!("({a}) or ({b})");
+                }
+                2 => return format!("not ({})", self.condition(depth + 1)),
+                _ => {}
+            }
+        }
+
+        // A bool already in scope is the cheapest truth there is.
+        if let Some(known) = self.pick_bool().filter(|_| self.rng.below(3) == 0) {
+            return format!("'{}'", known.name);
+        }
+
+        let op = match self.rng.below(6) {
+            0 => "<",
+            1 => ">",
+            2 => "=",
+            // Every spelling has to lex, so all of them get written.
+            3 => ["</=", "<=", "≤"][self.rng.below(3) as usize],
+            4 => [">/=", ">=", "≥"][self.rng.below(3) as usize],
+            // Three spellings of the same thing, all of which have to lex.
+            _ => match self.rng.below(3) {
+                0 => "!=",
+                1 => "not=",
+                _ => "≠",
+            },
+        };
+
+        // Either a variable supplies the type, or both sides say what they are. A
+        // comparison tells its sides nothing, so one of those has to happen.
+        if let Some(known) = self.pick_numeric().filter(|_| self.rng.below(2) == 0) {
+            let other = self.arithmetic(known.ty, 1);
+            return format!("'{}' {op} {other}", known.name);
+        }
+        let operands = self.pick_type();
+        format!(
+            "{} '{}' {op} {} '{}'",
+            operands.word(),
+            self.literal(operands),
+            operands.word(),
+            self.literal(operands)
+        )
     }
 
     /// An expression of exactly this type, inside a math block.
@@ -334,6 +396,15 @@ impl Writer {
     fn pick_numeric(&mut self) -> Option<Known> {
         let usable: Vec<Known> =
             self.scope.iter().filter(|known| numeric(known.ty)).cloned().collect();
+        if usable.is_empty() {
+            return None;
+        }
+        Some(usable[self.rng.below(usable.len() as u64) as usize].clone())
+    }
+
+    fn pick_bool(&mut self) -> Option<Known> {
+        let usable: Vec<Known> =
+            self.scope.iter().filter(|known| known.ty == Ty::Bool).cloned().collect();
         if usable.is_empty() {
             return None;
         }

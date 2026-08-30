@@ -27,7 +27,7 @@ use inkwell::{FloatPredicate, IntPredicate};
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Fault, Overflow, Stopped, Value};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, CmpOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, LogicOp, Ty};
 
 use std::io::Write;
 
@@ -413,7 +413,44 @@ impl<'ctx> Emitter<'ctx> {
             Stmt::Loop { slot, ty, from, to, body, span } => {
                 self.loop_stmt(*slot, *ty, from, to, body, *span)
             }
+
+            Stmt::If { arms, otherwise, .. } => self.if_stmt(arms, otherwise),
         }
+    }
+
+    /// Each arm gets a block to run in and a block to fall through to. Everything that
+    /// ran lands on the same block afterwards, which is where the program carries on.
+    fn if_stmt(&mut self, arms: &[luarust_check::ir::Arm], otherwise: &[Stmt]) {
+        let done = self.context.append_basic_block(self.main, "if.done");
+
+        for (n, arm) in arms.iter().enumerate() {
+            let held = self.truth(&arm.condition);
+            let then = self.context.append_basic_block(self.main, &format!("if.then{n}"));
+            let next = self.context.append_basic_block(self.main, &format!("if.next{n}"));
+            self.builder.build_conditional_branch(held, then, next).expect("a branch");
+
+            self.builder.position_at_end(then);
+            self.block(&arm.body);
+            self.builder.build_unconditional_branch(done).expect("a branch");
+
+            // The next arm is asked only here, which is what makes it unreachable when an
+            // earlier one held.
+            self.builder.position_at_end(next);
+        }
+
+        self.block(otherwise);
+        self.builder.build_unconditional_branch(done).expect("a branch");
+        self.builder.position_at_end(done);
+    }
+
+    /// A condition as the one bit a branch wants, rather than the sixty-four a slot holds.
+    fn truth(&mut self, condition: &Expr) -> inkwell::values::IntValue<'ctx> {
+        let (emitted, _) = self.expr(condition);
+        let held = emitted.native().into_int_value();
+        let zero = held.get_type().const_zero();
+        self.builder
+            .build_int_compare(inkwell::IntPredicate::NE, held, zero, "held")
+            .expect("a comparison")
     }
 
     fn loop_stmt(&mut self, slot: usize, ty: Ty, from: &Expr, to: &Expr, body: &[Stmt], span: Span) {
@@ -673,6 +710,63 @@ impl<'ctx> Emitter<'ctx> {
                 }
                 let zero = self.zero(*ty);
                 (Emitted::Native(self.arithmetic(BinOp::Sub, zero, value, *ty, *span)), *ty)
+            }
+
+            // The right side gets a block of its own that is branched over when the left
+            // already settled it, so it is not merely ignored -- it is not run.
+            Expr::Logic { op, lhs, rhs, .. } => {
+                let left = self.truth(lhs);
+                let from = self.builder.get_insert_block().expect("a block");
+                let other = self.context.append_basic_block(self.main, "logic.rhs");
+                let done = self.context.append_basic_block(self.main, "logic.done");
+                match op {
+                    // `and` asks the right only when the left was true; `or`, only when
+                    // it was false.
+                    LogicOp::And => self.builder.build_conditional_branch(left, other, done),
+                    LogicOp::Or => self.builder.build_conditional_branch(left, done, other),
+                }
+                .expect("a branch");
+
+                self.builder.position_at_end(other);
+                let right = self.truth(rhs);
+                // Nested logic leaves the builder somewhere else entirely, so where the
+                // right side actually finished is asked rather than assumed.
+                let right_from = self.builder.get_insert_block().expect("a block");
+                self.builder.build_unconditional_branch(done).expect("a branch");
+
+                self.builder.position_at_end(done);
+                let answer = self
+                    .builder
+                    .build_phi(self.context.bool_type(), "logic")
+                    .expect("a phi");
+                let settled = self.context.bool_type().const_int(
+                    u64::from(*op == LogicOp::Or),
+                    false,
+                );
+                answer.add_incoming(&[(&settled, from), (&right, right_from)]);
+
+                let widened = self
+                    .builder
+                    .build_int_z_extend(
+                        answer.as_basic_value().into_int_value(),
+                        self.context.i64_type(),
+                        "truth",
+                    )
+                    .expect("an extend");
+                (Emitted::Native(widened.into()), Ty::Bool)
+            }
+
+            Expr::Not { operand, .. } => {
+                let held = self.truth(operand);
+                let flipped = self
+                    .builder
+                    .build_not(held, "not")
+                    .expect("a not");
+                let widened = self
+                    .builder
+                    .build_int_z_extend(flipped, self.context.i64_type(), "truth")
+                    .expect("an extend");
+                (Emitted::Native(widened.into()), Ty::Bool)
             }
 
             Expr::Compare { op, operands, lhs, rhs, .. } => {

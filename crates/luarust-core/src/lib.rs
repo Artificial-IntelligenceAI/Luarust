@@ -11,4 +11,4 @@
 pub mod ty;
 pub mod value;
 
-pub use ty::{BinOp, CmpOp, Ty};
+pub use ty::{BinOp, CmpOp, LogicOp, Ty};

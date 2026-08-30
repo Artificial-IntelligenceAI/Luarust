@@ -7,7 +7,7 @@
 
 use crate::value::{Overflow, Value};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, CmpOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, LogicOp, Ty};
 
 /// A whole checked program.
 #[derive(Clone, Debug)]
@@ -33,6 +33,16 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// Ask, in order, and run the first body whose condition held. `otherwise` is the
+    /// `else`, and is empty when there was none.
+    If { arms: Vec<Arm>, otherwise: Vec<Stmt>, span: Span },
+}
+
+/// One condition and what to do about it.
+#[derive(Clone, Debug)]
+pub struct Arm {
+    pub condition: Expr,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +64,10 @@ pub enum Expr {
     /// Answers `bool`. `operands` is what the two sides are, which is what decides how
     /// they get compared.
     Compare { op: CmpOp, operands: Ty, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    /// `and` / `or`. The right side is only worked out if the left did not settle it,
+    /// which is what lets a condition guard the one after it.
+    Logic { op: LogicOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    Not { operand: Box<Expr>, span: Span },
 }
 
 impl Expr {
@@ -64,7 +78,7 @@ impl Expr {
             | Expr::TimeNow { ty, .. }
             | Expr::Binary { ty, .. }
             | Expr::Neg { ty, .. } => *ty,
-            Expr::Compare { .. } => Ty::Bool,
+            Expr::Compare { .. } | Expr::Logic { .. } | Expr::Not { .. } => Ty::Bool,
         }
     }
 
@@ -75,7 +89,9 @@ impl Expr {
             | Expr::TimeNow { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Neg { span, .. }
-            | Expr::Compare { span, .. } => *span,
+            | Expr::Compare { span, .. }
+            | Expr::Logic { span, .. }
+            | Expr::Not { span, .. } => *span,
         }
     }
 }

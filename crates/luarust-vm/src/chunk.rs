@@ -35,6 +35,12 @@ pub enum Op {
     PrintText { text: u32 },
     /// Stringify a register and write it.
     PrintValue { src: Reg },
+    /// Turn a `bool` register around.
+    Not { dst: Reg, src: Reg },
+    /// Jump if a `bool` register is false.
+    JumpIfFalse { cond: Reg, target: u32 },
+    /// Jump if a `bool` register is true.
+    JumpIfTrue { cond: Reg, target: u32 },
     /// Jump if `lhs` is greater than `rhs`.
     JumpIfGreater { lhs: Reg, rhs: Reg, target: u32 },
     /// Jump if the two are equal.
@@ -87,6 +93,9 @@ impl Chunk {
                     format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
                 }
                 Op::Neg { dst, src } => format!("neg          r{dst}, r{src}"),
+                Op::Not { dst, src } => format!("not          r{dst}, r{src}"),
+                Op::JumpIfFalse { cond, target } => format!("jump.false   r{cond}, {target}"),
+                Op::JumpIfTrue { cond, target } => format!("jump.true    r{cond}, {target}"),
                 Op::Compare { op, operands, dst, lhs, rhs } => format!(
                     "{:<12} r{dst}, r{lhs}, r{rhs}    -- {}",
                     match op {

@@ -114,6 +114,22 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let _ = out.flush();
             }
 
+            Op::Not { dst, src } => {
+                registers[dst as usize] = Value::Bool(!truth(&registers[src as usize]));
+            }
+
+            Op::JumpIfFalse { cond, target } => {
+                if !truth(&registers[cond as usize]) {
+                    at = target as usize;
+                }
+            }
+
+            Op::JumpIfTrue { cond, target } => {
+                if truth(&registers[cond as usize]) {
+                    at = target as usize;
+                }
+            }
+
             Op::Jump { target } => at = target as usize,
 
             Op::JumpIfGreater { lhs, rhs, target } => {
@@ -132,5 +148,15 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 }
             }
         }
+    }
+}
+
+/// What a condition answered. The checker refuses anything that is not a `bool` long
+/// before a chunk exists, and a chunk read off disk has its own check, so there is
+/// nothing to decide here.
+fn truth(value: &Value) -> bool {
+    match value {
+        Value::Bool(answer) => *answer,
+        other => unreachable!("a condition checked as `bool` held {other:?}"),
     }
 }

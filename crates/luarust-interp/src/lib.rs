@@ -10,6 +10,7 @@
 //! answers by construction rather than by two implementations being written carefully.
 
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
+use luarust_parse::ast::LogicOp;
 use luarust_check::value::{
     Fault, Overflow, Value, binary_op, compare, format_of, holds, negate, one_of,
 };
@@ -74,6 +75,17 @@ impl Machine {
                 let from = self.eval(from)?;
                 let to = self.eval(to)?;
                 self.count(*slot, *ty, from, to, body, *span, out)
+            }
+
+            // The first arm whose condition holds, and only that one. A condition after
+            // it is never asked, which is what makes an earlier arm able to guard a later.
+            Stmt::If { arms, otherwise, .. } => {
+                for arm in arms {
+                    if truth(&self.eval(&arm.condition)?) {
+                        return self.block(&arm.body, out);
+                    }
+                }
+                self.block(otherwise, out)
             }
         }
     }
@@ -162,6 +174,23 @@ impl Machine {
                 Ok(Value::Bool(holds(*op, compare(&lhs, &rhs))))
             }
 
+            // The right side is only worked out when the left did not settle it. That is
+            // not an optimisation: it is what lets `'d' != 0 and 'n' div 'd' > 1` be
+            // asked at all, since the second half is a fault when the first is false.
+            Expr::Logic { op, lhs, rhs, .. } => {
+                let lhs = truth(&self.eval(lhs)?);
+                let settled = match op {
+                    LogicOp::And => !lhs,
+                    LogicOp::Or => lhs,
+                };
+                if settled {
+                    return Ok(Value::Bool(lhs));
+                }
+                Ok(Value::Bool(truth(&self.eval(rhs)?)))
+            }
+
+            Expr::Not { operand, .. } => Ok(Value::Bool(!truth(&self.eval(operand)?))),
+
             Expr::Binary { op, lhs, rhs, span, .. } => {
                 let lhs = self.eval(lhs)?;
                 let rhs = self.eval(rhs)?;
@@ -169,5 +198,14 @@ impl Machine {
                     .map_err(|fault| Stopped { fault, span: *span })
             }
         }
+    }
+}
+
+/// What a condition answered. The checker has already refused anything that is not a
+/// `bool`, so there is nothing here to decide.
+fn truth(value: &Value) -> bool {
+    match value {
+        Value::Bool(answer) => *answer,
+        other => unreachable!("a condition checked as `bool` held {other:?}"),
     }
 }

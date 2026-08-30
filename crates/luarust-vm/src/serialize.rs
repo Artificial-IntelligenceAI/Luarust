@@ -36,7 +36,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -212,6 +212,21 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
         Op::PrintValue { src } => {
             out.push(6);
             put_u16(out, src);
+        }
+        Op::Not { dst, src } => {
+            out.push(12);
+            put_u16(out, dst);
+            put_u16(out, src);
+        }
+        Op::JumpIfFalse { cond, target } => {
+            out.push(13);
+            put_u16(out, cond);
+            put_u32(out, target);
+        }
+        Op::JumpIfTrue { cond, target } => {
+            out.push(14);
+            put_u16(out, cond);
+            put_u32(out, target);
         }
         Op::JumpIfGreater { lhs, rhs, target } => {
             out.push(7);
@@ -448,7 +463,7 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
                 register(dst)?;
                 constant(konst)?;
             }
-            Op::Move { dst, src } | Op::Neg { dst, src } => {
+            Op::Move { dst, src } | Op::Neg { dst, src } | Op::Not { dst, src } => {
                 register(dst)?;
                 register(src)?;
             }
@@ -463,6 +478,10 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
             Op::JumpIfGreater { lhs, rhs, target: to } | Op::JumpIfEqual { lhs, rhs, target: to } => {
                 register(lhs)?;
                 register(rhs)?;
+                target(to)?;
+            }
+            Op::JumpIfFalse { cond, target: to } | Op::JumpIfTrue { cond, target: to } => {
+                register(cond)?;
                 target(to)?;
             }
             Op::Jump { target: to } => target(to)?,
@@ -609,6 +628,9 @@ impl<'a> Cursor<'a> {
                 lhs: self.u16()?,
                 rhs: self.u16()?,
             },
+            12 => Op::Not { dst: self.u16()?, src: self.u16()? },
+            13 => Op::JumpIfFalse { cond: self.u16()?, target: self.u32()? },
+            14 => Op::JumpIfTrue { cond: self.u16()?, target: self.u32()? },
             other => Err(Broken::Unknown { what: "instruction", value: other as u64 })?,
         })
     }
