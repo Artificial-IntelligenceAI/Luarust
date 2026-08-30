@@ -74,12 +74,22 @@ fn agree(source: &str, seed: u64) -> Outcome {
 fn a_generated_program_always_compiles_and_the_two_paths_always_agree() {
     let mut printed = 0;
     let mut stopped = 0;
+    let mut faults: std::collections::BTreeSet<&str> = Default::default();
     for seed in 1..=2000 {
         match agree(&luarust_gen::program(seed).source, seed) {
-            Outcome::Printed(_) => printed += 1,
-            Outcome::Stopped(_) => stopped += 1,
+            Outcome::Printed(text) => {
+                // Every generated program ends with a print, so one that ran to the end
+                // and printed nothing means the generator has stopped generating.
+                assert!(!text.is_empty(), "seed {seed}: ran to the end and printed nothing");
+                printed += 1;
+            }
+            Outcome::Stopped(code) => {
+                faults.insert(code);
+                stopped += 1;
+            }
         }
     }
+    assert!(faults.len() > 1, "only ever hit one kind of fault: {faults:?}");
     // Both kinds should turn up. Programs that only ever run to the end would mean the
     // faults are never being compared, and programs that only ever stop would mean
     // nothing is being computed.
