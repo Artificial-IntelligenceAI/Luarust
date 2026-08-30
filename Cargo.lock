@@ -16,3 +16,11 @@ dependencies = [
 [[package]]
 name = "luarust-num"
 version = "0.0.0"
+
+[[package]]
+name = "luarust-parse"
+version = "0.0.0"
+dependencies = [
+ "luarust-diag",
+ "luarust-lex",
+]

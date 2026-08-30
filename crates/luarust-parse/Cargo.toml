@@ -1,0 +1,12 @@
+[package]
+name = "luarust-parse"
+description = "Luarust's grammar: tokens in, a tree out."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+luarust-diag = { path = "../luarust-diag" }
+luarust-lex = { path = "../luarust-lex" }
