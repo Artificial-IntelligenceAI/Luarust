@@ -150,6 +150,17 @@ number under `b16` and text under `str`. Inside a math block there is nothing le
 decide, so the quotes come off. A bare number takes its type from its surroundings, and
 `'1'` in a math block would be a variable named `1`.
 
+Where nothing supplies a type, a value can say what it is:
+
+```luarust
+var.local.bool ['yes'] = [math { ui32 '12' < ui32 '13' }];
+```
+
+A comparison tells its two sides nothing about themselves — that is the point of one — so
+without this there would be nowhere for `12` to get a type from. It is still a literal and
+still checked: `ui8 '300'` is out of range, and a stated type may not disagree with one
+already expected.
+
 Grouping is `( )`, because `[ ]` and `{ }` are both spoken for:
 
 ```luarust
@@ -236,7 +247,7 @@ mean the same thing:
 | `[ ]` | a list — of names, of values, or of things to print |
 | `{ }` | a block — the word in front of it says which kind |
 | `( )` | grouping, inside a math block |
-| `' '` | a name — or a literal, where a value is expected and no math block is open |
+| `' '` | a name — or a literal, where a value is expected or a type is stated |
 | `" "` | text |
 
 You never have to work out which sense a bracket is being used in. It only has one.

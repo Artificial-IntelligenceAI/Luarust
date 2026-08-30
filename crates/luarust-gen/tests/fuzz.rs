@@ -115,6 +115,8 @@ fn the_programs_are_worth_running() {
         "loop.temp", "loop.perm", "handback", "set [", "math {", " mod ", " div ", "**",
         // The comparisons, and the two types that are not numbers.
         " < ", " > ", " = ", "bool", "str",
+        // A literal that says what it is.
+        "i32 '", "b64 '",
     ] {
         assert!(all.contains(construct), "the generator never writes `{construct}`");
     }

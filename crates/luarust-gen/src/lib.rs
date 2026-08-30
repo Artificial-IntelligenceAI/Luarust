@@ -212,23 +212,26 @@ impl Writer {
         // are, so `math { 1 < 2 }` has no type in reach and does not compile -- which is
         // the language being consistent, and is also why this cannot just write two
         // literals and hope.
-        if ty == Ty::Bool
-            && self.rng.below(2) == 0
-            && let Some(known) = self.pick_numeric()
-        {
-            {
-                let op = match self.rng.below(3) {
-                    0 => "<",
-                    1 => ">",
-                    _ => "=",
-                };
+        if ty == Ty::Bool && self.rng.below(2) == 0 {
+            let op = match self.rng.below(3) {
+                0 => "<",
+                1 => ">",
+                _ => "=",
+            };
+            // Either a variable supplies the type, or both sides say what they are. A
+            // comparison tells its sides nothing, so one of those has to happen.
+            if let Some(known) = self.pick_numeric().filter(|_| self.rng.below(2) == 0) {
                 let other = self.arithmetic(known.ty, 1);
-                return if self.rng.below(2) == 0 {
-                    format!("math {{ '{}' {op} {other} }}", known.name)
-                } else {
-                    format!("math {{ {other} {op} '{}' }}", known.name)
-                };
+                return format!("math {{ '{}' {op} {other} }}", known.name);
             }
+            let operands = self.pick_type();
+            return format!(
+                "math {{ {} '{}' {op} {} '{}' }}",
+                operands.word(),
+                self.literal(operands),
+                operands.word(),
+                self.literal(operands)
+            );
         }
         if ty == Ty::Bool || ty == Ty::Str || self.rng.below(3) != 0 {
             return format!("'{}'", self.literal(ty));
@@ -261,6 +264,9 @@ impl Writer {
     fn atom(&mut self, ty: Ty) -> String {
         match self.pick_of(ty) {
             Some(known) if self.rng.below(2) == 0 => format!("'{}'", known.name),
+            // A literal that says what it is, which is the only kind that works where
+            // nothing else supplies a type.
+            _ if self.rng.below(3) == 0 => format!("{} '{}'", ty.word(), self.literal(ty)),
             _ => self.literal(ty),
         }
     }

@@ -224,6 +224,8 @@ pub enum Expr {
     Literal { text: String, span: Span },
     /// `'…'` where a value is being read: a variable.
     Name(Ident),
+    /// `b64 '1.5'` — a literal that says what it is, for the places nothing else does.
+    TypedLiteral { ty: Ty, text: String, span: Span },
     /// A bare number, which only appears inside a math block.
     Number { text: String, span: Span },
     /// `time.now`
@@ -249,6 +251,7 @@ impl Expr {
             | Expr::Unary { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Math { span, .. }
+            | Expr::TypedLiteral { span, .. }
             | Expr::Compare { span, .. } => *span,
             Expr::Name(ident) => ident.span,
         }

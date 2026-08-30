@@ -730,6 +730,25 @@ impl<'a> Parser<'a> {
                 let token = self.advance();
                 Ok(Expr::Number { text: self.text(token).to_string(), span: token.span })
             }
+            // A type word in front of a quoted value makes it a literal that says what it
+            // is. Type names and the word-spelled operators share nothing, so `x` is
+            // always multiplication and `ui32` is always a type.
+            Kind::Word
+                if self
+                    .word()
+                    .and_then(Ty::from_word)
+                    .is_some_and(|_| self.peek_at(1).kind == Kind::Name) =>
+            {
+                let ty_token = self.advance();
+                let ty = Ty::from_word(self.text(ty_token)).expect("just checked");
+                let value = self.advance();
+                Ok(Expr::TypedLiteral {
+                    ty,
+                    text: name_value(self.text(value)).to_string(),
+                    span: ty_token.span.to(value.span),
+                })
+            }
+
             // Inside a math block the quotes hold a variable, not a literal.
             Kind::Name => {
                 let token = self.advance();
@@ -799,6 +818,7 @@ mod tests {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }
             Expr::Math { inner, .. } => show(inner),
+            Expr::TypedLiteral { ty, text, .. } => format!("{}'{text}'", ty.word()),
             Expr::Compare { op, lhs, rhs, .. } => {
                 format!("({} {} {})", op.word(), show(lhs), show(rhs))
             }

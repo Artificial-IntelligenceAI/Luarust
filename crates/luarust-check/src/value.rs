@@ -97,12 +97,25 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
             std::cmp::Ordering::Greater => Comparison::Greater,
         };
     }
-    match (a.bits(), b.bits()) {
-        (Some(x), Some(y)) if a.ty() == b.ty() => {
-            let fmt = format_of(a.ty()).expect("a float type has a format");
-            binary::compare(fmt, x, y)
-        }
-        _ => Comparison::Unordered,
+    if let (Some(x), Some(y)) = (a.bits(), b.bits())
+        && a.ty() == b.ty()
+    {
+        let fmt = format_of(a.ty()).expect("a float type has a format");
+        return binary::compare(fmt, x, y);
+    }
+
+    // Not everything that can be compared is a number. Two things of the same type are
+    // either the same or they are not, which is what `=` asks — and without this, `=` on
+    // text answered "unordered", and unordered makes all three comparisons false.
+    let ordering = match (a, b) {
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        _ => return Comparison::Unordered,
+    };
+    match ordering {
+        std::cmp::Ordering::Less => Comparison::Less,
+        std::cmp::Ordering::Equal => Comparison::Equal,
+        std::cmp::Ordering::Greater => Comparison::Greater,
     }
 }
 

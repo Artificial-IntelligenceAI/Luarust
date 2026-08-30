@@ -400,6 +400,16 @@ impl Checker {
                 self.literal(text, ty, *span)
             }
 
+            // A literal that says what it is, for the places where nothing else does --
+            // a comparison, which tells its two sides nothing, being the main one.
+            AExpr::TypedLiteral { ty, text, span } => {
+                if !self.usable_type(*ty, *span) {
+                    return None;
+                }
+                self.agree(*ty, expected, *span)?;
+                self.literal(text, *ty, *span)
+            }
+
             AExpr::Number { text, span } => {
                 let ty = self.need_type(*span, expected, "a number")?;
                 self.literal(text, ty, *span)
@@ -665,6 +675,7 @@ impl Checker {
 fn self_typing(expr: &AExpr) -> bool {
     match expr {
         AExpr::Name(_) => true,
+        AExpr::TypedLiteral { .. } => true,
         AExpr::Compare { .. } => true,
         AExpr::Math { inner, .. } => self_typing(inner),
         AExpr::Unary { operand, .. } => self_typing(operand),
