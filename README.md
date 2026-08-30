@@ -519,15 +519,15 @@ folded into a formula, vectorised, or run out of order. Everybody actually loops
 
 | | 100M | vs C |
 | --- | --- | --- |
-| C, clang -O2 | 377 ms | 1× |
+| C, clang -O2 | 376 ms | 1× |
 | Rust, rustc -O | 392 ms | 1.04× |
-| Java 17 | 419 ms | 1.11× |
-| **Luarust**, LLVM JIT | **480 ms** | **1.27×** |
-| Lua 5.4 | 753 ms | 2.0× |
-| LuaJIT | 797 ms | 2.1× |
-| Lust | 1,054 ms | 2.8× |
-| Luarust, bytecode VM | 7,785 ms | 20.6× |
-| Luarust, tree-walker | 13,437 ms | 35.6× |
+| Java 17 | 413 ms | 1.10× |
+| **Luarust**, LLVM JIT | **479 ms** | **1.27×** |
+| Lua 5.4 | 751 ms | 2.0× |
+| LuaJIT | 796 ms | 2.1× |
+| Lust | 1,053 ms | 2.8× |
+| Luarust, bytecode VM | 4,868 ms | 12.9× |
+| Luarust, tree-walker | 11,865 ms | 31.6× |
 
 One x86-64 machine, one job, best of three, every one of them printing 15000000.
 
@@ -544,15 +544,15 @@ times the time:
 
 | | 10M | 100M | ratio |
 | --- | --- | --- | --- |
-| C, clang -O2 | 40 ms | 377 ms | 9.4× |
+| C, clang -O2 | 40 ms | 376 ms | 9.4× |
 | Rust, rustc -O | 42 ms | 392 ms | 9.3× |
-| Java 17 | 80 ms | 419 ms | 5.2× |
-| Luarust JIT | 60 ms | 480 ms | 8.0× |
-| Lua 5.4 | 79 ms | 753 ms | 9.5× |
-| LuaJIT | 83 ms | 797 ms | 9.6× |
-| Lust | 110 ms | 1,054 ms | 9.6× |
-| Luarust VM | 786 ms | 7,785 ms | 9.9× |
-| Luarust tree-walker | 1,352 ms | 13,437 ms | 9.9× |
+| Java 17 | 80 ms | 413 ms | 5.2× |
+| Luarust JIT | 58 ms | 479 ms | 8.3× |
+| Lua 5.4 | 78 ms | 751 ms | 9.6× |
+| LuaJIT | 82 ms | 796 ms | 9.7× |
+| Lust | 109 ms | 1,053 ms | 9.7× |
+| Luarust VM | 494 ms | 4,868 ms | 9.9× |
+| Luarust tree-walker | 1,205 ms | 11,865 ms | 9.8× |
 
 Nobody's loop was deleted. The three that come in under ten are the three that pay a fixed
 cost before they start: the JVM starting, and LLVM compiling.
