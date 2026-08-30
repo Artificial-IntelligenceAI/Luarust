@@ -445,19 +445,166 @@ cargo build --release
 | `luarust verify <file.lr>` | run it both ways and report whether they agree |
 | `luarust dis <file.lr>` | show what the compiler decided |
 | `luarust check <file.lr>` | check it and stop |
-| `luarust fuzz [count]` | write programs and check the two paths agree |
+| `luarust fuzz [count]` | write programs and check the paths agree |
+| `luarust jit <file.lr>` | compile it with LLVM, in memory, and run it |
+| `luarust ir <file.lr>` | show the LLVM IR |
 
 The programs in [`examples/`](examples) all run, and are checked on every push.
 
-There are **two ways to run a program**, and that is deliberate. `run` compiles to
-bytecode; `interp` walks the checked tree directly, doing no compilation of any kind. The
-tree-walker is slow and is staying: it is the reference the VM answers to, and when the
-LLVM JIT arrives it will answer to both.
+There are **three ways to run a program**, and that is deliberate. `jit` compiles to
+machine code with LLVM, in memory; `run` compiles to bytecode; `interp` walks the checked
+tree directly, doing no compilation at all. The tree-walker is slow and is staying: it is
+the reference the other two answer to.
 
-One implementation only ever agrees with itself. `luarust verify` runs a program both ways
+One implementation only ever agrees with itself. `luarust verify` runs a program two ways
 and says whether they match, and `luarust fuzz` writes programs and does it in bulk — a
 million of them at the last count, all compiling, all agreeing, and the fourteen thousand
 that stopped part way stopping the same way both times.
+
+The JIT **declines** more programs than it takes, on purpose. Integers and `b32`/`b64`
+become native instructions, because those are the cases where LLVM's arithmetic and
+Luarust's own are both correctly rounded and so cannot differ. `b16`, `b128`, `b256`,
+powers, `bool` and `str` are handed back, and the bytecode VM runs them instead. An answer
+the three paths might disagree about is worth less than no answer.
+
+The JIT needs LLVM 21 and is behind a feature, so everything else builds with no
+dependencies at all:
+
+```bash
+cargo build --release -p luarust-cli --features jit
+```
+
+## How fast it is
+
+The benchmark is a dependent chain — `sum = (sum + i) mod 1000000007`, a hundred million
+times. Each value needs the one before it, so it cannot be folded into a formula,
+vectorised, or run out of order. Everybody actually loops.
+
+| | 100M | vs Lua 5.4 |
+| --- | --- | --- |
+| **Luarust**, LLVM JIT | **322 ms** | **0.43×** |
+| Lua 5.4 | 751 ms | 1× |
+| LuaJIT | 796 ms | 1.1× |
+| Lust | 1,053 ms | 1.4× |
+| Luarust, bytecode VM | 7,868 ms | 10.5× |
+| Luarust, tree-walker | 13,580 ms | 18.1× |
+
+One x86-64 machine, best of three, every one of them printing 15000000. The bottom three
+rows are the same program run three different ways, which is the point of keeping all
+three.
+
+Two things about that first row, since a benchmark nobody argues with is a benchmark
+nobody checked. The 322 ms **includes LLVM's own compilation**, which is most of why the
+smaller size below scales oddly. And part of the win is that a constant divisor lets LLVM
+turn a remainder into a multiply and a shift — a real advantage of compiling something,
+and not one a bytecode VM can have, since it does not know the divisor never changes.
+
+Before any of it means anything, each timing is checked for whether it still contains a
+loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a
+formula will report a magnificent number for doing nothing. Ten times the work should take
+ten times the time:
+
+| | 10M | 100M | ratio |
+| --- | --- | --- | --- |
+| Lua 5.4 | 78 ms | 751 ms | 9.6× |
+| LuaJIT | 82 ms | 796 ms | 9.7× |
+| Lust | 108 ms | 1,053 ms | 9.8× |
+| Luarust JIT | 40 ms | 322 ms | 8.1× |
+| Luarust VM | 797 ms | 7,868 ms | 9.9× |
+| Luarust tree-walker | 1,362 ms | 13,580 ms | 10.0× |
+
+The JIT's 8.1× is the compile time showing: subtract the fixed cost of building the machine
+code and the loop underneath it scales at exactly ten. Nobody's loop was deleted.
+
+The `benchmark` workflow in this repository runs both tables, and the numbers move by a
+third between runs because the machine underneath is shared — which is why every row is
+always measured in the same job as every other.
+
+## Errors
+
+An error apologises for the interruption, points at the code, names the rule that was
+broken, and finishes on the fix — so the last thing left on screen is what to do next.
+
+```
+Hello, I think there may be thing(s) wrong with your code. I'm sorry, if I'm wrong.
+
+file: /Users/ts/hello/src/main.lr, line: 4, column: 6 (src/main.lr:4:6)
+
+`'total'` cannot be changed, because its declaration never said it could.
+
+  2 | var.local.ui32 ['total'] = ['0'];
+    |     ~~~~~ declared here, and `mut` is not in the chain
+  4 | set ['total'] = ['55'];
+    |      ^^^^^^^ changed here
+
+Error code: E0104
+Rule(s) broken: a variable changes only if its declaration says `mut`
+Tip(s): `mut` goes between the visibility and the type.
+Suggested fix(s): line 2 — `var.local.mut.ui32 ['total'] = ['0'];`
+
+1 error.
+```
+
+The greeting is printed once however many errors follow it, and the count once at the end.
+
+**Columns are counted the way a reader counts.** `🧑‍🧑‍🧒‍🧒` is one character, exactly as `c`
+is, though it is seven Unicode scalars welded together with zero-width joiners and
+twenty-five bytes on disk. The short `file:line:column` in brackets carries a **byte**
+column instead, because its job is to be pasted into an editor or a `grep`, and that is
+the number those understand.
+
+Carets are laid out in **terminal cells**, which is a third measurement again — an emoji
+draws two cells wide where a letter draws one. The number you read and the caret you see
+are counted differently on purpose, and both have to be right.
+
+Every error names a rule. The message says what went wrong here; the rule says what is
+true everywhere.
+
+## Using it
+
+```bash
+cargo build --release
+```
+
+```bash
+./target/release/luarust run examples/counting.lr
+```
+
+| command | what it does |
+| --- | --- |
+| `luarust run <file.lr>` | compile to bytecode and run it |
+| `luarust interp <file.lr>` | run it on the reference interpreter instead |
+| `luarust verify <file.lr>` | run it both ways and report whether they agree |
+| `luarust dis <file.lr>` | show what the compiler decided |
+| `luarust check <file.lr>` | check it and stop |
+| `luarust fuzz [count]` | write programs and check the paths agree |
+| `luarust jit <file.lr>` | compile it with LLVM, in memory, and run it |
+| `luarust ir <file.lr>` | show the LLVM IR |
+
+The programs in [`examples/`](examples) all run, and are checked on every push.
+
+There are **three ways to run a program**, and that is deliberate. `jit` compiles to
+machine code with LLVM, in memory; `run` compiles to bytecode; `interp` walks the checked
+tree directly, doing no compilation at all. The tree-walker is slow and is staying: it is
+the reference the other two answer to.
+
+One implementation only ever agrees with itself. `luarust verify` runs a program two ways
+and says whether they match, and `luarust fuzz` writes programs and does it in bulk — a
+million of them at the last count, all compiling, all agreeing, and the fourteen thousand
+that stopped part way stopping the same way both times.
+
+The JIT **declines** more programs than it takes, on purpose. Integers and `b32`/`b64`
+become native instructions, because those are the cases where LLVM's arithmetic and
+Luarust's own are both correctly rounded and so cannot differ. `b16`, `b128`, `b256`,
+powers, `bool` and `str` are handed back, and the bytecode VM runs them instead. An answer
+the three paths might disagree about is worth less than no answer.
+
+The JIT needs LLVM 21 and is behind a feature, so everything else builds with no
+dependencies at all:
+
+```bash
+cargo build --release -p luarust-cli --features jit
+```
 
 ## How fast it is
 
