@@ -21,7 +21,7 @@ jobs:
       # default it would change under us and the label beside the number would quietly
       # stop being true.
       - name: Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -49,6 +49,11 @@ jobs:
       - name: Run
         run: |
           set +e
+          # Every runner is timed three times and judged on its best, and on whether it
+          # printed the answer. Without that second half a program that stopped at once
+          # with an error reported five milliseconds and looked like a triumph -- which
+          # is exactly what happened when the language's literal syntax changed under
+          # this file and nobody was reading the third column.
           bench() {
             local name="$1"; shift
             local best=99999999 out=""
@@ -59,6 +64,11 @@ jobs:
               local ms=$(( (t1 - t0) / 1000000 ))
               [ "$ms" -lt "$best" ] && best=$ms
             done
+            if [ "$out" != "$EXPECTED" ]; then
+              printf "%-14s   WRONG ANSWER -- expected %s, got: %s\n" "$name" "$EXPECTED" "$out"
+              WRONG=1
+              return
+            fi
             printf "%-14s %7s ms   %s\n" "$name" "$best" "$out"
           }
 
@@ -100,12 +110,17 @@ jobs:
           EOF
           rustc -O -o bench_rs bench.rs
 
+          WRONG=0
           for N in 10000000 100000000; do
             echo "################  N = $N  ################"
+            # The answer every one of them has to produce, worked out by the one that is
+            # certainly right: `sum(1..N) mod 1000000007`, done in shell arithmetic.
+            EXPECTED=$(( (N * (N + 1) / 2) % 1000000007 ))
+            echo "expecting $EXPECTED"
 
             cat > bench.lr <<EOF
-          var.local.mut.i64 ['sum'] = ['0'];
-          loop.temp.range.i64 ['i'] = ['1', '$N'] {
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
               set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
           }
           print['sum'];
@@ -138,4 +153,8 @@ jobs:
             bench "Luarust interp" ./target/release/luarust interp bench.lr
             echo
           done
+          if [ "$WRONG" != "0" ]; then
+            echo "::error::a benchmark did not produce the right answer, so its timing means nothing."
+            exit 1
+          fi
           exit 0
