@@ -221,13 +221,13 @@ pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Res
     //
     // NaN payloads may differ between the two routes. Nothing in Luarust can observe one:
     // a NaN prints as `nan` and compares as unordered whatever it is carrying.
-    if ty == rhs.ty() {
-        if let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (lhs, rhs) {
-            match ty {
-                Ty::B64 => return Ok(Value::Num { ty, bits: f64_op(op, *a, *b)? }),
-                Ty::B32 => return Ok(Value::Num { ty, bits: f32_op(op, *a, *b)? }),
-                _ => {}
-            }
+    if let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (lhs, rhs)
+        && ty == rhs.ty()
+    {
+        match ty {
+            Ty::B64 => return Ok(Value::Num { ty, bits: f64_op(op, *a, *b)? }),
+            Ty::B32 => return Ok(Value::Num { ty, bits: f32_op(op, *a, *b)? }),
+            _ => {}
         }
     }
 
