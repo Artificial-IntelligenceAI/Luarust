@@ -1,0 +1,79 @@
+# Manual only, and nothing depends on it. A question the benchmark raised: lust-rs
+# advertises a trace JIT onto native x64, and comes in slower than plain Lua 5.4. The
+# likeliest reason is that a trace JIT triggers on function calls, and the benchmark is
+# one loop at the top level that is never re-entered -- so the JIT may simply never fire.
+# This puts the same loop inside a function to find out.
+name: why is lust slow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install lust
+        run: cargo install lust-rs >/dev/null 2>&1; lust --version
+
+      - name: The same loop, three ways round
+        run: |
+          set +e
+          N=20000000
+
+          cat > top.lust <<EOF
+          local sum: int = 0
+          for i = 1, $N do
+            sum = (sum + i) % 1000000007
+          end
+          println(tostring(sum))
+          EOF
+
+          cat > wrapped.lust <<EOF
+          function bench(n: int): int
+            local sum: int = 0
+            for i = 1, n do
+              sum = (sum + i) % 1000000007
+            end
+            return sum
+          end
+          println(tostring(bench($N)))
+          EOF
+
+          cat > warmed.lust <<EOF
+          function bench(n: int): int
+            local sum: int = 0
+            for i = 1, n do
+              sum = (sum + i) % 1000000007
+            end
+            return sum
+          end
+          println(tostring(bench(1000)))
+          println(tostring(bench($N)))
+          EOF
+
+          bench() {
+            local name="\$1"; shift
+            local best=99999999 out=""
+            for _ in 1 2 3; do
+              local t0=\$(date +%s%N)
+              out=\$("\$@" 2>&1 | tail -1 | tr -d '\n')
+              local t1=\$(date +%s%N)
+              local ms=\$(( (t1 - t0) / 1000000 ))
+              [ "\$ms" -lt "\$best" ] && best=\$ms
+            done
+            printf "%-28s %7s ms   %s\n" "\$name" "\$best" "\$out"
+          }
+
+          echo "N = $N"
+          bench "loop at the top level"   lust top.lust
+          bench "loop inside a function"  lust wrapped.lust
+          bench "called once to warm up"  lust warmed.lust
+          exit 0
+
+      - name: Does it say anything about the JIT?
+        run: |
+          set +e
+          lust --help
+          echo "=== environment knobs it might have ==="
+          strings "$(command -v lust)" | grep -iE "^LUST_[A-Z_]+$|jit.*(threshold|enable|disable)" | sort -u | head -20
+          exit 0
