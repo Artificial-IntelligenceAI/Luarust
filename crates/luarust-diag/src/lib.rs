@@ -13,7 +13,11 @@
 //! Get any of the three wrong and the error still looks plausible, which is why they are
 //! separated here rather than left for whoever writes the renderer to conflate.
 
+pub mod diag;
 pub mod grapheme;
+pub mod render;
 pub mod source;
 
+pub use diag::{Diagnostic, Label, LabelStyle};
+pub use render::{report, GREETING};
 pub use source::{Position, SourceFile, Span};
