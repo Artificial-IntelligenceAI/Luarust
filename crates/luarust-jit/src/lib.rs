@@ -43,7 +43,7 @@ pub struct Declined {
 /// without having paid for a context.
 pub fn accepts(program: &Checked) -> Result<(), Declined> {
     fn ty_ok(ty: Ty) -> bool {
-        ty.is_integer() || matches!(ty, Ty::B32 | Ty::B64)
+        ty.is_integer() || matches!(ty, Ty::B16 | Ty::B32 | Ty::B64)
     }
     fn expr(e: &Expr) -> Result<(), Declined> {
         if !ty_ok(e.ty()) {
@@ -191,6 +191,7 @@ struct Helpers<'ctx> {
     print_text: FunctionValue<'ctx>,
     print_value: FunctionValue<'ctx>,
     time_now: FunctionValue<'ctx>,
+    compare: FunctionValue<'ctx>,
     fallback: FunctionValue<'ctx>,
 }
 
@@ -216,8 +217,16 @@ impl<'ctx> Emitter<'ctx> {
             module.add_function("luarust_print_value", void_t.fn_type(&[i64_t.into(), i32_t.into()], false), None);
         engine.add_global_mapping(&print_value, runtime::print_value as *const () as usize);
 
-        let time_now = module.add_function("luarust_time_now", i64_t.fn_type(&[], false), None);
+        let time_now =
+            module.add_function("luarust_time_now", i64_t.fn_type(&[i32_t.into()], false), None);
         engine.add_global_mapping(&time_now, runtime::time_now as *const () as usize);
+
+        let compare = module.add_function(
+            "luarust_compare",
+            i32_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&compare, runtime::compare_values as *const () as usize);
 
         let fallback = module.add_function(
             "luarust_fallback",
@@ -255,7 +264,7 @@ impl<'ctx> Emitter<'ctx> {
             types: vec![Ty::I64; program.slots],
             spans: Vec::new(),
             overflow: program.overflow,
-            helpers: Helpers { print_text, print_value, time_now, fallback },
+            helpers: Helpers { print_text, print_value, time_now, compare, fallback },
         }
     }
 
@@ -368,26 +377,33 @@ impl<'ctx> Emitter<'ctx> {
             Expr::Load { slot, ty, .. } => (self.load(*slot, *ty), *ty),
 
             Expr::TimeNow { ty, .. } => {
+                // Asked for in the format it is being read as. Answering in b64 whatever
+                // was wanted would put a b64's bits in a b32 variable.
+                let tag = self.context.i32_type().const_int(runtime::tag_of(*ty) as u64, false);
                 let bits = self
                     .builder
-                    .build_call(self.helpers.time_now, &[], "now")
+                    .build_call(self.helpers.time_now, &[tag.into()], "now")
                     .expect("a call")
                     .try_as_basic_value()
                     .expect_basic("the clock returns a value")
                     .into_int_value();
-                let as_float = self
-                    .builder
-                    .build_bit_cast(bits, self.context.f64_type(), "seconds")
-                    .expect("a cast");
-                (as_float, *ty)
+                (self.value_from_bits(bits, *ty), *ty)
             }
 
             Expr::Neg { operand, ty, span } => {
                 let (value, _) = self.expr(operand);
+                // Negating a float is flipping its sign bit and nothing else, which is
+                // exact for every value including the zeros and the NaNs. Not `0 - x`:
+                // `0.0 - 0.0` is `+0.0` where negating a zero gives `-0.0`.
+                if *ty == Ty::B16 {
+                    let sign = self.context.i16_type().const_int(0x8000, false);
+                    let flipped = self
+                        .builder
+                        .build_xor(value.into_int_value(), sign, "neg")
+                        .expect("an xor");
+                    return (flipped.into(), *ty);
+                }
                 if ty.is_float() {
-                    // Not `0 - x`: `0.0 - 0.0` is `+0.0` where negating a zero gives
-                    // `-0.0`, and the other two paths flip the sign bit. One bit, in one
-                    // value, that the fuzzer would eventually have found.
                     let negated = self
                         .builder
                         .build_float_neg(value.into_float_value(), "neg")
@@ -414,11 +430,15 @@ impl<'ctx> Emitter<'ctx> {
                 self.context.f32_type().const_float(float as f64).into()
             }
             Ty::B64 => self.context.f64_type().const_float(f64::from_bits(*bits)).into(),
+            // b16 travels as its encoding, not as a number the machine understands.
             _ => self.int_type(*ty).const_int(*bits, false).into(),
         }
     }
 
     fn int_type(&self, ty: Ty) -> inkwell::types::IntType<'ctx> {
+        if ty == Ty::B16 {
+            return self.context.i16_type();
+        }
         match ty.int_bits().unwrap_or(64) {
             8 => self.context.i8_type(),
             16 => self.context.i16_type(),
@@ -445,7 +465,7 @@ impl<'ctx> Emitter<'ctx> {
                 self.builder.build_bit_cast(narrow, self.context.f32_type(), "f").expect("a cast")
             }
             _ => {
-                let width = ty.int_bits().unwrap_or(64);
+                let width = if ty == Ty::B16 { 16 } else { ty.int_bits().unwrap_or(64) };
                 if width == 64 {
                     raw.into()
                 } else {
@@ -478,7 +498,8 @@ impl<'ctx> Emitter<'ctx> {
             }
             _ => {
                 let int = value.into_int_value();
-                if ty.int_bits().unwrap_or(64) == 64 {
+                let width = if ty == Ty::B16 { 16 } else { ty.int_bits().unwrap_or(64) };
+                if width == 64 {
                     int
                 } else {
                     self.builder
@@ -497,15 +518,24 @@ impl<'ctx> Emitter<'ctx> {
         }
     }
 
+    /// One, of whichever type — taken from the same place every other execution path takes
+    /// it, because "one" is not the integer 1 in every format. As a `b16` encoding, `1` is
+    /// the smallest subnormal there is, and a loop counting up by it never arrives.
     fn one(&self, ty: Ty) -> BasicValueEnum<'ctx> {
+        let Value::Num { bits, .. } = luarust_check::value::one_of(ty) else {
+            unreachable!("a number")
+        };
         match ty {
-            Ty::B32 => self.context.f32_type().const_float(1.0).into(),
-            Ty::B64 => self.context.f64_type().const_float(1.0).into(),
-            _ => self.int_type(ty).const_int(1, false).into(),
+            Ty::B32 => self.context.f32_type().const_float(f64::from(f32::from_bits(bits as u32))).into(),
+            Ty::B64 => self.context.f64_type().const_float(f64::from_bits(bits)).into(),
+            _ => self.int_type(ty).const_int(bits, false).into(),
         }
     }
 
     fn greater(&self, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>, ty: Ty) -> inkwell::values::IntValue<'ctx> {
+        if ty == Ty::B16 {
+            return self.compare_by_call(a, b, ty, runtime::GREATER);
+        }
         if ty.is_float() {
             self.builder
                 .build_float_compare(FloatPredicate::OGT, a.into_float_value(), b.into_float_value(), "gt")
@@ -519,6 +549,9 @@ impl<'ctx> Emitter<'ctx> {
     }
 
     fn equal(&self, a: BasicValueEnum<'ctx>, b: BasicValueEnum<'ctx>, ty: Ty) -> inkwell::values::IntValue<'ctx> {
+        if ty == Ty::B16 {
+            return self.compare_by_call(a, b, ty, runtime::EQUAL);
+        }
         if ty.is_float() {
             self.builder
                 .build_float_compare(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value(), "eq")
@@ -528,6 +561,35 @@ impl<'ctx> Emitter<'ctx> {
                 .build_int_compare(IntPredicate::EQ, a.into_int_value(), b.into_int_value(), "eq")
                 .expect("a compare")
         }
+    }
+
+    /// Ask `luarust-num` how two values order, and test the answer against the one wanted.
+    fn compare_by_call(
+        &self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        ty: Ty,
+        wanted: u64,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let i32_t = self.context.i32_type();
+        let outcome = self
+            .builder
+            .build_call(
+                self.helpers.compare,
+                &[
+                    i32_t.const_int(runtime::tag_of(ty) as u64, false).into(),
+                    self.to_bits(a, ty).into(),
+                    self.to_bits(b, ty).into(),
+                ],
+                "ordering",
+            )
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("comparing returns a value")
+            .into_int_value();
+        self.builder
+            .build_int_compare(IntPredicate::EQ, outcome, i32_t.const_int(wanted, false), "is")
+            .expect("a compare")
     }
 
     /// Arithmetic, natively where that is certainly the same answer, and by calling back
@@ -540,6 +602,10 @@ impl<'ctx> Emitter<'ctx> {
         ty: Ty,
         span: Span,
     ) -> BasicValueEnum<'ctx> {
+        // b16 has no instructions on either target, so all of it goes back.
+        if ty == Ty::B16 {
+            return self.call_fallback(op, a, b, ty, span);
+        }
         if ty.is_float() {
             return match op {
                 BinOp::Add => self.builder.build_float_add(a.into_float_value(), b.into_float_value(), "add").expect("add").into(),
@@ -739,7 +805,7 @@ impl<'ctx> Emitter<'ctx> {
                 self.builder.build_bit_cast(narrow, self.context.f32_type(), "f").expect("a cast")
             }
             _ => {
-                let width = ty.int_bits().unwrap_or(64);
+                let width = if ty == Ty::B16 { 16 } else { ty.int_bits().unwrap_or(64) };
                 if width == 64 {
                     bits.into()
                 } else {

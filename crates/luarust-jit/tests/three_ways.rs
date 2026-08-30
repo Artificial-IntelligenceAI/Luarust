@@ -150,6 +150,47 @@ fn float_arithmetic_including_the_signs_of_zero() {
 }
 
 #[test]
+fn b16_is_taken_now_even_though_it_has_no_instructions() {
+    // Carried as its sixteen-bit encoding, worked on by calling back into luarust-num.
+    // The README's own number, which is what `b16 '0.1'` actually is.
+    assert_eq!(ran("var.local.b16 ['a'] = ['0.1']; print['a'];"), "0.0999755859375");
+    assert_eq!(
+        ran("var.local.b16 ['a','b'] = ['1.5','0.25']; var.local.b16 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
+        "1.75"
+    );
+    // Negating flips the sign bit, so a zero keeps a sign the way it does everywhere else.
+    assert_eq!(ran("var.local.b16 ['z'] = [math { -0 }]; print['z'];"), "-0");
+    // And ordering, which is neither an integer nor a float comparison at this width.
+    assert_eq!(
+        ran("loop.temp.range.b16 ['i'] = ['1', '4'] { print['i' \" \"]; }"),
+        "1 2 3 4 "
+    );
+    // The remainder, which goes back to luarust-num rather than to the hardware.
+    assert_eq!(ran("var.local.b16 ['r'] = [math { -7 mod 3 }]; print['r'];"), "2");
+}
+
+#[test]
+fn the_clock_is_read_as_the_type_it_was_asked_for() {
+    // Not compared across paths: they run at different speeds, so they read different
+    // times, and that is the clock working rather than the paths disagreeing. What is
+    // checked is that the number means seconds -- answering in b64 whatever was asked for
+    // would put a b64's bits in a b32 variable and the value would be nonsense.
+    for ty in ["b32", "b64"] {
+        let source = format!("var.local.{ty} ['t'] = [time.now]; print['t'];");
+        let lexed = luarust_lex::lex(&source);
+        let parsed = luarust_parse::parse(&source, &lexed.tokens);
+        let (program, errors) = luarust_check::check(&parsed.program);
+        assert!(errors.is_empty(), "{errors:#?}");
+
+        let mut out = Vec::new();
+        luarust_jit::run(&program, &mut out).expect("the JIT took it").expect("it ran");
+        let text = String::from_utf8(out).expect("output is text");
+        let seconds: f64 = text.parse().unwrap_or_else(|_| panic!("{ty} gave `{text}`"));
+        assert!((0.0..60.0).contains(&seconds), "{ty} said {seconds} seconds");
+    }
+}
+
+#[test]
 fn a_program_that_stops_stops_the_same_way() {
     three_ways("print[\"before\"]; var.local.i32 ['x'] = [math { 1 div 0 }];");
     three_ways("defaults.overflow.trap; var.local.ui8 ['x'] = [math { 255 + 1 }];");
@@ -158,7 +199,6 @@ fn a_program_that_stops_stops_the_same_way() {
 #[test]
 fn what_it_will_not_take_it_says_so_about() {
     for (source, expected) in [
-        ("var.local.b16 ['x'] = ['1']; print['x'];", "b16"),
         ("var.local.b128 ['x'] = ['1']; print['x'];", "b128"),
         ("var.local.b256 ['x'] = ['1']; print['x'];", "b256"),
         ("var.local.str ['x'] = ['hi']; print['x'];", "str"),

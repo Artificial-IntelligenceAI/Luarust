@@ -5,8 +5,8 @@
 //! functions the interpreter and the VM use. That is not a shortcut: it is what keeps the
 //! three paths giving the same answers instead of nearly the same ones.
 
-use luarust_check::value::{Overflow, Value, binary_op, format_of};
-use luarust_num::binary::{self, Round};
+use luarust_check::value::{Overflow, Value, binary_op, compare, format_of};
+use luarust_num::binary::{self, Comparison, Round};
 use luarust_parse::ast::{BinOp, Ty};
 use std::cell::RefCell;
 use std::time::Instant;
@@ -114,16 +114,38 @@ pub extern "C" fn print_value(bits: u64, tag: u32) {
     OUTPUT.with(|out| out.borrow_mut().extend_from_slice(text.as_bytes()));
 }
 
-/// Seconds since the program began, as `b64` bits.
-pub extern "C" fn time_now() -> u64 {
+/// Seconds since the program began, in whichever float format was asked for.
+///
+/// Takes the type rather than always answering in `b64`, because a `b32` variable holding
+/// a `b64`'s bits is a value that is not what it says it is.
+pub extern "C" fn time_now(tag: u32) -> u64 {
     let seconds = STARTED.with(|at| {
         at.borrow().map(|started| started.elapsed().as_secs_f64()).unwrap_or(0.0)
     });
-    let fmt = format_of(Ty::B64).expect("b64 has a format");
+    let fmt = format_of(untag(tag)).expect("the clock is read as a float");
     binary::from_decimal::<8>(fmt, Round::TiesToEven, &format!("{seconds:.9}"))
         .expect("nine decimal places is a number")
         .low64()
 }
+
+/// How two values order, the way every other execution path orders them.
+///
+/// Compiled code does this itself for the types where an integer or a float comparison is
+/// exactly right. `b16` is not one of those: its values are sign-and-magnitude in sixteen
+/// bits, which is neither.
+pub extern "C" fn compare_values(tag: u32, a: u64, b: u64) -> i32 {
+    match compare(&value_of(tag, a), &value_of(tag, b)) {
+        Comparison::Less => 0,
+        Comparison::Equal => 1,
+        Comparison::Greater => 2,
+        Comparison::Unordered => 3,
+    }
+}
+
+/// What [`compare_values`] answers.
+pub const LESS: u64 = 0;
+pub const EQUAL: u64 = 1;
+pub const GREATER: u64 = 2;
 
 /// Anything compiled code did not want to do itself.
 ///
