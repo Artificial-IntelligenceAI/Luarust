@@ -13,7 +13,15 @@ luarust — a language that would rather not guess
     luarust verify <file.lr>    run it both ways and report whether they agree
     luarust dis <file.lr>       show what the compiler decided
     luarust check <file.lr>     check it and stop
+    luarust fuzz [count]        write programs and check the paths agree
     luarust --help              this
+";
+
+/// Only there when the JIT was built in, which needs LLVM.
+#[cfg(feature = "jit")]
+const JIT_USAGE: &str = "\
+    luarust jit <file.lr>       compile it with LLVM, in memory, and run it
+    luarust ir <file.lr>        show the LLVM IR
 ";
 
 /// What to do once a file has checked out.
@@ -23,6 +31,10 @@ enum Then {
     Interpret,
     Verify,
     Disassemble,
+    #[cfg(feature = "jit")]
+    Jit,
+    #[cfg(feature = "jit")]
+    Ir,
 }
 
 fn main() -> ExitCode {
@@ -35,6 +47,10 @@ fn main() -> ExitCode {
         Some("interp") => Then::Interpret,
         Some("verify") => Then::Verify,
         Some("dis") => Then::Disassemble,
+        #[cfg(feature = "jit")]
+        Some("jit") => Then::Jit,
+        #[cfg(feature = "jit")]
+        Some("ir") => Then::Ir,
         Some("check") => Then::Nothing,
         Some("fuzz") => {
             let count = path
@@ -45,10 +61,14 @@ fn main() -> ExitCode {
         }
         Some("--help" | "-h" | "help") => {
             print!("{USAGE}");
+            #[cfg(feature = "jit")]
+            print!("{JIT_USAGE}");
             return ExitCode::SUCCESS;
         }
         _ => {
             eprint!("{USAGE}");
+            #[cfg(feature = "jit")]
+            eprint!("{JIT_USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -113,6 +133,33 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         }
 
         Then::Verify => verify(&program, &source),
+
+        // The JIT declines more than it takes, so a program it will not compile falls
+        // back to the VM rather than failing.
+        #[cfg(feature = "jit")]
+        Then::Jit => {
+            let mut out = std::io::stdout().lock();
+            match luarust_jit::run(&program, &mut out) {
+                Ok(outcome) => finish(outcome, &mut out, &source),
+                Err(declined) => {
+                    eprintln!("the JIT declined this program: {}. Running it on the VM.", declined.because);
+                    let chunk = luarust_vm::compile(&program);
+                    finish(luarust_vm::run(&chunk, &mut out), &mut out, &source)
+                }
+            }
+        }
+
+        #[cfg(feature = "jit")]
+        Then::Ir => match luarust_jit::emit_ir(&program) {
+            Ok(ir) => {
+                print!("{ir}");
+                ExitCode::SUCCESS
+            }
+            Err(declined) => {
+                eprintln!("the JIT declined this program: {}", declined.because);
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 

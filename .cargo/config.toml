@@ -1,0 +1,5 @@
+# inkwell needs to find LLVM 21, which Homebrew keeps keg-only and off PATH.
+# An LLVM_SYS_211_PREFIX already in the environment takes precedence over this, which is
+# how CI points it somewhere else.
+[env]
+LLVM_SYS_211_PREFIX = "/opt/homebrew/opt/llvm@21"

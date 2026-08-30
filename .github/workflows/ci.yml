@@ -29,11 +29,13 @@ jobs:
 
       # Debug first: the soft-float carries debug_assert!s about how wide an
       # intermediate is allowed to get, and release compiles them out.
+      # `--workspace` would drag in luarust-jit, which is the one crate that needs LLVM
+      # installed. It has a job of its own below.
       - name: Test (debug, with debug_assert! active)
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --exclude luarust-jit --all-targets
 
       - name: Test (release)
-        run: cargo test --workspace --all-targets --release
+        run: cargo test --workspace --exclude luarust-jit --all-targets --release
 
   fuzz:
     name: fuzz
@@ -44,10 +46,31 @@ jobs:
       # to agree about every one of them.
       - run: cargo run --release -p luarust-cli -- fuzz 200000
 
+  jit:
+    name: jit / linux-x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: LLVM 21
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main"
+          sudo apt-get install -y -qq llvm-21-dev libpolly-21-dev
+      - name: Test the third execution path
+        env:
+          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+        run: cargo test -p luarust-jit --release
+      - name: Lint it
+        env:
+          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+        run: |
+          rustup component add clippy
+          cargo clippy -p luarust-jit --all-targets -- -D warnings
+
   lint:
     name: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - run: rustup component add clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --exclude luarust-jit --all-targets -- -D warnings

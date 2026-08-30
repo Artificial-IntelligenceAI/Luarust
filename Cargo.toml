@@ -6,6 +6,19 @@ members = [
     "crates/luarust-diag",
     "crates/luarust-gen",
     "crates/luarust-interp",
+    "crates/luarust-jit",
+    "crates/luarust-lex",
+    "crates/luarust-num",
+    "crates/luarust-parse",
+    "crates/luarust-vm",
+]
+
+default-members = [
+    "crates/luarust-check",
+    "crates/luarust-cli",
+    "crates/luarust-diag",
+    "crates/luarust-gen",
+    "crates/luarust-interp",
     "crates/luarust-lex",
     "crates/luarust-num",
     "crates/luarust-parse",
