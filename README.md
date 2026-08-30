@@ -149,9 +149,20 @@ Most operators have more than one spelling, and they all mean exactly the same t
 | multiply | `*` | `x` |
 | raise to a power | `**` | `xx` or `pow` |
 | divide | `/` | `÷` or `div` |
-| remainder | `%` | `mod` |
+| remainder | `mod` | |
 
-The remainder is the one mathematics and the C family disagree about, and Luarust sides
+`%` is **not** remainder. Mathematics has never used it for one — it is percent, written
+after a number, so `15%` is fifteen hundredths:
+
+```luarust
+var.local.d64 ['price'] = ['19.99'];
+var.local.d64 ['vat']   = [math { 'price' x 20% }];
+```
+
+Every number in Luarust is a float, so a percentage is an ordinary value rather than an
+awkward one, and in a decimal type `20%` is exactly a fifth.
+
+Remainder is the operation mathematics and the C family disagree about, and Luarust sides
 with mathematics: the result takes the sign of the **divisor**, not the dividend.
 
 ```luarust
