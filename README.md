@@ -477,45 +477,53 @@ cargo build --release -p luarust-cli --features jit
 ## How fast it is
 
 The benchmark is a dependent chain — `sum = (sum + i) mod 1000000007`, a hundred million
-times. Each value needs the one before it, so it cannot be folded into a formula,
-vectorised, or run out of order. Everybody actually loops.
+times, in a signed 64-bit integer. Each value needs the one before it, so it cannot be
+folded into a formula, vectorised, or run out of order. Everybody actually loops.
 
-| | 100M | vs Lua 5.4 |
+| | 100M | vs C |
 | --- | --- | --- |
-| **Luarust**, LLVM JIT | **322 ms** | **0.43×** |
-| Lua 5.4 | 751 ms | 1× |
-| LuaJIT | 796 ms | 1.1× |
-| Lust | 1,053 ms | 1.4× |
-| Luarust, bytecode VM | 7,868 ms | 10.5× |
-| Luarust, tree-walker | 13,580 ms | 18.1× |
+| C, clang -O2 | 377 ms | 1× |
+| Rust, rustc -O | 392 ms | 1.04× |
+| Java 17 | 419 ms | 1.11× |
+| **Luarust**, LLVM JIT | **480 ms** | **1.27×** |
+| Lua 5.4 | 753 ms | 2.0× |
+| LuaJIT | 797 ms | 2.1× |
+| Lust | 1,054 ms | 2.8× |
+| Luarust, bytecode VM | 7,785 ms | 20.6× |
+| Luarust, tree-walker | 13,437 ms | 35.6× |
 
-One x86-64 machine, best of three, every one of them printing 15000000. The bottom three
-rows are the same program run three different ways, which is the point of keeping all
-three.
+One x86-64 machine, one job, best of three, every one of them printing 15000000.
 
-Two things about that first row, since a benchmark nobody argues with is a benchmark
-nobody checked. The 322 ms **includes LLVM's own compilation**, which is most of why the
-smaller size below scales oddly. And part of the win is that a constant divisor lets LLVM
-turn a remainder into a multiply and a shift — a real advantage of compiling something,
-and not one a bytecode VM can have, since it does not know the divisor never changes.
+Some of that 480 ms is LLVM compiling the program, which happens inside the measurement.
+And some of the gap to C is a feature rather than a shortfall: a Luarust loop tests
+whether the counter has *reached* its bound before stepping, rather than stepping and then
+testing, which is what lets `['253', '255']` finish in a `ui8` instead of wrapping round
+forever. That is one extra comparison per iteration, on purpose.
 
 Before any of it means anything, each timing is checked for whether it still contains a
 loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a
-formula will report a magnificent number for doing nothing. Ten times the work should take
-ten times the time:
+formula reports a magnificent number for doing nothing. Ten times the work should take ten
+times the time:
 
 | | 10M | 100M | ratio |
 | --- | --- | --- | --- |
-| Lua 5.4 | 78 ms | 751 ms | 9.6× |
-| LuaJIT | 82 ms | 796 ms | 9.7× |
-| Lust | 108 ms | 1,053 ms | 9.8× |
-| Luarust JIT | 40 ms | 322 ms | 8.1× |
-| Luarust VM | 797 ms | 7,868 ms | 9.9× |
-| Luarust tree-walker | 1,362 ms | 13,580 ms | 10.0× |
+| C, clang -O2 | 40 ms | 377 ms | 9.4× |
+| Rust, rustc -O | 42 ms | 392 ms | 9.3× |
+| Java 17 | 80 ms | 419 ms | 5.2× |
+| Luarust JIT | 60 ms | 480 ms | 8.0× |
+| Lua 5.4 | 79 ms | 753 ms | 9.5× |
+| LuaJIT | 83 ms | 797 ms | 9.6× |
+| Lust | 110 ms | 1,054 ms | 9.6× |
+| Luarust VM | 786 ms | 7,785 ms | 9.9× |
+| Luarust tree-walker | 1,352 ms | 13,437 ms | 9.9× |
 
-The JIT's 8.1× is the compile time showing: subtract the fixed cost of building the machine
-code and the loop underneath it scales at exactly ten. Nobody's loop was deleted.
+Nobody's loop was deleted. The three that come in under ten are the three that pay a fixed
+cost before they start: the JVM starting, and LLVM compiling.
 
-The `benchmark` workflow in this repository runs both tables, and the numbers move by a
-third between runs because the machine underneath is shared — which is why every row is
-always measured in the same job as every other.
+Everything reads its `N` from the command line so it cannot be folded away, except Luarust,
+which has no argv yet and has it written into the source. The scaling table is what would
+catch that if it ever began to matter.
+
+The `benchmark` workflow in this repository runs both tables. The numbers move by a third
+between runs because the machine underneath is shared, which is why every row is always
+measured in the same job as every other.
