@@ -297,7 +297,6 @@ impl<'ctx> Emitter<'ctx> {
             main,
             slots,
             out_slot,
-            types: vec![Ty::I64; program.slots],
             spans: Vec::new(),
             overflow: program.overflow,
             cells: Vec::new(),
