@@ -73,15 +73,22 @@ The extension turns VS Code's **word-based suggestions off** for these two langu
 offer any word from any open file, which on top of a list that is already exactly right is
 just noise — and worse than noise, because a word that looks like a setting is not one.
 
-It also turns **inline suggestions off in `Luarust.toml`**, and only there. Copilot ships
-inside VS Code now, and a model that has never seen this language will confidently offer
-`"incremental"` for `[gc] mode` — a real mode in Lua's collector and not one of the three
-here. In a file with three sections and five settings, every value being enumerable, a
-guess can only ever be wrong. In `.lr` files inline suggestions are left alone, because a
-guess at the body of a loop may well be worth having. To turn those off too:
+It also turns **inline suggestions off** for both. Copilot ships inside VS Code now, and
+this language exists in one repository — there is no corpus of Luarust anywhere for a
+model to have learned from. So what arrives as ghost text is a guess assembled out of Lua,
+Rust and TOML, and it is wrong in the particular way that is hardest to ignore: it looks
+right. `"incremental"` for `[gc] mode` is a real mode, in Lua's collector. Not one of the
+three here.
+
+The suggestion list beside it is not a guess. Its words come from the lexer and the
+parser, its types from `Ty`, its settings from `luarust-conf`, and CI fails if any of them
+drift. Putting a guess in front of that is a downgrade.
+
+If you want them back — for prose in comments, or because you would rather judge for
+yourself:
 
 ```json
-{ "[luarust]": { "editor.inlineSuggest.enabled": false } }
+{ "[luarust]": { "editor.inlineSuggest.enabled": true } }
 ```
 
 ## Installing it
