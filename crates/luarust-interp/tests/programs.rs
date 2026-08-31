@@ -77,10 +77,20 @@ fn a_perm_counter_holds_the_last_value_it_took() {
 
 #[test]
 fn a_number_prints_as_the_value_that_is_stored() {
+    // Exactly, at every width. None of these is one tenth, and none of them says it is
+    // -- which is the whole reason the language has `er` and the decimal formats.
     assert_eq!(output("var.local.b16 ['a'] = [|0.1|]; print['a'];"), "0.0999755859375");
-    assert_eq!(output("var.local.b32 ['a'] = [|0.1|]; print['a'];"), "0.10000000149011612");
-    assert_eq!(output("var.local.b64 ['a'] = [|0.1|]; print['a'];"), "0.1");
+    assert_eq!(
+        output("var.local.b32 ['a'] = [|0.1|]; print['a'];"),
+        "0.100000001490116119384765625"
+    );
+    assert_eq!(
+        output("var.local.b64 ['a'] = [|0.1|]; print['a'];"),
+        "0.1000000000000000055511151231257827021181583404541015625"
+    );
+    // What is exact in binary stays short, however wide the type is.
     assert_eq!(output("var.local.b16 ['a'] = [|1000|]; print['a'];"), "1000");
+    assert_eq!(output("var.local.b64 ['a'] = [|0.25|]; print['a'];"), "0.25");
 }
 
 #[test]

@@ -20,6 +20,7 @@
 
 pub mod arith;
 pub mod literal;
+pub mod text;
 
 pub use arith::{Comparison, add, compare, div, mul, neg, remainder, sqrt, sub};
 pub use literal::{Invalid, from_decimal};

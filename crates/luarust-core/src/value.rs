@@ -808,11 +808,14 @@ impl std::fmt::Display for Value {
     /// How a value prints: as the value that is actually stored, not as the text that was
     /// written to make it.
     ///
-    /// `b16`, `b32` and `b64` all fit exactly inside an `f64`, so those are shown exactly.
-    /// `b128` and `b256` are shown through `f64` as well, which is **not** exact for them
-    /// — printing those at their full width needs arbitrary-precision decimal output,
-    /// which does not exist here yet. The decimal formats have no such problem: their
-    /// significands are decimal digits already, so writing one out is arranging them.
+    /// Every format shows its own width. A binary float is exactly `sig × 2^exp`, and a
+    /// negative exponent is `sig × 5^k / 10^k` — so every one of them has a finite decimal
+    /// expansion and none of it has to be guessed at. What is shown is the shortest run of
+    /// digits that reads back as the same number, so a `b128` shows the thirty-four
+    /// significant digits it has and a `b64` still shows its sixteen.
+    ///
+    /// The decimal formats never had this trouble: their significands are decimal digits
+    /// already, so writing one out is arranging them.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Str(text) => write!(f, "{text}"),
@@ -842,19 +845,17 @@ impl std::fmt::Display for Value {
             _ => {
                 let ty = self.ty();
                 let fmt_of = format_of(ty).expect("a float type has a format");
-                let widened = binary::convert::<8>(
-                    fmt_of,
-                    Format::B64,
-                    Round::TiesToEven,
-                    self.bits().expect("a float has bits"),
-                );
-                let number = f64::from_bits(widened.low64());
-                if number.is_nan() {
-                    write!(f, "nan")
-                } else if number.is_infinite() {
-                    write!(f, "{}inf", if number.is_sign_negative() { "-" } else { "" })
-                } else {
-                    write!(f, "{number}")
+                let bits = self.bits().expect("a float has bits");
+                match binary::text::to_text(fmt_of, bits) {
+                    Some(written) => write!(f, "{written}"),
+                    // Not a number and not a quantity: those are named, not written out.
+                    None => {
+                        let taken = binary::unpack(fmt_of, bits);
+                        match taken.class {
+                            binary::Class::Nan => write!(f, "nan"),
+                            _ => write!(f, "{}inf", if taken.sign { "-" } else { "" }),
+                        }
+                    }
                 }
             }
         }

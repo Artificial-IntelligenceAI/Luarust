@@ -143,13 +143,13 @@ fn integer_arithmetic() {
 fn float_arithmetic_including_the_signs_of_zero() {
     let b64 = |e: &str| ran(&format!("var.local.b64 ['r'] = [math {{ {e} }}]; print['r'];"));
     assert_eq!(b64("1 div 4"), "0.25");
-    assert_eq!(b64("0.1 + 0.2"), "0.30000000000000004");
+    assert_eq!(b64("0.1 + 0.2"), "0.3000000000000000444089209850062616169452667236328125");
     assert_eq!(b64("1 div 0"), "inf");
     assert_eq!(b64("0 div 0"), "nan");
     // The one that `0 - x` would have got wrong.
     assert_eq!(b64("-0"), "-0");
     assert_eq!(b64("0 - 0"), "0");
-    assert_eq!(ran("var.local.b32 ['r'] = [math { 1 div 3 }]; print['r'];"), "0.3333333432674408");
+    assert_eq!(ran("var.local.b32 ['r'] = [math { 1 div 3 }]; print['r'];"), "0.3333333432674407958984375");
 }
 
 #[test]
@@ -205,8 +205,8 @@ fn a_program_that_stops_stops_the_same_way() {
 fn the_types_with_no_instructions_are_taken_too() {
     // They live in numbered cells on the Rust side and everything done to them is a call,
     // which is what their arithmetic always was. Taken for the coverage, not the speed.
-    assert_eq!(ran("var.local.b128 ['x'] = [|0.1|]; print['x'];"), "0.1");
-    assert_eq!(ran("var.local.b256 ['x'] = [|0.1|]; print['x'];"), "0.1");
+    assert_eq!(ran("var.local.b128 ['x'] = [|0.1|]; print['x'];"), "0.1000000000000000000000000000000000048148248609680896326399448564623182963452541205384704880998469889163970947265625");
+    assert_eq!(ran("var.local.b256 ['x'] = [|0.1|]; print['x'];"), "0.10000000000000000000000000000000000000000000000000000000000000000000000022639197697066780918772798227219479451706327995347845473956537224838753296482112786848828629902395248634881098242194574139706832183183138340609730221331119537353515625");
     assert_eq!(
         ran("var.local.b256 ['a','b'] = [|1.5|,|0.25|]; var.local.b256 ['c'] = [math { 'a' + 'b' }]; print['c'];"),
         "1.75"
@@ -243,7 +243,7 @@ fn a_program_mixing_everything_agrees_three_ways() {
              var.local.bool ['yes'] = [|true|];\n\
              loop.temp.range.i64 ['i'] = [|1|, |5|] { handback 'i' as 'sum'; }\n\
              print[\"hello \" 'who' \" \" 'sum' \" \" 'small' \" \" 'wide' \" \" 'yes' \\n];"),
-        "hello world 15 0.0999755859375 0.1 true\n"
+        "hello world 15 0.0999755859375 0.10000000000000000000000000000000000000000000000000000000000000000000000022639197697066780918772798227219479451706327995347845473956537224838753296482112786848828629902395248634881098242194574139706832183183138340609730221331119537353515625 true\n"
     );
 }
 
@@ -364,7 +364,7 @@ fn a_celled_value_survives_being_carried_through_calls() {
                  return sum[math { 'acc' + b256 |0.1| }, math { 'n' - ui32 |1| }];\n\
              }\n\
              print[sum[|0|, |10|] \\n];"),
-        "1\n"
+        "0.999999999999999999999999999999999999999999999999999999999999999999999995472160460586643816245440354556104109658734400930430905208692555032249340703577442630234274019520950273023780351561085172058633563363372331878053955733776092529296875\n"
     );
 }
 
@@ -488,7 +488,7 @@ fn a_decimal_holds_a_tenth_exactly_on_all_three_paths() {
         ran("var.local.b64 ['a'] = [|0.1|];\n\
              var.local.b64 ['b'] = [|0.2|];\n\
              print[math { 'a' + 'b' } \\n];"),
-        "0.30000000000000004\n"
+        "0.3000000000000000444089209850062616169452667236328125\n"
     );
 }
 
@@ -550,7 +550,7 @@ fn every_element_type_survives_an_array() {
              var.local.array.2.bool ['flags'] = [[|true|, |false|]];\n\
              var.local.array.2.b256 ['wide'] = [[|0.1|, |0.2|]];\n\
              print['names' \" \" 'ratios' \" \" 'flags' \" \" math { 'wide'[|1|] + 'wide'[|2|] } \\n];"),
-        "[Tankun, Claude] [1/3, 2/7] [true, false] 0.3\n"
+        "[Tankun, Claude] [1/3, 2/7] [true, false] 0.30000000000000000000000000000000000000000000000000000000000000000000000181113581576534247350182385817755835613650623962782763791652297798710026371856902294790629039219161989079048785937556593117654657465465106724877841770648956298828125\n"
     );
 }
 

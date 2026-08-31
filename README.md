@@ -24,7 +24,7 @@ We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.**
 | --- | --- |
 | An error names the rule that was broken and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language with no standard library, no `sqrt`, and no way to read a file or take an argument |
 | Nothing is implicit — no conversion, no truthiness, no coercion. Two types meet only where something said they should | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
-| Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all | Nothing is built on top of them. The tower is wide and the library on it is empty |
+| Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all. A float prints as the value it holds, exactly, so `b64 \|0.1\|` shows you it is not one tenth | Nothing is built on top of them. The tower is wide and the library on it is empty. And a `b256` prints more digits than the literal parser can read back |
 | Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | A function can neither take an array nor answer with one, so an array goes no further than the block it was made in |
 | Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine that builds it. That is a big dependency for a small language |
 | Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
@@ -736,6 +736,37 @@ other way round. They are there because counting and indexing want them, and lik
 float here they state their width in their name — there is no bare `i` you have to look
 up. Everything else numeric is a float, and `er` is an exact rational — a numerator over
 a denominator, both unbounded, so it neither rounds nor overflows.
+
+### What a float prints
+
+Exactly what it holds, and not the text that was typed to make it:
+
+```luarust
+var.local.b64 ['a'] = [|0.1|];
+print['a' \n];        -- 0.1000000000000000055511151231257827021181583404541015625
+```
+
+That is not a trick and nothing was rounded to produce it. `0.1` is not representable in
+binary, so a `b64` holds the nearest value it has, and that value has the expansion above.
+Every binary float has a finite one: it is `sig × 2^exp`, and a negative exponent is
+`sig × 5^k / 10^k`, so the point simply goes `k` places along an integer.
+
+Most languages print the shortest digits that would read back as the same number, which
+shows `0.1` and lets you believe it. A language that would rather not guess should not.
+
+| | prints |
+| --- | --- |
+| `b64 \|0.25\|` | `0.25` — exact in binary, so it stays short |
+| `b32 \|0.1\|` | `0.100000001490116119384765625` |
+| `b128 \|1\| div b128 \|3\|` | thirty-four significant digits, not a `b64`'s sixteen |
+| `b256 \|1\| div b256 \|3\|` | seventy-two |
+| `d64 \|0.1\|` | `0.1` — a decimal format holds a tenth exactly |
+| `er \|1\| div er \|3\|` | `1/3` |
+
+The one thing this outruns is reading. A `b256`'s expansion is around two hundred and
+forty digits, and the literal parser accumulates digits into a fixed-width integer that
+stops near a hundred and fifty — so what a `b256` prints is true and cannot be pasted back
+into a program. The other four formats read back exactly.
 
 ### The one that never rounds
 
