@@ -22,14 +22,15 @@ We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.**
 
 | Why pick it | Why not |
 | --- | --- |
-| An error names the rule that was broken and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language that cannot yet write a function |
+| An error names the rule that was broken and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language with no standard library, no `sqrt`, and no way to read a file or take an argument |
 | Nothing is implicit — no conversion, no truthiness, no coercion. Two types meet only where something said they should | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
-| Real IEEE 754, correctly rounded, in five binary formats — including `b128` and `b256`, which almost nothing else on earth implements | The decimal formats and `er` are in the type list and not yet built. A `d64` answers with an error, not a number |
+| Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all | Nothing is built on top of them. The tower is wide and the library on it is empty |
+| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | Nothing frees them. The heap only grows while a program runs, because the collector is designed and not yet written |
 | Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine that builds it. That is a big dependency for a small language |
-| Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide, and the fuzzer has found real ones |
+| Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
 | Only what a program uses gets delivered. No garbage collector, no parser, no JIT on the device | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
-| 1.27× C on the dependent-chain benchmark, from a language nobody has optimised | 1.27× C is still last place behind C, Rust and Java, and the bytecode VM is slower than Lua |
-| It is small enough to read. Thirteen crates, about 13,000 lines, and the whole thing fits in a head | It is one person's hobby project at version 0.0.0, and stability is **not a guarantee** |
+| 1.27× C on the dependent-chain benchmark on x86-64, from a language nobody has optimised | 1.86× C on an Apple M5 — behind C, Rust, Java **and PyPy**, which runs the same loop with the same floored `mod` and is 1.14× C. And the bytecode VM is still slower than Lua |
+| It is small enough to read. Thirteen crates, about 20,500 lines, and the whole thing fits in a head | It is one person's hobby project at version 0.0.0, and stability is **not a guarantee** |
 
 ## Declaring things
 
