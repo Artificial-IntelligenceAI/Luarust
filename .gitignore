@@ -5,5 +5,6 @@
 # Compiled chunks. Built from the sources beside them.
 *.lrc
 
-# Where Tankun writes Luarust. Not part of the language.
-/ts/
+# Where the author writes Luarust. Not part of the language, and not `ts` -- that is the
+# home directory nearly every project here sits under, and one of them should not be it.
+/author-test/
