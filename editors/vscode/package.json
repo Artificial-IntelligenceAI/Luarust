@@ -103,7 +103,8 @@
       },
       "[luarust-toml]": {
         "editor.wordBasedSuggestions": "off",
-        "editor.suggest.showWords": false
+        "editor.suggest.showWords": false,
+        "editor.inlineSuggest.enabled": false
       }
     }
   }

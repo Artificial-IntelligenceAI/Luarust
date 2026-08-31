@@ -73,6 +73,17 @@ The extension turns VS Code's **word-based suggestions off** for these two langu
 offer any word from any open file, which on top of a list that is already exactly right is
 just noise — and worse than noise, because a word that looks like a setting is not one.
 
+It also turns **inline suggestions off in `Luarust.toml`**, and only there. Copilot ships
+inside VS Code now, and a model that has never seen this language will confidently offer
+`"incremental"` for `[gc] mode` — a real mode in Lua's collector and not one of the three
+here. In a file with three sections and five settings, every value being enumerable, a
+guess can only ever be wrong. In `.lr` files inline suggestions are left alone, because a
+guess at the body of a loop may well be worth having. To turn those off too:
+
+```json
+{ "[luarust]": { "editor.inlineSuggest.enabled": false } }
+```
+
 ## Installing it
 
 Symlink it into VS Code's extensions folder and restart:
