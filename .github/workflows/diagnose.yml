@@ -1,0 +1,127 @@
+# Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
+# Times the dependent-chain loop with and without its `mod`, in both interpreters,
+# against three C controls -- constant modulus (strength-reduced, no divide), argv
+# modulus (a real idiv every iteration), and no modulus at all. If the interpreters'
+# mod-minus-add delta matches the C idiv delta, the x86-64 gap is divide latency.
+name: diagnose
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    name: mod against add, on x86-64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Machine
+        run: |
+          uname -m; nproc
+          grep -m1 "model name" /proc/cpuinfo || true
+
+      - name: Build Luarust
+        run: cargo build --release -p luarust-cli
+
+      - name: Run
+        run: |
+          set +e
+          bench() {
+            local name="$1"; shift
+            local best=99999999 out=""
+            for _ in 1 2 3; do
+              local t0=$(date +%s%N)
+              out=$("$@" 2>&1 | tr -d '\n')
+              local t1=$(date +%s%N)
+              local ms=$(( (t1 - t0) / 1000000 ))
+              [ "$ms" -lt "$best" ] && best=$ms
+            done
+            printf "%-24s %7s ms   %s\n" "$name" "$best" "$out"
+          }
+
+          N=100000000
+
+          cat > bench_mod.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              long n = atol(argv[1]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
+              printf("%ld", sum);
+              return 0;
+          }
+          EOF
+          cat > bench_divmod.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              long n = atol(argv[1]), m = atol(argv[2]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % m;
+              printf("%ld", sum);
+              return 0;
+          }
+          EOF
+          cat > bench_add.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              long n = atol(argv[1]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = sum + i;
+              printf("%ld", sum);
+              return 0;
+          }
+          EOF
+          sed -i 's/^          //' bench_mod.c bench_divmod.c bench_add.c
+          cc -O2 -o bench_mod bench_mod.c
+          cc -O2 -o bench_divmod bench_divmod.c
+          cc -O2 -o bench_add bench_add.c
+
+          cat > modloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+          }
+          print['sum'];
+          EOF
+          cat > modloop_u64.lr <<EOF
+          var.local.mut.ui64 ['sum'] = [|0|];
+          loop.temp.range.ui64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+          }
+          print['sum'];
+          EOF
+          cat > addloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') }];
+          }
+          print['sum'];
+          EOF
+
+          LR=./target/release/luarust
+          bench "C const mod"        ./bench_mod $N
+          bench "C argv mod (idiv)"  ./bench_divmod $N 1000000007
+          bench "C add only"         ./bench_add $N
+          bench "VM mod i64"         $LR run modloop.lr
+          bench "VM mod ui64"        $LR run modloop_u64.lr
+          bench "VM add"             $LR run addloop.lr
+          bench "interp mod i64"     $LR interp modloop.lr
+          bench "interp mod ui64"    $LR interp modloop_u64.lr
+          bench "interp add"         $LR interp addloop.lr
+
+      - name: Cycle counts, if perf is willing
+        run: |
+          set +e
+          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1
+          PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1)
+          [ -z "$PERF" ] && PERF=perf
+          sudo sysctl -w kernel.perf_event_paranoid=1 >/dev/null 2>&1
+          for cmd in "./bench_divmod 100000000 1000000007" \
+                     "./target/release/luarust run modloop.lr" \
+                     "./target/release/luarust run addloop.lr" \
+                     "./target/release/luarust interp modloop.lr" \
+                     "./target/release/luarust interp addloop.lr"; do
+            echo "==== $cmd"
+            $PERF stat -e task-clock,cycles,instructions,branches,branch-misses $cmd 2>&1 | tail -12
+          done
+          exit 0
