@@ -55,3 +55,11 @@ already made — the rest is implementation.
 Tasks 1 and 2 are done and verified — see [x86-interpreter-gap.md](x86-interpreter-gap.md)
 and the JIT reachability commit (324797e). The diagnose workflow is deleted; its
 eight rounds live in the branch history.
+
+## For whoever starts iteration 3 (not task 3)
+
+**AOT must call `optimise` too.** It will be a third path that produces machine code, and
+the two that exist both call it. Forgetting it is silent: correct output, green tests, the
+fuzzer agreeing, and 43% slower than it should be. The doc comment on `optimise` in
+`luarust-jit/src/lib.rs` says so, because that is how the JIT shipped until somebody read
+the IR it was emitting.

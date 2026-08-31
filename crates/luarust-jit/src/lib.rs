@@ -127,6 +127,12 @@ pub fn emit_ir(chunk: &Chunk) -> Result<String, Declined> {
 
 /// Run LLVM's own optimiser over the module before anything is compiled.
 ///
+/// **Every path that produces machine code must call this.** There are two today, `run`
+/// and `emit_ir`, and ahead-of-time output will be a third. Forgetting it does not fail:
+/// the code is correct, the tests pass, the fuzzer agrees, and the result is 43% slower
+/// for no visible reason. That is not hypothetical — it is how the JIT shipped until
+/// somebody read the emitted IR and asked why it was full of allocas.
+///
 /// `OptimizationLevel::Aggressive` on the execution engine is the *codegen* level --
 /// instruction selection, scheduling, register allocation. It runs no IR passes at all,
 /// so without this every register stays the `alloca` it was emitted as, and a check
