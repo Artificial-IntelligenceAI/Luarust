@@ -1,12 +1,16 @@
 # Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
-# Times the dependent-chain loop with and without its `mod`, in both interpreters,
-# against three C controls -- constant modulus (strength-reduced, no divide), argv
-# modulus (a real idiv every iteration), and no modulus at all. If the interpreters'
-# mod-minus-add delta matches the C idiv delta, the x86-64 gap is divide latency.
+#
+# Round 1 (in this file's history) killed the divide-latency hypothesis: C with a real
+# idiv per iteration ran as fast as C with the strength-reduced constant, on the same
+# runner where the interpreters lose 2.6-5x per iteration against the M5 -- and the
+# add-only loop, which divides nothing, already carries most of the penalty.
+#
+# Round 2 asks where the time actually goes: perf record on a task-clock software event,
+# which works where the runner's PMU does not, over the add and mod loops in both
+# interpreters. Plus a same-op-count subtract control, so op count and op kind stop
+# being one variable.
 name: diagnose
 
-# On push rather than dispatch: a workflow not on the default branch cannot be
-# dispatched, but a push event runs the file as of the pushed commit.
 on:
   push:
     branches: [fable/perf]
@@ -14,7 +18,7 @@ on:
 
 jobs:
   diagnose:
-    name: mod against add, on x86-64
+    name: where x86-64 spends it
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -23,11 +27,51 @@ jobs:
         run: |
           uname -m; nproc
           grep -m1 "model name" /proc/cpuinfo || true
+          lscpu | grep -E "MHz|BogoMIPS" || true
 
       - name: Build Luarust
         run: cargo build --release -p luarust-cli
 
-      - name: Run
+      - name: Programs
+        run: |
+          N=100000000
+          cat > modloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+          }
+          print['sum'];
+          EOF
+          cat > addloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') }];
+          }
+          print['sum'];
+          EOF
+          cat > add2loop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') - 1000000007 }];
+          }
+          print['sum'];
+          EOF
+          cat > bench_divmod.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              long n = atol(argv[1]), m = atol(argv[2]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % m;
+              printf("%ld", sum);
+              return 0;
+          }
+          EOF
+          sed -i 's/^          //' bench_divmod.c
+          cc -O2 -o bench_divmod bench_divmod.c
+          echo "--- idiv really is in the C control's loop:"
+          objdump -d bench_divmod | grep -c idiv
+
+      - name: Times
         run: |
           set +e
           bench() {
@@ -42,90 +86,40 @@ jobs:
             done
             printf "%-24s %7s ms   %s\n" "$name" "$best" "$out"
           }
-
-          N=100000000
-
-          cat > bench_mod.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          int main(int argc, char **argv) {
-              long n = atol(argv[1]), sum = 0;
-              for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
-              printf("%ld", sum);
-              return 0;
-          }
-          EOF
-          cat > bench_divmod.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          int main(int argc, char **argv) {
-              long n = atol(argv[1]), m = atol(argv[2]), sum = 0;
-              for (long i = 1; i <= n; i++) sum = (sum + i) % m;
-              printf("%ld", sum);
-              return 0;
-          }
-          EOF
-          cat > bench_add.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          int main(int argc, char **argv) {
-              long n = atol(argv[1]), sum = 0;
-              for (long i = 1; i <= n; i++) sum = sum + i;
-              printf("%ld", sum);
-              return 0;
-          }
-          EOF
-          sed -i 's/^          //' bench_mod.c bench_divmod.c bench_add.c
-          cc -O2 -o bench_mod bench_mod.c
-          cc -O2 -o bench_divmod bench_divmod.c
-          cc -O2 -o bench_add bench_add.c
-
-          cat > modloop.lr <<EOF
-          var.local.mut.i64 ['sum'] = [|0|];
-          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
-              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
-          }
-          print['sum'];
-          EOF
-          cat > modloop_u64.lr <<EOF
-          var.local.mut.ui64 ['sum'] = [|0|];
-          loop.temp.range.ui64 ['i'] = [|1|, |$N|] {
-              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
-          }
-          print['sum'];
-          EOF
-          cat > addloop.lr <<EOF
-          var.local.mut.i64 ['sum'] = [|0|];
-          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
-              set ['sum'] = [math { ('sum' + 'i') }];
-          }
-          print['sum'];
-          EOF
-
           LR=./target/release/luarust
-          bench "C const mod"        ./bench_mod $N
-          bench "C argv mod (idiv)"  ./bench_divmod $N 1000000007
-          bench "C add only"         ./bench_add $N
-          bench "VM mod i64"         $LR run modloop.lr
-          bench "VM mod ui64"        $LR run modloop_u64.lr
+          bench "C argv mod (idiv)"  ./bench_divmod 100000000 1000000007
+          bench "VM mod"             $LR run modloop.lr
+          bench "VM add2 (sub)"      $LR run add2loop.lr
           bench "VM add"             $LR run addloop.lr
-          bench "interp mod i64"     $LR interp modloop.lr
-          bench "interp mod ui64"    $LR interp modloop_u64.lr
+          bench "interp mod"         $LR interp modloop.lr
+          bench "interp add2 (sub)"  $LR interp add2loop.lr
           bench "interp add"         $LR interp addloop.lr
 
-      - name: Cycle counts, if perf is willing
+      - name: Profiles
         run: |
           set +e
           sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1
           PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1)
           [ -z "$PERF" ] && PERF=perf
+          $PERF --version
           sudo sysctl -w kernel.perf_event_paranoid=1 >/dev/null 2>&1
-          for cmd in "./bench_divmod 100000000 1000000007" \
-                     "./target/release/luarust run modloop.lr" \
-                     "./target/release/luarust run addloop.lr" \
-                     "./target/release/luarust interp modloop.lr" \
-                     "./target/release/luarust interp addloop.lr"; do
-            echo "==== $cmd"
-            $PERF stat -e task-clock,cycles,instructions,branches,branch-misses $cmd 2>&1 | tail -12
-          done
+          sudo sysctl -w kernel.kptr_restrict=0 >/dev/null 2>&1
+          LR=./target/release/luarust
+          profile() {
+            local tag="$1"; shift
+            echo "======== $tag"
+            $PERF record -q -o "$tag.data" -F 997 -e task-clock "$@" >/dev/null 2>&1
+            $PERF report -i "$tag.data" --stdio --percent-limit 1 2>/dev/null | grep -v "^#" | grep -v "^$" | head -15
+            # Instruction-level detail for every symbol carrying at least 5% of the time.
+            $PERF report -i "$tag.data" --stdio --percent-limit 5 2>/dev/null \
+              | awk '$1 ~ /%/ { $1=""; $2=""; $3=""; $4=""; print }' \
+              | while read -r sym; do
+                  echo "---- annotate: $sym"
+                  $PERF annotate -i "$tag.data" --stdio --percent-limit 2 --symbol="$sym" 2>/dev/null | head -80
+                done
+          }
+          profile vm-add     $LR run addloop.lr
+          profile vm-mod     $LR run modloop.lr
+          profile interp-add $LR interp addloop.lr
+          profile interp-mod $LR interp modloop.lr
           exit 0
