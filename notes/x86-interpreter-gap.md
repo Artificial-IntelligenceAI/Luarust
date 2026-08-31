@@ -41,13 +41,21 @@ traffic is width-matched 8-byte stores and loads.
 - **Dispatch count**: the micro-op VM (single dispatch) wins ~5% on M5, loses ~5% on
   Zen 3. Dispatch was never the x86 story.
 
-## The fix shape
+## The fix, and its verdict
 
-Match the widths. First instance (committed): when an integer result's destination
-register already holds a `Num`, write `ty` and `bits` in place as scalar stores
-instead of assigning the whole enum — M5 VM mod loop 1051 -> 749 ms. The
-tree-walker's version of the disease is its by-value `Result<Value, Stopped>`
-returns; changing that shape is a design conversation, not a macro edit.
+Match the widths. When an integer result's destination register already holds a
+`Num`, write `ty` and `bits` in place as scalar stores instead of assigning the
+whole enum (five lines in the VM's `int_arm`). Interleaved, same sitting:
+
+                    baseline    fixed
+  VM mod, Zen 4      3663 ms    2330 ms   -36%   (9.7x C -> 6.2x C)
+  VM add, Zen 4      2251 ms    1696 ms   -25%
+  VM mod, M5         1051 ms     749 ms   -29%
+
+The tree-walker's version of the disease is its by-value `Result<Value, Stopped>`
+returns. Tankun's call: leave it. The interpreters are not the performance story —
+the JIT is 1.05x C and exists precisely so nobody tortures an interpreter; the
+tree-walker's job is to be the oracle, and its speed only prices fuzz throughput.
 
 ## Measurement mechanics worth keeping
 
