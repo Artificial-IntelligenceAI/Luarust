@@ -26,7 +26,7 @@ We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.**
 | Nothing is implicit — no conversion, no truthiness, no coercion. Two types meet only where something said they should | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
 | Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all. A float prints as the value it holds, exactly, so `b64 \|0.1\|` shows you it is not one tenth | Nothing is built on top of them. The tower is wide and the library on it is empty. And a `b256` prints more digits than the literal parser can read back |
 | Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | An array holds scalars, so there are no arrays of arrays and nothing in the language can contain itself |
-| Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine that builds it. That is a big dependency for a small language |
+| Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 exactly — 20 works but is unsupported, because a code generator CI never runs cannot be promised to agree with the other two paths |
 | Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
 | Only what a program uses gets delivered, and `[gc] mode` is off until asked for — a program that makes no arrays pays nothing for a collector, measurably: 125 ms either way | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
 | 1.05× C on the dependent-chain benchmark, and 1.01× C per iteration once startup is taken out — ahead of Java, PyPy, Lua and LuaJIT | It was 1.85× until somebody noticed the JIT had never been asked to run LLVM's optimiser. Finding a 1.8× by turning something on is not the same as earning it |
@@ -1072,6 +1072,23 @@ dependencies at all:
 ```bash
 cargo build --release -p luarust-cli --features jit
 ```
+
+**One version, and only one, on purpose.** The JIT builds cleanly against LLVM 20 as well
+— changing one feature is enough, and somebody has done it and reported that all of the
+tests pass, the three-way agreement suite included. It is still not supported, and the
+reason is worth stating rather than leaving as a version number that looks arbitrary.
+
+What this language promises about compiled code is that it agrees with the other two paths
+bit for bit, on every program the generator can write. That promise is only worth what CI
+exercises. A second LLVM version is a second code generator: it may fold a comparison
+differently, it may round the same expression the same way for ten thousand programs and
+not the ten-thousand-and-first, and nothing in the repository would ever find out. Shipping
+it would mean making the strongest claim here about a configuration nobody tests.
+
+So it is one version, tested, until there is a reason to run two jobs instead of one. It is
+also the least costly place to be wrong: `run` and `interp` need no LLVM at all, so a
+machine with the wrong version still has the whole language, minus the fastest of the ways
+to run it.
 
 ## How fast it is
 
