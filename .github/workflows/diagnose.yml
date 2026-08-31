@@ -1,10 +1,8 @@
 # Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
 #
-# Round 5 is a machine probe, not a Luarust build: the same dependent add-chain in
-# registers, through one store->load hop, and through three, in C with volatile. The M5
-# runs the three-hop chain at ~1.3 ns/iter -- renamed away. Whatever this runner charges
-# per hop, times the hops a VM op takes, is the interpreters' x86 penalty if the
-# forwarding story is right.
+# Round 6 races the micro-op VM (HEAD) against the build before it (HEAD^: boxed
+# Stopped, int_op inline(always)) and the pre-investigation baseline (14c87bc^),
+# interleaved in one sitting, C alongside as the machine's yardstick.
 name: diagnose
 
 on:
@@ -14,73 +12,83 @@ on:
 
 jobs:
   diagnose:
-    name: pricing a store-to-load hop
+    name: micro-ops against the field
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 15
+
       - name: Machine
         run: |
           grep -m1 "model name" /proc/cpuinfo || true
-      - name: Probe
+
+      - name: Build all three
         run: |
-          cat > forward.c <<'CEOF'
-          // A latency probe, not a benchmark: the same dependent add-chain three ways.
-          //
-          //   reg    the whole chain in registers, the way C runs the loop
-          //   mem1   one store->load hop per step through a 16-byte struct slot
-          //   mem3   three hops per step, the way a register VM moves op results around
-          //
-          // volatile forces every access to actually reach the store buffer, which is the
-          // point: the difference between the columns prices store-to-load forwarding on
-          // this machine, which Apple silicon renames away and x86 charges per hop.
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-micro
+          git checkout 0cdc277 -- crates/
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-inline
+          git checkout 14c87bc^ -- crates/
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-baseline
+          git checkout HEAD -- crates/
+
+      - name: Programs
+        run: |
+          N=100000000
+          cat > modloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+          }
+          print['sum'];
+          EOF
+          cat > addloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') }];
+          }
+          print['sum'];
+          EOF
+          cat > bench_mod.c <<'CEOF'
           #include <stdio.h>
           #include <stdlib.h>
-          #include <string.h>
-          #include <time.h>
-
-          struct V { unsigned short ty; unsigned long bits; };
-
-          static long now_ms(void) {
-              struct timespec t;
-              clock_gettime(CLOCK_MONOTONIC, &t);
-              return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
-          }
-
           int main(int argc, char **argv) {
-              long n = atol(argv[1]);
-              volatile struct V regs[8];
-              memset((void *)regs, 0, sizeof regs);
-
-              long t0 = now_ms();
-              long sum = 0;
-              for (long i = 1; i <= n; i++) sum = sum + i;
-              long t1 = now_ms();
-              printf("reg   %5ld ms   %ld\n", t1 - t0, sum);
-
-              t0 = now_ms();
-              regs[0].bits = 0;
-              for (long i = 1; i <= n; i++) {
-                  unsigned long s = regs[0].bits;
-                  regs[0].ty = 3;
-                  regs[0].bits = s + i;
-              }
-              t1 = now_ms();
-              printf("mem1  %5ld ms   %ld\n", t1 - t0, (long)regs[0].bits);
-
-              t0 = now_ms();
-              regs[0].bits = 0;
-              for (long i = 1; i <= n; i++) {
-                  unsigned long a = regs[0].bits;      // load sum
-                  regs[2].ty = 3; regs[2].bits = a + i; // store temp
-                  unsigned long b = regs[2].bits;      // load temp
-                  regs[0].ty = 3; regs[0].bits = b;    // store sum
-              }
-              t1 = now_ms();
-              printf("mem3  %5ld ms   %ld\n", t1 - t0, (long)regs[0].bits);
+              long n = atol(argv[1]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
+              printf("%ld", sum);
               return 0;
           }
-
           CEOF
-          sed -i 's/^          //' forward.c
-          cc -O2 -o forward forward.c
-          for _ in 1 2 3; do ./forward 100000000; echo; done
+          sed -i 's/^          //' bench_mod.c
+          cc -O2 -o bench_mod bench_mod.c
+
+      - name: Times, interleaved
+        run: |
+          set +e
+          declare -A best last_out
+          for round in 1 2 3; do
+            for v in baseline inline micro; do
+              for prog in modloop addloop; do
+                for eng in run interp; do
+                  t0=$(date +%s%N)
+                  out=$(./luarust-$v $eng $prog.lr | tr -d '\n')
+                  t1=$(date +%s%N)
+                  ms=$(( (t1 - t0) / 1000000 ))
+                  key="$v $eng $prog"
+                  cur=${best[$key]:-99999999}
+                  [ "$ms" -lt "$cur" ] && best[$key]=$ms
+                  last_out[$key]=$out
+                done
+              done
+            done
+            t0=$(date +%s%N); out=$(./bench_mod 100000000); t1=$(date +%s%N)
+            ms=$(( (t1 - t0) / 1000000 ))
+            cur=${best[C]:-99999999}; [ "$ms" -lt "$cur" ] && best[C]=$ms
+            last_out[C]=$out
+          done
+          for key in "${!best[@]}"; do
+            printf "%-28s %7s ms   %s\n" "$key" "${best[$key]}" "${last_out[$key]}"
+          done | sort
