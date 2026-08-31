@@ -443,14 +443,6 @@ pub fn base_of(index: u32) -> (*mut u8, usize) {
     })
 }
 
-/// Whether this element type is one compiled code can load and store by itself.
-///
-/// The packed widths are; the shared kinds are not, because reading one is taking a
-/// reference count and machine code has no business doing that.
-pub fn reachable(element: Ty) -> bool {
-    !matches!(element, Ty::Str | Ty::Er | Ty::B128 | Ty::B256 | Ty::D128)
-}
-
 /// How wide one element of this type is, where it is one compiled code can reach.
 pub fn width_of(element: Ty) -> usize {
     match element {
