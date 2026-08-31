@@ -5,15 +5,25 @@
   "version": "0.0.1",
   "publisher": "tankun-sriket",
   "license": "MIT",
-  "engines": { "vscode": "^1.75.0" },
-  "categories": ["Programming Languages", "Linters"],
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
   "main": "./src/extension.js",
   "contributes": {
     "languages": [
       {
         "id": "luarust",
-        "aliases": ["Luarust", "luarust"],
-        "extensions": [".lr"],
+        "aliases": [
+          "Luarust",
+          "luarust"
+        ],
+        "extensions": [
+          ".lr"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -34,17 +44,38 @@
         },
         "luarust.checkOn": {
           "type": "string",
-          "enum": ["save", "type", "never"],
+          "enum": [
+            "save",
+            "type",
+            "never"
+          ],
           "default": "save",
           "description": "When to run `luarust check`. `type` checks a moment after you stop typing."
+        },
+        "luarust.suggest": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest chain words, types and the names this file declares as you type."
         }
       }
     },
     "commands": [
-      { "command": "luarust.check", "title": "Luarust: Check this file" },
-      { "command": "luarust.run", "title": "Luarust: Run this file" },
-      { "command": "luarust.jit", "title": "Luarust: Run this file through the JIT" },
-      { "command": "luarust.dis", "title": "Luarust: Show the bytecode" }
+      {
+        "command": "luarust.check",
+        "title": "Luarust: Check this file"
+      },
+      {
+        "command": "luarust.run",
+        "title": "Luarust: Run this file"
+      },
+      {
+        "command": "luarust.jit",
+        "title": "Luarust: Run this file through the JIT"
+      },
+      {
+        "command": "luarust.dis",
+        "title": "Luarust: Show the bytecode"
+      }
     ]
   }
 }

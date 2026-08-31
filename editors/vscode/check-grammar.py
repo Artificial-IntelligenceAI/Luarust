@@ -34,3 +34,23 @@ if missing:
     sys.exit(1)
 
 print(f"the grammar colours all {len(known)} words the compiler knows.")
+
+# The suggestion list is the same kind of copy and goes stale the same way. A type the
+# compiler has and the list does not is a type nobody is offered; one the list has and the
+# compiler does not is a suggestion that will not compile.
+completing = set(re.findall(r'\["([a-z0-9]+)",', (root / "editors/vscode/src/complete.js").read_text()))
+types = set(re.findall(r'Ty::[A-Z]\w* => "([a-z0-9]+)"', (root / "crates/luarust-core/src/ty.rs").read_text()))
+types.discard("nothing")
+
+unoffered = sorted(types - completing)
+invented = sorted(t for t in completing - types if re.fullmatch(r"(b|d|i|ui)\d+|er|bool|str", t))
+if unoffered or invented:
+    if unoffered:
+        print("types the compiler has that completion never offers:", " ".join(unoffered))
+    if invented:
+        print("types completion offers that the compiler does not have:", " ".join(invented))
+    print()
+    print("the list is in editors/vscode/src/complete.js.")
+    sys.exit(1)
+
+print(f"completion offers all {len(types)} of the compiler's types and no others.")

@@ -6,6 +6,7 @@
 
 const { spawn } = require("child_process");
 const vscode = require("vscode");
+const complete = require("./complete");
 
 /** Where `luarust` is, as the settings have it. */
 function command() {
@@ -160,6 +161,8 @@ function activate(context) {
     vscode.commands.registerCommand("luarust.jit", () => runIn("jit")),
     vscode.commands.registerCommand("luarust.dis", () => runIn("dis")),
   );
+
+  complete.register(context);
 
   vscode.workspace.textDocuments.forEach((d) => when() !== "never" && now(d));
 }

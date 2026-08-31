@@ -103,7 +103,7 @@ jobs:
       - uses: actions/checkout@v5
       # The grammar is a copy of what the compiler already decides, and a copy left alone
       # goes stale quietly. This is what stops that.
-      - name: The grammar knows every word the compiler does
+      - name: The grammar and the suggestions know what the compiler does
         run: python3 editors/vscode/check-grammar.py
       - name: The extension is valid JSON and valid JavaScript
         run: |
@@ -113,6 +113,7 @@ jobs:
             python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$f"
           done
           node --check editors/vscode/src/extension.js
+          node --check editors/vscode/src/complete.js
 
   lint:
     name: clippy

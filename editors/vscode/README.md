@@ -13,6 +13,23 @@ would be wrong in ways the real one is not. What you see is what the compiler sa
 place it said it, underlined exactly as wide as the compiler underlined it, with the rule
 and the suggested fix on the hover.
 
+**Suggestions as you type**, which follow the chain. A Luarust declaration is read left to
+right — `var.local.mut.ui32` — and each dot has a small known set of things that may come
+next, so the list is exactly right rather than merely long:
+
+| after | it offers |
+| --- | --- |
+| `var.` | `local` `global` `public` `restricted` |
+| `var.local.` | `mut`, `array`, and the nineteen types |
+| `loop.` | `temp` `perm` |
+| `loop.temp.` | `range` `while` |
+| `fn.local.` | the types, for what it answers |
+| a half-typed `'name'` | every name the file declares, including parameters |
+
+Every type carries what it is beside it, so `d64` says *where money keeps its cents* and
+`er` says *never rounds, never overflows*. There are snippets for a declaration, a
+function, both loops, an `if`, a `print` and an array.
+
 **Commands**, from the palette: check, run, run through the JIT, and show the bytecode.
 The last three open a terminal so the output is yours to keep.
 
@@ -22,6 +39,7 @@ The last three open a terminal so the output is yours to keep.
 | --- | --- |
 | `luarust.path` | the `luarust` command; an absolute path if it is not on `PATH` |
 | `luarust.checkOn` | `save` (the default), `type`, or `never` |
+| `luarust.suggest` | suggestions as you type; on by default |
 
 `type` waits for a pause rather than running on the keystroke, because a file being typed
 into is a file that is half-written.
@@ -45,5 +63,14 @@ better way round while changing it.
 
 ## What it is not
 
-There is no language server, so there is no completion, no go-to-definition and no
-rename. Everything here is the compiler being run and read.
+There is no language server, so there is no go-to-definition, no rename and no
+cross-file anything. The suggestions come from the shape of the chain and from reading
+the open file, not from the compiler's own idea of what is in scope — so inside a
+function they will offer a name declared outside it, which the checker will then refuse.
+
+## Keeping it honest
+
+`check-grammar.py` compares both copied lists against the compiler and fails if either
+drifted: every word the parser knows must be a word the grammar colours, and the types
+completion offers must be exactly the types that exist. It runs in CI. Both halves were
+checked by breaking them on purpose and watching them fail.
