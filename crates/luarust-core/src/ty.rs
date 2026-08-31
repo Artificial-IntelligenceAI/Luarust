@@ -1,5 +1,63 @@
 //! The types and operators, which outlive the syntax they were written in.
 
+/// How many dimensions an array may have. Three is a shape you can still picture.
+pub const MAX_RANK: usize = 3;
+
+/// An array type: what it holds and what shape it is.
+///
+/// The element is a *scalar*, never another array. That is what keeps this `Copy` and
+/// keeps a type from having to point at another one — and it is also the reason no value
+/// in this language can contain itself, which turns out to matter more than it looks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ArrayOf {
+    /// The element, held as its tag so that a type never points at a type.
+    element: u8,
+    /// The fixed dimensions, of which `rank` are used.
+    dims: [u32; MAX_RANK],
+    /// Zero when the array grows, and its length is whatever it has become.
+    rank: u8,
+}
+
+impl ArrayOf {
+    /// A growable array of this element.
+    pub fn growable(element: Ty) -> Self {
+        ArrayOf { element: element.tag(), dims: [0; MAX_RANK], rank: 0 }
+    }
+
+    /// A fixed array of this element and shape. `None` if the shape is more dimensions
+    /// than an array may have, or if any of them is zero.
+    pub fn fixed(element: Ty, shape: &[u32]) -> Option<Self> {
+        if shape.is_empty() || shape.len() > MAX_RANK || shape.contains(&0) {
+            return None;
+        }
+        let mut dims = [0; MAX_RANK];
+        dims[..shape.len()].copy_from_slice(shape);
+        Some(ArrayOf { element: element.tag(), dims, rank: shape.len() as u8 })
+    }
+
+    pub fn element(self) -> Ty {
+        Ty::from_tag(self.element).expect("an element tag came from a type")
+    }
+
+    /// The fixed dimensions, as many as there are.
+    pub fn shape(&self) -> &[u32] {
+        &self.dims[..self.rank as usize]
+    }
+
+    /// Whether it grows, rather than being one fixed size for ever.
+    pub fn grows(self) -> bool {
+        self.rank == 0
+    }
+
+    /// How many elements a fixed one holds. `None` when it grows.
+    pub fn length(self) -> Option<usize> {
+        if self.grows() {
+            return None;
+        }
+        Some(self.shape().iter().map(|d| *d as usize).product())
+    }
+}
+
 /// One of Luarust's types.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ty {
@@ -22,9 +80,72 @@ pub enum Ty {
     U64,
     Bool,
     Str,
+    /// `array.ui32`, `array.8.ui32`, `array.2x3.ui32`.
+    Array(ArrayOf),
 }
 
 impl Ty {
+    /// A small number standing for this type, for the places that need one: an array's
+    /// element, and the chunk format.
+    pub fn tag(self) -> u8 {
+        match self {
+            Ty::B16 => 0,
+            Ty::B32 => 1,
+            Ty::B64 => 2,
+            Ty::B128 => 3,
+            Ty::B256 => 4,
+            Ty::D32 => 5,
+            Ty::D64 => 6,
+            Ty::D128 => 7,
+            Ty::Er => 8,
+            Ty::I8 => 9,
+            Ty::I16 => 10,
+            Ty::I32 => 11,
+            Ty::I64 => 12,
+            Ty::U8 => 13,
+            Ty::U16 => 14,
+            Ty::U32 => 15,
+            Ty::U64 => 16,
+            Ty::Bool => 17,
+            Ty::Str => 18,
+            // An array is not a scalar and has no tag; nothing asks one for it.
+            Ty::Array(_) => u8::MAX,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<Ty> {
+        Some(match tag {
+            0 => Ty::B16,
+            1 => Ty::B32,
+            2 => Ty::B64,
+            3 => Ty::B128,
+            4 => Ty::B256,
+            5 => Ty::D32,
+            6 => Ty::D64,
+            7 => Ty::D128,
+            8 => Ty::Er,
+            9 => Ty::I8,
+            10 => Ty::I16,
+            11 => Ty::I32,
+            12 => Ty::I64,
+            13 => Ty::U8,
+            14 => Ty::U16,
+            15 => Ty::U32,
+            16 => Ty::U64,
+            17 => Ty::Bool,
+            18 => Ty::Str,
+            _ => return None,
+        })
+    }
+
+    /// The array this is, if it is one.
+    pub fn array(self) -> Option<ArrayOf> {
+        match self {
+            Ty::Array(of) => Some(of),
+            _ => None,
+        }
+    }
+
     pub fn from_word(word: &str) -> Option<Self> {
         Some(match word {
             "b16" => Ty::B16,
@@ -50,8 +171,26 @@ impl Ty {
         })
     }
 
+    /// The type as it is written. An array's name is built, so this hands back an owned
+    /// string; [`Ty::word`] is the one for the scalars, which are all names already.
+    pub fn written(self) -> String {
+        match self {
+            Ty::Array(of) => {
+                if of.grows() {
+                    return format!("array.{}", of.element().word());
+                }
+                let shape: Vec<String> = of.shape().iter().map(|d| d.to_string()).collect();
+                format!("array.{}.{}", shape.join("x"), of.element().word())
+            }
+            scalar => scalar.word().to_string(),
+        }
+    }
+
     pub fn word(self) -> &'static str {
         match self {
+            // An array's name depends on what is in it, so it cannot be one of these.
+            // `written` is the one that names every type.
+            Ty::Array(_) => "array",
             Ty::B16 => "b16",
             Ty::B32 => "b32",
             Ty::B64 => "b64",

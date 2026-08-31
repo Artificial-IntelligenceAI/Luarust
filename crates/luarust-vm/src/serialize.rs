@@ -147,12 +147,12 @@ pub fn write_with(
         put_u32(&mut out, routine.registers as u32);
         put_u32(&mut out, routine.params.len() as u32);
         for ty in &routine.params {
-            out.push(ty_tag(*ty));
+            put_ty(&mut out, *ty);
         }
         match routine.returns {
             Some(ty) => {
                 out.push(1);
-                out.push(ty_tag(ty));
+                put_ty(&mut out, ty);
             }
             None => out.push(0),
         }
@@ -190,14 +190,18 @@ fn put_value(out: &mut Vec<u8>, value: &Value, dpd: bool) {
     // A decimal is repacked on the way out when the project asked for the other encoding.
     let value = &recode(value, dpd);
     match value {
+        // An array is never a constant. Every time an array literal is reached it has to
+        // make a *new* array, or two passes of a loop would be writing into one -- so the
+        // compiler emits instructions to build one rather than putting it in the pool.
+        Value::List(_) => unreachable!("an array is built by instructions, not stored"),
         Value::Num { ty, bits } => {
             out.push(0);
-            out.push(ty_tag(*ty));
+            put_ty(out, *ty);
             put_u64(out, *bits);
         }
         Value::Wide { ty, bits } => {
             out.push(1);
-            out.push(ty_tag(*ty));
+            put_ty(out, *ty);
             for limb in bits.limbs() {
                 put_u64(out, *limb);
             }
@@ -267,12 +271,12 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             out.push(1);
             put_u16(out, dst);
             put_u16(out, src);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
         }
         Op::Binary { op, ty, dst, lhs, rhs } => {
             out.push(2);
             out.push(op_tag(op));
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
             put_u16(out, dst);
             put_u16(out, lhs);
             put_u16(out, rhs);
@@ -281,12 +285,12 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             out.push(3);
             put_u16(out, dst);
             put_u16(out, src);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
         }
         Op::TimeNow { dst, ty } => {
             out.push(4);
             put_u16(out, dst);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
         }
         Op::PrintText { text } => {
             out.push(5);
@@ -295,7 +299,7 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
         Op::PrintValue { src, ty } => {
             out.push(6);
             put_u16(out, src);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
         }
         Op::Call { func, base, argc, dst } => {
             out.push(15);
@@ -307,7 +311,7 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
         Op::Return { src, ty } => {
             out.push(16);
             put_u16(out, src);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
         }
         Op::ReturnNothing => out.push(17),
         Op::Not { dst, src } => {
@@ -329,14 +333,14 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             out.push(7);
             put_u16(out, lhs);
             put_u16(out, rhs);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
             put_u32(out, target);
         }
         Op::JumpIfEqual { lhs, rhs, ty, target } => {
             out.push(8);
             put_u16(out, lhs);
             put_u16(out, rhs);
-            out.push(ty_tag(ty));
+            put_ty(out, ty);
             put_u32(out, target);
         }
         Op::Jump { target } => {
@@ -346,7 +350,7 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
         Op::Compare { op, operands, dst, lhs, rhs } => {
             out.push(11);
             out.push(cmp_tag(op));
-            out.push(ty_tag(operands));
+            put_ty(out, operands);
             put_u16(out, dst);
             put_u16(out, lhs);
             put_u16(out, rhs);
@@ -366,29 +370,24 @@ fn cmp_tag(op: CmpOp) -> u8 {
     }
 }
 
-fn ty_tag(ty: Ty) -> u8 {
-    match ty {
-        Ty::B16 => 0,
-        Ty::B32 => 1,
-        Ty::B64 => 2,
-        Ty::B128 => 3,
-        Ty::B256 => 4,
-        Ty::D32 => 5,
-        Ty::D64 => 6,
-        Ty::D128 => 7,
-        Ty::Er => 8,
-        Ty::I8 => 9,
-        Ty::I16 => 10,
-        Ty::I32 => 11,
-        Ty::I64 => 12,
-        Ty::U8 => 13,
-        Ty::U16 => 14,
-        Ty::U32 => 15,
-        Ty::U64 => 16,
-        Ty::Bool => 17,
-        Ty::Str => 18,
+/// A type, written out. A scalar is its tag; an array is a marker, its element and its
+/// shape, since an array's type is not one number.
+fn put_ty(out: &mut Vec<u8>, ty: Ty) {
+    match ty.array() {
+        None => out.push(ty.tag()),
+        Some(of) => {
+            out.push(ARRAY_TAG);
+            out.push(of.element().tag());
+            out.push(of.shape().len() as u8);
+            for dim in of.shape() {
+                put_u32(out, *dim);
+            }
+        }
     }
 }
+
+/// The tag that says an array follows, chosen above every scalar's.
+const ARRAY_TAG: u8 = 200;
 
 fn op_tag(op: BinOp) -> u8 {
     match op {
@@ -710,6 +709,25 @@ impl<'a> Cursor<'a> {
 
     fn ty(&mut self) -> Result<Ty, Broken> {
         let tag = self.u8()?;
+        if tag == ARRAY_TAG {
+            let element = Ty::from_tag(self.u8()?)
+                .ok_or(Broken::Unknown { what: "type", value: 0 })?;
+            let rank = self.u8()? as usize;
+            if rank > luarust_core::ty::MAX_RANK {
+                return Err(Broken::Unknown { what: "array rank", value: rank as u64 });
+            }
+            let mut shape = Vec::with_capacity(rank);
+            for _ in 0..rank {
+                shape.push(self.u32()?);
+            }
+            let of = if rank == 0 {
+                luarust_core::ty::ArrayOf::growable(element)
+            } else {
+                luarust_core::ty::ArrayOf::fixed(element, &shape)
+                    .ok_or(Broken::Unknown { what: "array shape", value: 0 })?
+            };
+            return Ok(Ty::Array(of));
+        }
         Ok(match tag {
             0 => Ty::B16,
             1 => Ty::B32,

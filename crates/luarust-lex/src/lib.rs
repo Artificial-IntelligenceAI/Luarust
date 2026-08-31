@@ -295,6 +295,21 @@ impl<'a> Lexer<'a> {
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.bump();
         }
+        // `2x3` is one thing, not a number and a word: it is how an array's chain says
+        // its shape. Nothing else can follow a digit with an `x` and another digit, and
+        // multiplication is written with spaces around it, so this is never ambiguous.
+        if self.peek() == Some('x') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
+            while self.peek() == Some('x') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())
+            {
+                self.bump();
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.bump();
+                }
+            }
+            self.push(Kind::Shape, start);
+            return;
+        }
+
         // A dot is only part of the number when a digit follows it, so that `1.5` is one
         // number while the `.` of a chain stays a `.`.
         if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
@@ -641,4 +656,16 @@ mod tests {
         assert_eq!(out.tokens[0].kind, Kind::End);
         clean("   \n\n\t  ");
     }
+    #[test]
+    fn a_shape_is_one_token_and_multiplication_still_is_not() {
+        assert_eq!(kinds("2x3")[..2], [Kind::Shape, Kind::End]);
+        assert_eq!(kinds("2x3x4")[..2], [Kind::Shape, Kind::End]);
+        assert_eq!(texts("array.2x3.ui32"), ["array", ".", "2x3", ".", "ui32"]);
+        // With spaces it is arithmetic, which is the only way to write it.
+        assert_eq!(kinds("2 x 3")[..4], [Kind::Number, Kind::Word, Kind::Number, Kind::End]);
+        // And a lone number is still a number, however many follow it.
+        assert_eq!(kinds("8")[..2], [Kind::Number, Kind::End]);
+        assert_eq!(kinds("2x")[..3], [Kind::Number, Kind::Word, Kind::End]);
+    }
+
 }

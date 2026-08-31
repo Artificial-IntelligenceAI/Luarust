@@ -66,6 +66,8 @@ pub enum Kind {
     Word,
     /// A bare number, which only appears inside a math block.
     Number,
+    /// A shape, as an array's chain writes one: `8`, `2x3`, `2x3x4`.
+    Shape,
     /// `'…'` — a name, or a literal where a value is expected.
     Name,
     /// A written value, between bars: `|5|`.
@@ -106,6 +108,7 @@ impl Kind {
             Kind::NotEqual => "`!=`",
             Kind::Word => "a word",
             Kind::Number => "a number",
+            Kind::Shape => "a shape",
             Kind::Name => "a name",
             Kind::Literal => "a written value",
             Kind::Text => "text",
