@@ -102,7 +102,17 @@ macro_rules! int_arm {
         };
         let bits = int_op($binop, $ty, *a, *b, $overflow)
             .map_err(|fault| Stopped { fault, span: $spans[$here] })?;
-        $registers[$dst as usize] = Value::Num { ty: $ty, bits };
+        // Written a field at a time when the slot already holds a number, which it
+        // almost always does: a whole-value write is a 16-byte vector store, and the
+        // narrow loads that read it back next instruction stall on x86-64 until it
+        // drains to cache — measured at 12x the matched-width cost on Zen 3, and the
+        // single largest reason the VM was slower there than the machine explains.
+        if let Value::Num { ty: t, bits: b } = &mut $registers[$dst as usize] {
+            *t = $ty;
+            *b = bits;
+        } else {
+            $registers[$dst as usize] = Value::Num { ty: $ty, bits };
+        }
     }};
 }
 
