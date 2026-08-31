@@ -1,61 +1,66 @@
-# The x86-64 interpreter gap is struct traffic, not the divider
+# The x86-64 interpreter gap is a vector store read back narrow
 
-One line: the interpreters lose on x86-64 because they move `Value` and `Result`
-structs through the stack on the dependent chain — Apple silicon makes store-to-load
-forwarding nearly free and Zen 4 charges every hop — not because of `mod`'s division.
+One line: rustc writes every `Value` into the register file (and every struct return
+onto the stack) as a 16-byte vector store, the interpreters read the fields back with
+narrow scalar loads, and x86-64 cannot store-forward that shape — the load stalls
+until the store drains to cache, ~12x the matched-width cost on Zen 3, while Apple
+silicon forwards it for free.
 
-## What was ruled out, with the measurement that ruled it out
+## The proof
 
-- **Divide latency.** The obvious suspect: the benchmark's hot op is `mod` by a
-  runtime divisor (a real `idiv`), C and the JIT strength-reduce the constant, and
-  x86 dividers are slow on paper. Killed by a C control on the runner itself: C with
-  the modulus from argv (one `idiv` per iteration, verified present by objdump) ran
-  *no slower* than C with the constant (389 vs 424 ms at N=1e8). The runner's EPYC
-  9V74 (Zen 4) early-terminates division on small quotients just as the M5 does, and
-  this benchmark's quotient is 0..2. On the M5 the same pair differs by 0.3 ns/iter.
-- **Anything mod-specific at all.** A control loop with the same op count but `-`
-  instead of `mod`: VM 3634 ms vs VM mod 3626; interp 12070 vs 12242. The mod op
-  costs what a subtract costs. What looked like a mod delta in round 1 was just the
-  extra instruction.
+A C probe (round 7, `.github/workflows/diagnose.yml` history) of the same dependent
+add-chain two ways, N=1e8:
 
-## What the profiles showed (perf on the runner, task-clock sampling)
+                          Zen 3 (EPYC 7763)      Apple M5
+  scalar stores, matched loads     156 ms          187 ms
+  vector store, narrow loads      1837 ms          225 ms     <- 12x vs 1.2x
 
-- vm-add: 40% of runtime on one instruction, `movupd %xmm0,(%r14)` — the 16-byte
-  store writing a `Value` into the registers `Vec`.
-- interp-add: the top five instructions are all `movaps %xmm0, N(%rsp)` — `Value` /
-  `Result` structs stored into stack frames, narrow loads of the same bytes right
-  after. This is `eval()` returning structs by value on every AST node.
-- Also visible: `int_op` does not get inlined on x86 despite `#[inline]`, and its
-  own match dispatch (`lea` + `jmp *%rax`) is a large share of what remains.
+Getting the wide store emitted took three attempts: gcc splits struct copies,
+16-byte `memcpy`, and even `_mm_storeu_si128` into scalar moves at -O2. Only a
+`volatile __m128i` write survives. Check `objdump | grep -c movups` before trusting
+any such probe.
 
-The asymmetry: M5-class cores rename memory and forward store-to-load at ~zero
-cycles; Zen 4 pays ~7-8 cycles per hop, and every hop is on the dependent chain.
-CPython barely moves between the machines because it shuffles 8-byte pointers, which
-forward cheaply, and its per-iteration overhead drowns the difference anyway.
+This is the shape in every x86 profile of the interpreters: `movupd %xmm0,(%r14)`
+carrying 40-48% of the VM's runtime (the `Value` store into the registers `Vec`),
+`movaps %xmm0, N(%rsp)` as the tree-walker's entire top five (struct returns from
+`eval()`), with scalar loads of `bits` and the discriminant right behind. It explains
+the original table completely: C never does it, the VM does it once per op, the
+tree-walker several times per node — and CPython is exempt because its pointer
+traffic is width-matched 8-byte stores and loads.
 
-## The numbers (N=1e8, ns/iter, best of 3, same sitting per machine)
+## What was ruled out on the way, each by measurement
 
-                     M5      x86 (EPYC 9V74)   ratio
-  C const mod        2.47      4.24            1.7x   <- the machine itself
-  VM add             9.2      24.9             2.7x
-  interp add        18.2      92.1             5.1x   <- no divide anywhere
+- **Divide latency**: C with a real per-iteration `idiv` matches strength-reduced C
+  on the runner; modern server dividers early-terminate on small quotients.
+- **Anything mod-specific**: a same-op-count subtract loop costs exactly what the
+  mod loop costs, both interpreters.
+- **`Stopped` being 96 bytes**: boxing it was flat on x86 (kept for the M5 win).
+- **Width-matched store-forwarding**: three matched hops per step cost ~1.4 ns/iter
+  on both machines. The mismatch is the crime, not the hop.
+- **The `int_op` call**: `inline(always)` buys ~5% on x86.
+- **Dispatch count**: the micro-op VM (single dispatch) wins ~5% on M5, loses ~5% on
+  Zen 3. Dispatch was never the x86 story.
 
-Ordered by how much struct traffic each does: C none, VM some, tree-walker most.
+## The fix shape
 
-## First fix banked
-
-Boxing the `Fault` inside `Stopped` (commit 14c87bc) — see
-[stopped-was-the-second-instance.md](stopped-was-the-second-instance.md).
+Match the widths. First instance (committed): when an integer result's destination
+register already holds a `Num`, write `ty` and `bits` in place as scalar stores
+instead of assigning the whole enum — M5 VM mod loop 1051 -> 749 ms. The
+tree-walker's version of the disease is its by-value `Result<Value, Stopped>`
+returns; changing that shape is a design conversation, not a macro edit.
 
 ## Measurement mechanics worth keeping
 
-- The GitHub runner has no PMU (`cycles` etc. are `<not supported>`), but
-  `perf record -e task-clock` samples fine, and release builds carry debuginfo, so
-  per-instruction annotation works. Ship annotates out as artifacts; the log
-  truncates them.
-- A workflow that exists only on a branch cannot be `workflow_dispatch`ed (gh
-  resolves the file against the default branch). Trigger on `push` to the branch
-  instead; push events run the file as of the pushed commit.
-- The runner's numbers move by a third between sittings. Every comparison must be
-  interleaved inside one job. Same rule locally: the M5 drifts with thermals, so
-  A/B by alternating binaries, not by before/after.
+- The runner pool is heterogeneous: EPYC 7763 (Zen 3), EPYC 9V74 (Zen 4), Xeon
+  8370C (Ice Lake), Xeon 6973P (Granite Rapids) all appeared within one day, with
+  ~40% drift between sittings. Nothing compares across runs; interleave every
+  comparison inside one job, and carry a C control for the machine itself.
+- The runner has no PMU (`cycles` is `<not supported>`), but `perf record -e
+  task-clock` samples fine, and release builds carry debuginfo, so per-instruction
+  annotation works. Ship annotates out as artifacts; the log truncates them.
+- A workflow that exists only on a branch cannot be `workflow_dispatch`ed; trigger
+  on `push` to the branch instead — push events run the file as of the pushed
+  commit.
+- `grep -c` finding zero matches exits nonzero and kills an unguarded step; a
+  Python `re.sub` replacement string turns `\n` into real newlines. Both broke a
+  round each. Splice text with plain string ops, and end probe steps with `exit 0`.
