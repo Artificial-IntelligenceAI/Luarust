@@ -50,8 +50,29 @@ for (const chain of ["var.", "var.local.", "var.local.mut.", "fn.", "fn.local.",
 
 // Every snippet must say what it inserts, or it looks like the bare word beside it.
 for (const item of lr.provideCompletionItems(blank, { line: 0, character: 0 })) {
-  if (item.kind === 4 && !item.documentation) {
+  if (item.kind !== 4) continue;
+  if (!item.documentation) {
     wrong.push(`the \`${item.label}\` snippet does not show what it inserts`);
+  }
+
+  // A body VS Code cannot parse is not rejected -- it resolves what it understands and
+  // puts the rest in the file as literal text. `${1|mut.,|}`, meaning "`mut.` or
+  // nothing", is a choice with an empty alternative and reached somebody's editor as
+  // itself. Nothing about that is visible from reading the source, so it is checked.
+  const body = item.insertText.value;
+  for (const [whole, alternatives] of body.matchAll(/\$\{\d+\|([^|]*)\|\}/g)) {
+    if (alternatives.split(",").some((one) => one === "")) {
+      wrong.push(
+        `the \`${item.label}\` snippet has an empty alternative in \`${whole}\`, ` +
+          "which VS Code will insert as text rather than expand",
+      );
+    }
+  }
+  // Every hole opened is closed, and nothing is left that looks like one.
+  const opens = (body.match(/\$\{/g) || []).length;
+  const closes = (body.match(/\}/g) || []).length;
+  if (opens > closes) {
+    wrong.push(`the \`${item.label}\` snippet opens ${opens} holes and closes ${closes}`);
   }
 }
 

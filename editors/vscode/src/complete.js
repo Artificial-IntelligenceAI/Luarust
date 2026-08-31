@@ -100,7 +100,11 @@ function plain(body) {
 }
 
 const SNIPPETS = () => [
-  snippet("var", "a declaration", "var.local.${1|mut.,|}${2:ui32} ['${3:name}'] = [|${4:0}|];"),
+  // Two, not one with a choice in it. `${1|mut.,|}` -- "`mut.` or nothing" -- is a choice
+  // with an empty alternative, which is not snippet syntax: VS Code resolved the
+  // well-formed holes and left that one in the file as literal text.
+  snippet("var", "a declaration", "var.local.${1:ui32} ['${2:name}'] = [|${3:0}|];"),
+  snippet("var-mut", "a declaration that may change", "var.local.mut.${1:ui32} ['${2:name}'] = [|${3:0}|];"),
   snippet("fn", "a function", "fn.local.${1:ui64} ['${2:name}'] [${3:ui64 'n'}] {\n\t$0\n}"),
   snippet("loop", "a counted loop", "loop.temp.range.${1:ui32} ['${2:i}'] = [|${3:1}|, |${4:10}|] {\n\t$0\n}"),
   snippet("while", "a loop with a condition", "loop.perm.while.${1:ui8} ['${2:n}'] [math { ${3:condition} }] {\n\t$0\n\tbreak when reached |${4:100}|;\n}"),
