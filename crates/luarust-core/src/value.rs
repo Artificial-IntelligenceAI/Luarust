@@ -555,7 +555,7 @@ fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -
 /// also, measurably, most of what a program's time goes on: doing this at 128 bits and
 /// then range-checking the answer cost about five nanoseconds an operation more than
 /// doing it at the width the number is actually kept at.
-#[inline]
+#[inline(always)]
 pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Answer<u64> {
     macro_rules! at_width {
         ($signed:ty, $unsigned:ty) => {{
