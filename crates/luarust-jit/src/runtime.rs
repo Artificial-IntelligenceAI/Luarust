@@ -50,8 +50,14 @@ thread_local! {
 /// Set on a cell number that means a constant rather than an offset into a frame.
 pub const CONSTANT: u64 = 1 << 63;
 
-/// Begin a run: forget the last one's output, restart the clock, and lay out the cells.
+/// Begin a run: forget the last one's arrays and output, restart the clock, and lay out
+/// the cells.
+///
+/// The heap goes with the rest. The interpreter and the VM each forget it when they
+/// start, and a path that did not would inherit whatever the last one left -- which is
+/// exactly what happens in `luarust fuzz`, where all three run in the one process.
 pub fn begin(constants: Vec<Value>, main_frame: Vec<Value>, templates: Vec<Vec<Value>>) {
+    luarust_core::heap::clear();
     OUTPUT.with(|out| out.borrow_mut().clear());
     STARTED.with(|at| *at.borrow_mut() = Some(Instant::now()));
     CONSTANTS.with(|table| *table.borrow_mut() = constants);
