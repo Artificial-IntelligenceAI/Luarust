@@ -1,8 +1,9 @@
 # Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
 #
-# Round 7, last word: gcc lowered even the SSE intrinsic back to scalar moves, so the
-# store is now a volatile __m128i write it cannot elide. If the count is 0 this time,
-# the probe is over and the conclusion stands without it.
+# Round 8: the mechanism finally has a name -- a vector store read back narrow cannot
+# forward on x86-64 (round 7: 12x on Zen 3) -- and HEAD writes integer results into
+# their register a field at a time to avoid the shape. Raced against the build before
+# it and the pre-investigation baseline, interleaved, C alongside.
 name: diagnose
 
 on:
@@ -12,89 +13,83 @@ on:
 
 jobs:
   diagnose:
-    name: an SSE store no compiler may take apart
+    name: matched-width writes against the field
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 25
+
       - name: Machine
         run: |
           grep -m1 "model name" /proc/cpuinfo || true
-      - name: Probe
+
+      - name: Build all three
         run: |
-          set +e
-          cat > forward2.c <<'CEOF'
-          // Probe v2: the exact store shape the VM emits, against the friendly one.
-          //
-          //   narrow   ty and bits stored separately, bits loaded back at its own width
-          //   wide     the whole 16-byte struct stored in one move, bits loaded narrow
-          //            at offset 8, the discriminant loaded narrow at offset 0
-          //
-          // The barriers stop the compiler from forwarding in registers; the hardware still
-          // may. If a machine charges for a narrow load carved out of a wide store, the wide
-          // column shows it; the VM's hottest instruction is exactly that wide store.
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-inplace
+          git checkout HEAD~4 -- crates/
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-micro
+          git checkout 14c87bc^ -- crates/
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-baseline
+          git checkout HEAD -- crates/
+
+      - name: Programs
+        run: |
+          N=100000000
+          cat > modloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+          }
+          print['sum'];
+          EOF
+          cat > addloop.lr <<EOF
+          var.local.mut.i64 ['sum'] = [|0|];
+          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
+              set ['sum'] = [math { ('sum' + 'i') }];
+          }
+          print['sum'];
+          EOF
+          cat > bench_mod.c <<'CEOF'
           #include <stdio.h>
           #include <stdlib.h>
-          #include <string.h>
-          #ifdef __x86_64__
-          #include <immintrin.h>
-          #endif
-          #include <time.h>
-
-          struct V { unsigned char disc; unsigned short ty; unsigned long bits; };
-
-          static long now_ms(void) {
-              struct timespec t;
-              clock_gettime(CLOCK_MONOTONIC, &t);
-              return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
-          }
-
-          _Alignas(16) struct V regs[8];
-
           int main(int argc, char **argv) {
-              long n = atol(argv[1]);
-
-              long t0 = now_ms();
-              unsigned long sum = 0;
-              for (long i = 1; i <= n; i++) {
-                  regs[2].disc = 1; regs[2].ty = 3; regs[2].bits = sum + i;
-                  __asm__ volatile("" ::: "memory");
-                  unsigned long b = regs[2].bits;
-                  regs[0].disc = 1; regs[0].ty = 3; regs[0].bits = b;
-                  __asm__ volatile("" ::: "memory");
-                  sum = regs[0].bits;
-              }
-              long t1 = now_ms();
-              printf("narrow %5ld ms   %lu\n", t1 - t0, sum);
-
-              t0 = now_ms();
-              sum = 0;
-              for (long i = 1; i <= n; i++) {
-                  struct V t = { 1, 3, sum + i };
-          #ifdef __x86_64__
-                  *(volatile __m128i *)&regs[2] = _mm_loadu_si128((__m128i *)&t);
-          #else
-                  __builtin_memcpy(&regs[2], &t, 16);
-          #endif
-                  __asm__ volatile("" ::: "memory");
-                  unsigned char d = regs[2].disc;
-                  struct V u = { d, 3, regs[2].bits };
-          #ifdef __x86_64__
-                  *(volatile __m128i *)&regs[0] = _mm_loadu_si128((__m128i *)&u);
-          #else
-                  __builtin_memcpy(&regs[0], &u, 16);
-          #endif
-                  __asm__ volatile("" ::: "memory");
-                  sum = regs[0].bits;
-              }
-              t1 = now_ms();
-              printf("wide   %5ld ms   %lu\n", t1 - t0, sum);
+              long n = atol(argv[1]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
+              printf("%ld", sum);
               return 0;
           }
-
           CEOF
-          sed -i 's/^          //' forward2.c
-          cc -O2 -o forward2 forward2.c
-          echo "--- 16-byte vector stores present, says objdump:"
-          objdump -d forward2 | grep -cE "movups|movaps|movdqu|movdqa"
-          for _ in 1 2 3; do ./forward2 100000000; echo; done
-          exit 0
+          sed -i 's/^          //' bench_mod.c
+          cc -O2 -o bench_mod bench_mod.c
+
+      - name: Times, interleaved
+        run: |
+          set +e
+          declare -A best last_out
+          for round in 1 2 3; do
+            for v in baseline micro inplace; do
+              for prog in modloop addloop; do
+                for eng in run interp; do
+                  t0=$(date +%s%N)
+                  out=$(./luarust-$v $eng $prog.lr | tr -d '\n')
+                  t1=$(date +%s%N)
+                  ms=$(( (t1 - t0) / 1000000 ))
+                  key="$v $eng $prog"
+                  cur=${best[$key]:-99999999}
+                  [ "$ms" -lt "$cur" ] && best[$key]=$ms
+                  last_out[$key]=$out
+                done
+              done
+            done
+            t0=$(date +%s%N); out=$(./bench_mod 100000000); t1=$(date +%s%N)
+            ms=$(( (t1 - t0) / 1000000 ))
+            cur=${best[C]:-99999999}; [ "$ms" -lt "$cur" ] && best[C]=$ms
+            last_out[C]=$out
+          done
+          for key in "${!best[@]}"; do
+            printf "%-30s %7s ms   %s\n" "$key" "${best[$key]}" "${last_out[$key]}"
+          done | sort
