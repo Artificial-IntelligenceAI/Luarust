@@ -354,6 +354,64 @@ A condition may be a variable on its own, since a name in quotes is a name every
 if ['flag'] { … }
 ```
 
+## Arrays
+
+```luarust
+var.local.mut.array.5.ui32 ['xs'] = [[|10|, |20|, |30|, |40|, |50|]];
+
+print['xs'[|1|] "   " count['xs'] \n];    -- 10   5
+set ['xs'[|3|]] = [|99|];
+
+var.local.array.2x3.ui8 ['m'] = [[
+    |1|, |2|, |3|,
+    |4|, |5|, |6|
+]];
+print['m'[|2|, |3|] \n];                   -- 6
+```
+
+`array.ui32` grows; `array.5.ui32` is five for ever; `array.2x3.ui8` is two rows of
+three. A shaped one is written flat, row by row, because the type already said the shape
+and saying it twice would only be a chance to disagree.
+
+**Counted from one.** The first element is `1` and `0` is no element at all. That is not a
+preference — it falls out of two decisions already made. The counting loop is inclusive
+and its counter is usually unsigned, so this walks an array exactly:
+
+```luarust
+loop.temp.range.ui32 ['i'] = [|1|, count['xs']] { … }
+```
+
+Counting from nought would need `[|0|, count - 1|]`, and on an empty array `count - 1`
+wraps round to eighteen quintillion.
+
+A **quoted** name before a bracket is an index; a **bare** word before one is a call. That
+distinction was already in the language, so `'xs'[|1|]` and `double[|5|]` cannot be
+confused. `count[…]` answers in whatever type is expecting it, and `filled[…]` makes one —
+a fixed array is told only what to fill with, since it already knows how many.
+
+### They are stored as arrays
+
+A thousand `ui8`s take a thousand bytes. The elements are packed by width — one byte for
+`ui8` and `bool`, two for `ui16`, four for `ui32`, eight for `ui64` — rather than being a
+run of values, each twenty-four bytes and each carrying a type the array already stated.
+
+| a thousand of | as values | packed |
+| --- | --- | --- |
+| `ui8` | 24,000 bytes | 1,000 |
+| `ui32` | 24,000 | 4,000 |
+| `b64` | 24,000 | 8,000 |
+
+The memory is the smaller half of it. The real reason is that packed elements make
+indexing **arithmetic**: element `n` is at `base + n × width`, which the JIT emits as a
+load. Out of a run of tagged values it could emit nothing at all — reading one would mean
+calling back into Rust to open a box and ask what was in it.
+
+A value holds a **handle** into the heap, which fits in the space a number uses. So an
+array costs nothing to have around: no new kind of value, and none of the drop-checking
+that a reference-counted one would put on every assignment in the language.
+
+Nothing is freed yet. That is a collector's job, and this is the heap it will collect.
+
 ## Loops
 
 A loop is written the way a declaration is, because it does the same thing a declaration

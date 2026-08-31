@@ -413,3 +413,83 @@ mod printing {
         assert_ne!(handle(ty, one), handle(ty, other));
     }
 }
+
+/// Where an array's elements actually are, and how wide one is.
+///
+/// This is what packing them was for: with a pointer and a width, reaching element `n` is
+/// `base + n × width`, which compiled code can do in one instruction instead of calling
+/// back here to be handed a value.
+///
+/// # Safety
+///
+/// The pointer is only good until the array grows or another array is made, either of
+/// which may move it. Compiled code takes it and uses it in the same breath, and nothing
+/// runs in between — there is one thread and it is inside a single instruction.
+pub fn base_of(index: u32) -> (*mut u8, usize) {
+    HEAP.with(|heap| {
+        let mut heap = heap.borrow_mut();
+        let array = &mut heap[index as usize];
+        let width = array.store.width();
+        let base = match &mut array.store {
+            Store::Byte(v) => v.as_mut_ptr(),
+            Store::Half(v) => v.as_mut_ptr().cast(),
+            Store::Word(v) => v.as_mut_ptr().cast(),
+            Store::Long(v) => v.as_mut_ptr().cast(),
+            Store::Wide(v) => v.as_mut_ptr().cast(),
+            Store::Text(v) => v.as_mut_ptr().cast(),
+            Store::Exact(v) => v.as_mut_ptr().cast(),
+        };
+        (base, width)
+    })
+}
+
+/// Whether this element type is one compiled code can load and store by itself.
+///
+/// The packed widths are; the shared kinds are not, because reading one is taking a
+/// reference count and machine code has no business doing that.
+pub fn reachable(element: Ty) -> bool {
+    !matches!(element, Ty::Str | Ty::Er | Ty::B128 | Ty::B256 | Ty::D128)
+}
+
+/// How wide one element of this type is, where it is one compiled code can reach.
+pub fn width_of(element: Ty) -> usize {
+    match element {
+        Ty::Bool | Ty::I8 | Ty::U8 => 1,
+        Ty::B16 | Ty::I16 | Ty::U16 => 2,
+        Ty::B32 | Ty::D32 | Ty::I32 | Ty::U32 | Ty::Array(_) => 4,
+        _ => 8,
+    }
+}
+
+#[cfg(test)]
+mod reaching {
+    use super::*;
+
+    #[test]
+    fn the_pointer_points_at_the_elements() {
+        clear();
+        let handle = of(Ty::U8, &[
+            Value::Num { ty: Ty::U8, bits: 7 },
+            Value::Num { ty: Ty::U8, bits: 9 },
+        ]);
+        let (base, width) = base_of(handle);
+        assert_eq!(width, 1);
+        // Reading through the pointer sees what the array holds, and writing through it
+        // is seen by the array -- which is the whole point of handing it out.
+        unsafe {
+            assert_eq!(*base, 7);
+            assert_eq!(*base.add(1), 9);
+            *base.add(1) = 11;
+        }
+        assert_eq!(read(handle, 1), Some(Value::Num { ty: Ty::U8, bits: 11 }));
+    }
+
+    #[test]
+    fn the_widths_agree_with_the_stores() {
+        clear();
+        for ty in [Ty::U8, Ty::Bool, Ty::U16, Ty::B32, Ty::U64, Ty::B64] {
+            let handle = of(ty, &[]);
+            assert_eq!(base_of(handle).1, width_of(ty), "{}", ty.word());
+        }
+    }
+}

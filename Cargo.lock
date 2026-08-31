@@ -156,6 +156,7 @@ version = "0.0.0"
 dependencies = [
  "inkwell",
  "luarust-check",
+ "luarust-core",
  "luarust-diag",
  "luarust-gen",
  "luarust-interp",

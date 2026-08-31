@@ -522,6 +522,64 @@ fn two_decimals_written_differently_can_be_worth_the_same() {
 }
 
 #[test]
+fn an_array_reads_and_writes_the_same_three_ways() {
+    assert_eq!(
+        ran("var.local.mut.array.5.ui32 ['xs'] = [[|10|, |20|, |30|, |40|, |50|]];\n\
+             set ['xs'[|3|]] = [|99|];\n\
+             print['xs' \" \" 'xs'[|1|] \" \" count['xs'] \\n];"),
+        "[10, 20, 99, 40, 50] 10 5\n"
+    );
+}
+
+#[test]
+fn a_shaped_array_is_flattened_the_same_three_ways() {
+    assert_eq!(
+        ran("var.local.array.2x3.ui8 ['m'] = [[|1|, |2|, |3|, |4|, |5|, |6|]];\n\
+             print['m'[|1|, |1|] \" \" 'm'[|2|, |3|] \" \" 'm'[|1|, |3|] \\n];"),
+        "1 6 3\n"
+    );
+}
+
+#[test]
+fn every_element_type_survives_an_array() {
+    // The packed widths and the shared kinds take different routes in the JIT, so both
+    // are here.
+    assert_eq!(
+        ran("var.local.array.2.str ['names'] = [[|Tankun|, |Claude|]];\n\
+             var.local.array.2.er ['ratios'] = [[|1/3|, |2/7|]];\n\
+             var.local.array.2.bool ['flags'] = [[|true|, |false|]];\n\
+             var.local.array.2.b256 ['wide'] = [[|0.1|, |0.2|]];\n\
+             print['names' \" \" 'ratios' \" \" 'flags' \" \" math { 'wide'[|1|] + 'wide'[|2|] } \\n];"),
+        "[Tankun, Claude] [1/3, 2/7] [true, false] 0.3\n"
+    );
+}
+
+#[test]
+fn reaching_past_an_array_stops_the_same_way_three_ways() {
+    // Nought is no element, and so is one past the end. `ran` insists all three stopped
+    // for the same reason as each other.
+    assert_eq!(ran("var.local.array.3.ui8 ['xs'] = [[|1|,|2|,|3|]];\nprint['xs'[|0|]];"), "");
+    assert_eq!(ran("var.local.array.3.ui8 ['xs'] = [[|1|,|2|,|3|]];\nprint['xs'[|4|]];"), "");
+    assert_eq!(
+        ran("var.local.array.2x3.ui8 ['m'] = [[|1|,|2|,|3|,|4|,|5|,|6|]];\nprint['m'[|3|, |1|]];"),
+        ""
+    );
+}
+
+#[test]
+fn an_array_walked_by_a_loop_adds_up_the_same_three_ways() {
+    assert_eq!(
+        ran("var.local.array.5.ui32 ['xs'] = [[|10|, |20|, |30|, |40|, |50|]];\n\
+             var.local.mut.ui32 ['total'] = [|0|];\n\
+             loop.temp.range.ui32 ['i'] = [|1|, count['xs']] {\n\
+                 set ['total'] = [math { 'total' + 'xs'['i'] }];\n\
+             }\n\
+             print['total' \\n];"),
+        "150\n"
+    );
+}
+
+#[test]
 fn generated_programs_agree_three_ways() {
     let mut taken = 0;
     let mut declined = 0;

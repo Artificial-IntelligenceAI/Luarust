@@ -48,28 +48,7 @@ pub struct Declined {
 /// function that called itself would overwrite the cells its caller was still using. The
 /// fix is a stack of cells rather than a fixed row of them; until then a program with
 /// functions in it goes to the VM, which has no such problem.
-pub fn accepts(chunk: &Chunk) -> Result<(), Declined> {
-    // Arrays are declined for now. The heap they live in is on the Rust side, so every
-    // element would be a call back into it -- which is precisely the thing packing them
-    // was supposed to stop. Doing it properly means the machine code reaching into the
-    // heap itself, and that wants doing once rather than twice.
-    let array_op = |op: &Op| {
-        matches!(
-            op,
-            Op::NewArray { .. }
-                | Op::Filled { .. }
-                | Op::At { .. }
-                | Op::StoreAt { .. }
-                | Op::Count { .. }
-        )
-    };
-    if chunk.code.iter().any(array_op)
-        || chunk.funcs.iter().any(|routine| routine.code.iter().any(array_op))
-    {
-        return Err(Declined {
-            because: "it has arrays, and the machine code cannot reach the heap yet".to_string(),
-        });
-    }
+pub fn accepts(_chunk: &Chunk) -> Result<(), Declined> {
     Ok(())
 }
 
@@ -154,6 +133,19 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
             rule: "a remainder against zero is not a number",
             fix: "check the divisor before taking a remainder.".into(),
         },
+        runtime::OUT_OF_RANGE => {
+            let (at, length) = runtime::reached();
+            Fault {
+                code: "R0015",
+                message: format!("there is no element {at} here."),
+                rule: "an array is counted from one, up to how many it holds",
+                fix: if length == 0 {
+                    "this one holds nothing at all.".to_string()
+                } else {
+                    format!("this one holds {length}, so the last is {length} and the first is 1.")
+                },
+            }
+        }
         runtime::FRACTIONAL_POWER => Fault {
             code: "R0012",
             message: "this raises an exact number to a power that is not whole.".into(),
@@ -252,6 +244,15 @@ struct Helpers<'ctx> {
     cell_take_answer: FunctionValue<'ctx>,
     cell_unstage: FunctionValue<'ctx>,
     call_depth: FunctionValue<'ctx>,
+    array_base: FunctionValue<'ctx>,
+    array_len: FunctionValue<'ctx>,
+    array_new: FunctionValue<'ctx>,
+    array_filled: FunctionValue<'ctx>,
+    array_get: FunctionValue<'ctx>,
+    array_put: FunctionValue<'ctx>,
+    cell_from_bits: FunctionValue<'ctx>,
+    print_array: FunctionValue<'ctx>,
+    note_index: FunctionValue<'ctx>,
 }
 
 impl<'ctx> Emitter<'ctx> {
@@ -376,6 +377,66 @@ impl<'ctx> Emitter<'ctx> {
             module.add_function("luarust_call_depth", i64_t.fn_type(&[], false), None);
         engine.add_global_mapping(&call_depth, runtime::call_depth as *const () as usize);
 
+        let array_base = module.add_function(
+            "luarust_array_base",
+            ptr_t.fn_type(&[i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&array_base, runtime::array_base as *const () as usize);
+
+        let array_len =
+            module.add_function("luarust_array_len", i64_t.fn_type(&[i64_t.into()], false), None);
+        engine.add_global_mapping(&array_len, runtime::array_len as *const () as usize);
+
+        let array_new = module.add_function(
+            "luarust_array_new",
+            i64_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&array_new, runtime::array_new as *const () as usize);
+
+        let array_filled = module.add_function(
+            "luarust_array_filled",
+            i64_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&array_filled, runtime::array_filled as *const () as usize);
+
+        let array_get = module.add_function(
+            "luarust_array_get",
+            void_t.fn_type(&[i64_t.into(), i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&array_get, runtime::array_get as *const () as usize);
+
+        let array_put = module.add_function(
+            "luarust_array_put",
+            void_t.fn_type(&[i64_t.into(), i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&array_put, runtime::array_put as *const () as usize);
+
+        let cell_from_bits = module.add_function(
+            "luarust_cell_from_bits",
+            void_t.fn_type(&[i64_t.into(), i64_t.into(), i32_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_from_bits, runtime::cell_from_bits as *const () as usize);
+
+        let print_array = module.add_function(
+            "luarust_print_array",
+            void_t.fn_type(&[i64_t.into(), i32_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&print_array, runtime::print_array as *const () as usize);
+
+        let note_index = module.add_function(
+            "luarust_note_index",
+            void_t.fn_type(&[i64_t.into(), i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&note_index, runtime::note_index as *const () as usize);
+
         let print_cell =
             module.add_function("luarust_print_cell", void_t.fn_type(&[i64_t.into()], false), None);
         engine.add_global_mapping(&print_cell, runtime::print_cell as *const () as usize);
@@ -432,6 +493,15 @@ impl<'ctx> Emitter<'ctx> {
                 cell_take_answer,
                 cell_unstage,
                 call_depth,
+                array_base,
+                array_len,
+                array_new,
+                array_filled,
+                array_get,
+                array_put,
+                cell_from_bits,
+                print_array,
+                note_index,
             },
         }
     }
@@ -679,7 +749,20 @@ impl<'ctx> Emitter<'ctx> {
             }
 
             Op::PrintValue { src, ty } => {
-                if celled(ty) {
+                // A whole array is its elements, and they are packed rather than being
+                // values -- so this is the one thing about one that goes back to Rust.
+                if let Some(of) = ty.array() {
+                    let handle = self.handle_in(src);
+                    let element =
+                        self.context.i32_type().const_int(u64::from(of.element.tag()), false);
+                    self.builder
+                        .build_call(
+                            self.helpers.print_array,
+                            &[handle.into(), element.into()],
+                            "",
+                        )
+                        .expect("a call");
+                } else if celled(ty) {
                     let cell = self.cell_number(u64::from(src));
                     self.builder
                         .build_call(self.helpers.print_cell, &[cell.into()], "")
@@ -765,13 +848,98 @@ impl<'ctx> Emitter<'ctx> {
                     .expect("a return");
             }
 
-            // `accepts` has already turned away any chunk with one of these in it.
-            Op::NewArray { .. }
-            | Op::Filled { .. }
-            | Op::At { .. }
-            | Op::StoreAt { .. }
-            | Op::Count { .. } => {
-                unreachable!("a chunk with arrays is declined before it gets here")
+            Op::NewArray { dst, items, count, ty } => {
+                let of = ty.array().expect("a new array has an array type");
+                // The elements go through cells, one after another, because a `str` or an
+                // `er` among them is a value machine code cannot hold. Making an array is
+                // not the hot part; reaching into one is.
+                let first = self.stage_run(items, count, of.element);
+                let element = self.context.i32_type().const_int(u64::from(of.element.tag()), false);
+                let handle = self
+                    .builder
+                    .build_call(
+                        self.helpers.array_new,
+                        &[element.into(), first.into(), self.context.i64_type().const_int(u64::from(count), false).into()],
+                        "array",
+                    )
+                    .expect("a call")
+                    .try_as_basic_value()
+                    .expect_basic("it answers a handle")
+                    .into_int_value();
+                self.builder.build_store(self.regs[dst as usize], handle).expect("a store");
+            }
+
+            Op::Filled { dst, length, value, ty } => {
+                let of = ty.array().expect("a filled array has an array type");
+                let count = self.get(length, Ty::U32);
+                let count = self.to_bits(count, Ty::U32);
+                let fill = self.cell_holding(value, of.element);
+                let element = self.context.i32_type().const_int(u64::from(of.element.tag()), false);
+                let handle = self
+                    .builder
+                    .build_call(
+                        self.helpers.array_filled,
+                        &[element.into(), count.into(), fill.into()],
+                        "array",
+                    )
+                    .expect("a call")
+                    .try_as_basic_value()
+                    .expect_basic("it answers a handle")
+                    .into_int_value();
+                self.builder.build_store(self.regs[dst as usize], handle).expect("a store");
+            }
+
+            Op::At { dst, array, at, rank, ty } => {
+                let of = ty.array().expect("only an array is indexed");
+                let handle = self.handle_in(array);
+                let flat = self.flatten(handle, at, rank, ty, span);
+                if celled(of.element) {
+                    // A shared element goes through a cell: taking a reference count is
+                    // not something machine code should be doing.
+                    let cell = self.cell_number(u64::from(dst));
+                    self.builder
+                        .build_call(
+                            self.helpers.array_get,
+                            &[handle.into(), flat.into(), cell.into()],
+                            "",
+                        )
+                        .expect("a call");
+                } else {
+                    let held = self.element_at(handle, flat, of.element);
+                    self.builder.build_store(self.regs[dst as usize], held).expect("a store");
+                }
+            }
+
+            Op::StoreAt { array, at, rank, value, ty } => {
+                let of = ty.array().expect("only an array is indexed");
+                let handle = self.handle_in(array);
+                let flat = self.flatten(handle, at, rank, ty, span);
+                if celled(of.element) {
+                    let cell = self.cell_number(u64::from(value));
+                    self.builder
+                        .build_call(
+                            self.helpers.array_put,
+                            &[handle.into(), flat.into(), cell.into()],
+                            "",
+                        )
+                        .expect("a call");
+                } else {
+                    let held = self.get(value, of.element);
+                    self.put_element(handle, flat, held, of.element);
+                }
+            }
+
+            Op::Count { dst, array, ty } => {
+                let handle = self.handle_in(array);
+                let count = self
+                    .builder
+                    .build_call(self.helpers.array_len, &[handle.into()], "count")
+                    .expect("a call")
+                    .try_as_basic_value()
+                    .expect_basic("it answers a length")
+                    .into_int_value();
+                let _ = ty;
+                self.builder.build_store(self.regs[dst as usize], count).expect("a store");
             }
 
             Op::Halt => {
@@ -780,6 +948,191 @@ impl<'ctx> Emitter<'ctx> {
                     .expect("a return");
             }
         }
+    }
+
+    /// The handle a register holds, as the machine word it is.
+    fn handle_in(&self, reg: u16) -> inkwell::values::IntValue<'ctx> {
+        self.builder
+            .build_load(self.context.i64_type(), self.regs[reg as usize], "handle")
+            .expect("a load")
+            .into_int_value()
+    }
+
+    /// Where an index lands: counted from one, flattened row by row, and checked.
+    ///
+    /// The dimensions are known when this is compiled, so the arithmetic is emitted
+    /// rather than worked out again at run time. Only the bound of a growable array has
+    /// to be asked for.
+    fn flatten(
+        &mut self,
+        handle: inkwell::values::IntValue<'ctx>,
+        at: u16,
+        rank: u8,
+        ty: Ty,
+        span: Span,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let i64_t = self.context.i64_type();
+        let of = ty.array().expect("only an array is indexed");
+        let dims = of.dims().to_vec();
+        let mut flat = i64_t.const_zero();
+
+        for place in 0..rank as usize {
+            let index = self.handle_in(at + place as u16);
+            // One-based, so anything below one is out of range and so is anything at or
+            // above the bound. Unsigned makes that one comparison: `index - 1 >= bound`
+            // wraps for zero and catches both ends at once.
+            let one = i64_t.const_int(1, false);
+            let zeroed = self.builder.build_int_sub(index, one, "from.nought").expect("a subtract");
+            let bound = match dims.get(place) {
+                Some(size) => i64_t.const_int(u64::from(*size), false),
+                None => self
+                    .builder
+                    .build_call(self.helpers.array_len, &[handle.into()], "len")
+                    .expect("a call")
+                    .try_as_basic_value()
+                    .expect_basic("it answers a length")
+                    .into_int_value(),
+            };
+            let past = self
+                .builder
+                .build_int_compare(IntPredicate::UGE, zeroed, bound, "past.the.end")
+                .expect("a compare");
+
+            // The index and the bound are known here and nowhere else, so they are handed
+            // over before stopping -- otherwise the fault could only say that *some*
+            // element was missing, where the other two paths name it.
+            let stop = self.context.append_basic_block(self.main, "out.of.range");
+            let carry_on = self.context.append_basic_block(self.main, "in.range");
+            self.builder.build_conditional_branch(past, stop, carry_on).expect("a branch");
+            self.builder.position_at_end(stop);
+            self.builder
+                .build_call(self.helpers.note_index, &[index.into(), bound.into()], "")
+                .expect("a call");
+            let code = self.fault_marker(span, runtime::OUT_OF_RANGE);
+            self.builder
+                .build_return(Some(&self.context.i64_type().const_int(code as u64, false)))
+                .expect("a return");
+            self.builder.position_at_end(carry_on);
+
+            let stride = i64_t.const_int(u64::from(dims.get(place).copied().unwrap_or(1)), false);
+            let scaled = self.builder.build_int_mul(flat, stride, "row").expect("a multiply");
+            flat = self.builder.build_int_add(scaled, zeroed, "flat").expect("an add");
+        }
+        flat
+    }
+
+    /// One element, loaded straight out of the array.
+    fn element_at(
+        &mut self,
+        handle: inkwell::values::IntValue<'ctx>,
+        flat: inkwell::values::IntValue<'ctx>,
+        element: Ty,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let base = self.array_base(handle);
+        let slot = self.slot_pointer(base, flat, element);
+        let narrow = self.narrow_type(element);
+        let held = self
+            .builder
+            .build_load(narrow, slot, "element")
+            .expect("a load")
+            .into_int_value();
+        // Widened to the machine word a register holds. Unsigned, because the value's own
+        // type decides what the bits mean and this only has to not lose any.
+        self.builder
+            .build_int_z_extend(held, self.context.i64_type(), "widened")
+            .expect("an extend")
+    }
+
+    /// A value into one element, stored straight into the array.
+    fn put_element(
+        &mut self,
+        handle: inkwell::values::IntValue<'ctx>,
+        flat: inkwell::values::IntValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+        element: Ty,
+    ) {
+        let base = self.array_base(handle);
+        let slot = self.slot_pointer(base, flat, element);
+        let bits = self.to_bits(value, element);
+        let narrow = self.narrow_type(element);
+        let narrowed = self
+            .builder
+            .build_int_truncate_or_bit_cast(bits, narrow, "narrowed")
+            .expect("a truncate");
+        self.builder.build_store(slot, narrowed).expect("a store");
+    }
+
+    /// Where an array's elements begin. Asked for afresh each time, because making an
+    /// array or growing one may have moved them.
+    fn array_base(
+        &mut self,
+        handle: inkwell::values::IntValue<'ctx>,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        self.builder
+            .build_call(self.helpers.array_base, &[handle.into()], "base")
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("it answers a pointer")
+            .into_pointer_value()
+    }
+
+    /// `base + n × width`, which is the whole reason the elements are packed.
+    fn slot_pointer(
+        &mut self,
+        base: inkwell::values::PointerValue<'ctx>,
+        flat: inkwell::values::IntValue<'ctx>,
+        element: Ty,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let width = self
+            .context
+            .i64_type()
+            .const_int(luarust_core::heap::width_of(element) as u64, false);
+        let offset = self.builder.build_int_mul(flat, width, "offset").expect("a multiply");
+        unsafe {
+            self.builder
+                .build_gep(self.context.i8_type(), base, &[offset], "slot")
+                .expect("a pointer")
+        }
+    }
+
+    /// The integer type one packed element is, which is how wide it is stored.
+    fn narrow_type(&self, element: Ty) -> inkwell::types::IntType<'ctx> {
+        match luarust_core::heap::width_of(element) {
+            1 => self.context.i8_type(),
+            2 => self.context.i16_type(),
+            4 => self.context.i32_type(),
+            _ => self.context.i64_type(),
+        }
+    }
+
+    /// A run of registers into a run of cells, so the runtime can read them all.
+    fn stage_run(&mut self, first: u16, count: u16, element: Ty) -> inkwell::values::IntValue<'ctx> {
+        for n in 0..count {
+            let cell = self.cell_holding(first + n, element);
+            let _ = cell;
+        }
+        // The cells are the registers' own, which are consecutive because the compiler
+        // laid the elements out consecutively.
+        self.cell_number(u64::from(first))
+    }
+
+    /// The cell a register's value is in, putting it there when it is not already.
+    fn cell_holding(&mut self, reg: u16, element: Ty) -> inkwell::values::IntValue<'ctx> {
+        if !celled(element) {
+            // A packed value has no cell of its own, so it is written into the one that
+            // shares its register number.
+            let held = self.get(reg, element);
+            let bits = self.to_bits(held, element);
+            let tag = self.context.i32_type().const_int(u64::from(element.tag()), false);
+            self.builder
+                .build_call(
+                    self.helpers.cell_from_bits,
+                    &[self.cell_number(u64::from(reg)).into(), bits.into(), tag.into()],
+                    "",
+                )
+                .expect("a call");
+        }
+        self.cell_number(u64::from(reg))
     }
 
     /// Whether two registers stand in a relation, celled or not.

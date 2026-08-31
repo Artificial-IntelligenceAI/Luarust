@@ -37,6 +37,9 @@ thread_local! {
     static PENDING: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     /// A celled answer, on its way from the frame that made it to the frame that asked.
     static ANSWER: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// The index that was out of range, and how many there were, so the fault can say so.
+    /// Compiled code knows both and the fault code carries neither.
+    static REACHED: RefCell<(i128, i128)> = const { RefCell::new((0, 0)) };
     /// What the running program has printed. Collected rather than streamed, because a
     /// callback cannot easily be handed the caller's writer.
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -195,6 +198,7 @@ fn fault_code(fault: &luarust_check::value::Fault) -> i64 {
         "R0005" => DOES_NOT_FIT,
         "R0012" => FRACTIONAL_POWER,
         "R0013" => POWER_TOO_LARGE,
+        "R0015" => OUT_OF_RANGE,
         _ => OTHER,
     }
 }
@@ -282,6 +286,7 @@ pub const OTHER: i64 = 4;
 pub const TOO_DEEP: i64 = 5;
 pub const FRACTIONAL_POWER: i64 = 6;
 pub const POWER_TOO_LARGE: i64 = 7;
+pub const OUT_OF_RANGE: i64 = 8;
 
 /// Print a piece of text.
 ///
@@ -353,4 +358,77 @@ pub unsafe extern "C" fn fallback(
         Ok(_) => OTHER,
         Err(fault) => fault_code(&fault),
     }
+}
+
+
+// ---- arrays ---------------------------------------------------------------------
+
+/// Where an array's elements are. Compiled code takes this and does its own arithmetic.
+pub extern "C" fn array_base(handle: u64) -> *mut u8 {
+    luarust_core::heap::base_of(handle as u32).0
+}
+
+/// How many elements an array holds.
+pub extern "C" fn array_len(handle: u64) -> u64 {
+    luarust_core::heap::length(handle as u32) as u64
+}
+
+/// A new array of `count` elements taken from cells, one after another from `first`.
+pub extern "C" fn array_new(element: u32, first: u64, count: u64) -> u64 {
+    let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
+    let held: Vec<Value> = (0..count).map(|n| cell(first + n)).collect();
+    u64::from(luarust_core::heap::of(element, &held))
+}
+
+/// A new array of `count` elements, every one of them what is in `fill`.
+pub extern "C" fn array_filled(element: u32, count: u64, fill: u64) -> u64 {
+    let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
+    u64::from(luarust_core::heap::make(element, count as usize, &cell(fill)))
+}
+
+/// One element into a cell, for the kinds compiled code cannot hold.
+pub extern "C" fn array_get(handle: u64, at: u64, dst: u64) {
+    let value = luarust_core::heap::read(handle as u32, at as usize)
+        .expect("compiled code checks the range before asking");
+    put(dst, value);
+}
+
+/// A cell into one element, likewise.
+pub extern "C" fn array_put(handle: u64, at: u64, src: u64) {
+    let value = cell(src);
+    luarust_core::heap::store(handle as u32, at as usize, &value);
+}
+
+/// A packed value into a cell, for the times compiled code has to hand one over.
+pub extern "C" fn cell_from_bits(dst: u64, bits: u64, tag: u32) {
+    let ty = Ty::from_tag(tag as u8).expect("a tag came from a type");
+    let value = if ty == Ty::Bool {
+        Value::Bool(bits != 0)
+    } else if ty.is_float() && !matches!(ty, Ty::B16 | Ty::B32 | Ty::B64) {
+        Value::float(ty, luarust_num::Uint::from_u64(bits))
+    } else {
+        Value::Num { ty, bits }
+    };
+    put(dst, value);
+}
+
+/// A whole array, written the way every other path writes one.
+///
+/// The handle is not what anybody wants to see, and the elements are packed rather than
+/// being values, so this is the one thing about an array that has to come back here.
+pub extern "C" fn print_array(handle: u64, element: u32) {
+    let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
+    let ty = luarust_core::ty::growable(element).expect("the type was already named");
+    let written = luarust_core::heap::handle(ty, handle as u32).to_string();
+    OUTPUT.with(|out| out.borrow_mut().extend_from_slice(written.as_bytes()));
+}
+
+/// Remember an index that was out of range, so the fault can name it.
+pub extern "C" fn note_index(at: u64, length: u64) {
+    REACHED.with(|held| *held.borrow_mut() = (at as i64 as i128, length as i128));
+}
+
+/// The index that was out of range, and how many there were.
+pub fn reached() -> (i128, i128) {
+    REACHED.with(|held| *held.borrow())
 }
