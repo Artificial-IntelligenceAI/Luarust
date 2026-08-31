@@ -5,7 +5,7 @@ Project under development, stable use not recommended, stability is **not a guar
 
 Luarust's method is compile once to a `.lrc` that runs anywhere (Like Java's), and the project picks how it runs there: the **bytecode VM**, or the **whole-chunk JIT**, with a **hot JIT** planned. **Native** output trades the anywhere for a binary that needs nothing on the machine it lands on. **LLVM** does the code generation. The final product only contains what is needed (unlike fucking `Go`, joking, again 😂)
 
-So, to put it simply. Luarust is a computer language that has **very helpful error messages**, and **could run basically anywhere**, **without sacrificing much performance**.
+Putting it simply: **Luarust** is/will be a language that **could be compiled in many methods**, so you could **choose what is best for you**.
 
 We ran some benchmarks, **Luarust is one of the slowest languages ever 😭.** 
 
