@@ -98,6 +98,11 @@ pub enum Expr {
     /// `a < b`, `a > b`, `a = b`. Answers `bool` whatever its two sides were.
     /// `name[…]` — a bare word before a list is a call, since a variable is quoted.
     Call { name: Ident, args: Vec<Expr>, span: Span },
+    /// `'xs'[…]` — a *quoted* name before a list is an index into it. One index for a
+    /// plain array, one per dimension for a shaped one.
+    Index { array: Box<Expr>, at: Vec<Expr>, span: Span },
+    /// `[…]` where a value is wanted: a new array holding these, in order.
+    Items { items: Vec<Expr>, span: Span },
     /// `and` or `or`. Both sides are conditions, and so is the answer.
     Logic { op: LogicOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
     /// `not`, which turns a condition around.
@@ -119,6 +124,8 @@ impl Expr {
             | Expr::Compare { span, .. }
             | Expr::Logic { span, .. }
             | Expr::Call { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::Items { span, .. }
             | Expr::Not { span, .. } => *span,
             Expr::Name(ident) => ident.span,
         }
@@ -145,10 +152,33 @@ pub struct Var {
     pub values_span: Span,
 }
 
+/// What a `set` is changing: a whole variable, or one element of an array.
+#[derive(Clone, Debug)]
+pub enum Target {
+    Name(Ident),
+    Element { array: Ident, at: Vec<Expr>, span: Span },
+}
+
+impl Target {
+    pub fn name(&self) -> &Ident {
+        match self {
+            Target::Name(name) => name,
+            Target::Element { array, .. } => array,
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Target::Name(name) => name.span,
+            Target::Element { span, .. } => *span,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Set {
     pub span: Span,
-    pub targets: Vec<Ident>,
+    pub targets: Vec<Target>,
     pub values: Vec<Expr>,
     pub names_span: Span,
     pub values_span: Span,

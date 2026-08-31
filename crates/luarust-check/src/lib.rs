@@ -272,12 +272,67 @@ impl Checker {
 
         let mut out = Vec::new();
         for (target, value) in set.targets.iter().zip(&set.values) {
-            let Some(var) = self.resolve(target) else { continue };
-            if !self.changeable(&var, target.span) {
+            let Some(var) = self.resolve(target.name()) else { continue };
+            if !self.changeable(&var, target.span()) {
                 continue;
             }
-            let Some(value) = self.expr(value, Some(var.ty)) else { continue };
-            out.push(ir::Stmt::Store { slot: var.slot, value, span: target.span });
+            match target {
+                ast::Target::Name(_) => {
+                    let Some(value) = self.expr(value, Some(var.ty)) else { continue };
+                    out.push(ir::Stmt::Store { slot: var.slot, value, span: target.span() });
+                }
+                // Writing one element rather than the whole array. The array itself is
+                // not being changed -- it is the same array afterwards -- so what `mut`
+                // has to say about it is the same either way.
+                ast::Target::Element { at, span, .. } => {
+                    let Some(array) = self.expr(
+                        &AExpr::Name(target.name().clone()),
+                        Some(var.ty),
+                    ) else {
+                        continue;
+                    };
+                    let Some(of) = var.ty.array() else {
+                        self.error(
+                            Diagnostic::new("E0138", format!(
+                                "`{}` is not an array, so it has no elements.",
+                                var.ty.written()
+                            ))
+                            .primary(*span, "indexed here")
+                            .rule("only an array is indexed")
+                            .fix("change the whole variable instead."),
+                        );
+                        continue;
+                    };
+                    let wanted = of.dims().len().max(1);
+                    if at.len() != wanted {
+                        self.error(
+                            Diagnostic::new("E0139", format!(
+                                "`{}` takes {} to index it, and {} given here.",
+                                var.ty.written(),
+                                count_of(wanted, "index").replace("indexs", "indices"),
+                                at.len()
+                            ))
+                            .primary(*span, "indexed here")
+                            .rule("an array takes one index for each dimension it has")
+                            .fix(format!("give {wanted} of them.")),
+                        );
+                        continue;
+                    }
+                    let mut indices = Vec::with_capacity(at.len());
+                    let mut good = true;
+                    for index in at {
+                        match self.expr(index, Some(Ty::U32)) {
+                            Some(index) if index.ty().is_integer() => indices.push(index),
+                            _ => good = false,
+                        }
+                    }
+                    if !good {
+                        continue;
+                    }
+                    let Some(value) = self.expr(value, Some(of.element)) else { continue };
+                    out.push(ir::Stmt::StoreAt { array, at: indices, value, span: *span });
+                }
+            }
         }
         out
     }
@@ -607,6 +662,114 @@ impl Checker {
         Some((signature.index, signature.returns, checked))
     }
 
+    /// The functions the language ships with, which no program declares.
+    fn built_in(
+        &mut self,
+        name: &ast::Ident,
+        args: &[AExpr],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Option<Option<ir::Expr>> {
+        match name.text.as_str() {
+            "count" => Some(self.count_of(args, span, expected)),
+            "filled" => Some(self.filled(args, span, expected)),
+            _ => None,
+        }
+    }
+
+    /// `count['xs']` — how many elements, as whatever type is expecting the answer.
+    fn count_of(&mut self, args: &[AExpr], span: Span, expected: Option<Ty>) -> Option<ir::Expr> {
+        let [array] = args else {
+            self.error(
+                Diagnostic::new("E0130", format!("`count` takes 1 array, and {} given here.", args.len()))
+                    .primary(span, "called here")
+                    .rule("a call gives one argument for each parameter")
+                    .fix("give it one array."),
+            );
+            return None;
+        };
+        let array = self.expr(array, None)?;
+        if array.ty().array().is_none() {
+            self.error(
+                Diagnostic::new("E0138", format!("`{}` is not an array, so it has no count.", array.ty().written()))
+                    .primary(span, "counted here")
+                    .rule("only an array has a number of elements")
+                    .fix("count an array instead."),
+            );
+            return None;
+        }
+        // Whatever is expecting it, so `loop … = [|1|, count['xs']]` counts in the
+        // counter's own type rather than forcing a conversion the language does not have.
+        let ty = expected.unwrap_or(Ty::U32);
+        if !ty.is_integer() {
+            self.error(
+                Diagnostic::new("E0141", format!("a count cannot be read as `{}`.", ty.written()))
+                    .primary(span, "read here")
+                    .rule("a count is a whole number")
+                    .fix("read it into a whole number."),
+            );
+            return None;
+        }
+        Some(ir::Expr::Count { array: Box::new(array), ty, span })
+    }
+
+    /// `filled[|10|, |0|]` — an array of that many of that.
+    fn filled(&mut self, args: &[AExpr], span: Span, expected: Option<Ty>) -> Option<ir::Expr> {
+        let ty = self.need_type(span, expected, "an array")?;
+        let Some(of) = ty.array() else {
+            self.error(
+                Diagnostic::new("E0136", format!("`filled` makes an array, and `{}` is not one.", ty.written()))
+                    .primary(span, "written here")
+                    .rule("a list of values makes an array, and only an array")
+                    .fix("declare it as an array."),
+            );
+            return None;
+        };
+
+        // A fixed array already knows how many, so it is given only what to fill with.
+        let (length, value) = match (of.length(), args) {
+            (Some(fixed), [value]) => {
+                let length = ir::Expr::Const(Value::Num { ty: Ty::U32, bits: fixed as u64 });
+                (length, value)
+            }
+            (None, [length, value]) => (self.expr(length, Some(Ty::U32))?, value),
+            (Some(_), _) => {
+                self.error(
+                    Diagnostic::new("E0130", format!(
+                        "`filled` takes 1 value for a `{}`, and {} given here.",
+                        ty.written(),
+                        args.len()
+                    ))
+                    .primary(span, "called here")
+                    .rule("a fixed array already knows how many it holds")
+                    .fix("give it only what to fill with."),
+                );
+                return None;
+            }
+            (None, _) => {
+                self.error(
+                    Diagnostic::new("E0130", format!(
+                        "`filled` takes a length and a value for a `{}`, and {} given here.",
+                        ty.written(),
+                        args.len()
+                    ))
+                    .primary(span, "called here")
+                    .rule("a growable array is told how many to make")
+                    .fix("give it a length and a value."),
+                );
+                return None;
+            }
+        };
+
+        let value = self.expr(value, Some(of.element))?;
+        Some(ir::Expr::Filled {
+            ty,
+            length: Box::new(length),
+            value: Box::new(value),
+            span,
+        })
+    }
+
     /// `name[a, b]` where a value is wanted, so it has to answer one.
     fn call(
         &mut self,
@@ -615,6 +778,9 @@ impl Checker {
         span: Span,
         expected: Option<Ty>,
     ) -> Option<ir::Expr> {
+        if let Some(made) = self.built_in(name, args, span, expected) {
+            return made;
+        }
         let declared_at = self.signatures.get(&name.text).map(|s| s.declared_at);
         let (index, returns, args) = self.resolve_call(name, args, span)?;
 
@@ -953,6 +1119,98 @@ impl Checker {
 
             AExpr::Call { name, args, span } => self.call(name, args, *span, expected),
 
+            // A list where a value is wanted is a new array of these. What kind of array
+            // has to come from what is expecting it: a list of numbers says nothing about
+            // whether they are `ui8`s or `b64`s, and this language never guesses.
+            AExpr::Items { items, span } => {
+                let ty = self.need_type(*span, expected, "an array")?;
+                let Some(of) = ty.array() else {
+                    self.error(
+                        Diagnostic::new("E0136", format!("this is a list, and `{}` is not an array.", ty.written()))
+                            .primary(*span, "written here")
+                            .rule("a list of values makes an array, and only an array")
+                            .fix(format!("declare it as `array.{}`, or write a single value.", ty.written())),
+                    );
+                    return None;
+                };
+                if let Some(wanted) = of.length()
+                    && wanted != items.len()
+                {
+                    self.error(
+                        Diagnostic::new("E0137", format!(
+                            "this holds {} where `{}` holds {wanted}.",
+                            items.len(),
+                            ty.written()
+                        ))
+                        .primary(*span, "written here")
+                        .rule("a fixed array is written with exactly as many elements as it holds")
+                        .tip("a shaped array is written flat, row by row: `array.2x3` takes six.")
+                        .fix(format!("write {wanted} of them, or let the array grow.")),
+                    );
+                    return None;
+                }
+                let mut checked = Vec::with_capacity(items.len());
+                for item in items {
+                    checked.push(self.expr(item, Some(of.element))?);
+                }
+                Some(ir::Expr::NewArray { ty, items: checked, span: *span })
+            }
+
+            AExpr::Index { array, at, span } => {
+                let array = self.expr(array, None)?;
+                let held = array.ty();
+                let Some(of) = held.array() else {
+                    self.error(
+                        Diagnostic::new("E0138", format!("`{}` is not an array, so it has no elements.", held.written()))
+                            .primary(*span, "indexed here")
+                            .rule("only an array is indexed")
+                            .tip("a bare word before a bracket is a call; a quoted one is an index.")
+                            .fix("index an array instead."),
+                    );
+                    return None;
+                };
+
+                // One index per dimension, and a growable array has the one.
+                let wanted = of.dims().len().max(1);
+                if at.len() != wanted {
+                    self.error(
+                        Diagnostic::new("E0139", format!(
+                            "`{}` takes {} to index it, and {} given here.",
+                            held.written(),
+                            count_of(wanted, "index").replace("indexs", "indices"),
+                            at.len()
+                        ))
+                        .primary(*span, "indexed here")
+                        .rule("an array takes one index for each dimension it has")
+                        .fix(format!("give {wanted} of them.")),
+                    );
+                    return None;
+                }
+
+                self.agree(of.element, expected, *span)?;
+                let mut checked = Vec::with_capacity(at.len());
+                for index in at {
+                    let index = self.expr(index, Some(Ty::U32))?;
+                    if !index.ty().is_integer() {
+                        self.error(
+                            Diagnostic::new("E0140", format!("an index cannot be `{}`.", index.ty().written()))
+                                .primary(index.span(), "used as an index here")
+                                .rule("an index is a whole number")
+                                .tip("the first element is 1, and 0 is no element at all.")
+                                .fix("use a whole number."),
+                        );
+                        return None;
+                    }
+                    checked.push(index);
+                }
+                Some(ir::Expr::At {
+                    array: Box::new(array),
+                    at: checked,
+                    ty: of.element,
+                    span: *span,
+                })
+            }
+
             AExpr::Binary { op, lhs, rhs, span } => {
                 // Whichever side knows what it is goes first and tells the other, so both
                 // `'x' + 1` and `1 + 'x'` read the 1 as whatever `'x'` is.
@@ -1159,6 +1417,10 @@ fn self_typing(expr: &AExpr) -> bool {
         AExpr::TypedLiteral { .. } => true,
         // These three answer `bool` whatever is in them, so they need telling nothing.
         AExpr::Compare { .. } | AExpr::Logic { .. } | AExpr::Not { .. } => true,
+        // An element's type comes from the array, which knew it already.
+        AExpr::Index { .. } => true,
+        // A list of values says nothing about what kind of array it is.
+        AExpr::Items { .. } => false,
         // And a call answers whatever its function was declared to answer.
         AExpr::Call { .. } => true,
         AExpr::Math { inner, .. } => self_typing(inner),

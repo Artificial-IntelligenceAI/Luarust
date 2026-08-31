@@ -323,6 +323,19 @@ impl Compiler {
                 self.release();
             }
 
+            Stmt::StoreAt { array, at, value, span } => {
+                let mark = self.next;
+                let ty = array.ty();
+                let target = self.operand(array, *span);
+                let (base, rank) = self.arguments(at, *span);
+                let held = self.operand(value, *span);
+                self.emit(
+                    Op::StoreAt { array: target, at: base, rank: rank as u8, value: held, ty },
+                    *span,
+                );
+                self.next = mark;
+            }
+
             Stmt::Break { span } => {
                 let jump = self.emit(Op::Jump { target: 0 }, *span);
                 self.breaks.last_mut().expect("`break` outside a loop was checked for").push(jump);
@@ -461,6 +474,37 @@ impl Compiler {
                 let mark = self.next;
                 let (base, argc) = self.arguments(args, *span);
                 self.emit(Op::Call { func: *func as u32, base, argc, dst }, *span);
+                self.next = mark;
+            }
+
+            Expr::NewArray { ty, items, span } => {
+                let mark = self.next;
+                let (base, count) = self.arguments(items, *span);
+                self.emit(Op::NewArray { dst, items: base, count, ty: *ty }, *span);
+                self.next = mark;
+            }
+
+            Expr::Filled { ty, length, value, span } => {
+                let mark = self.next;
+                let length = self.operand(length, *span);
+                let held = self.operand(value, *span);
+                self.emit(Op::Filled { dst, length, value: held, ty: *ty }, *span);
+                self.next = mark;
+            }
+
+            Expr::At { array, at, span, .. } => {
+                let mark = self.next;
+                let ty = array.ty();
+                let target = self.operand(array, *span);
+                let (base, rank) = self.arguments(at, *span);
+                self.emit(Op::At { dst, array: target, at: base, rank: rank as u8, ty }, *span);
+                self.next = mark;
+            }
+
+            Expr::Count { array, ty, span } => {
+                let mark = self.next;
+                let target = self.operand(array, *span);
+                self.emit(Op::Count { dst, array: target, ty: *ty }, *span);
                 self.next = mark;
             }
 

@@ -94,6 +94,16 @@ pub struct Fault {
 }
 
 impl Fault {
+    /// A fault, for whoever is running the program to report.
+    pub fn of(
+        code: &'static str,
+        message: impl Into<String>,
+        rule: &'static str,
+        fix: impl Into<String>,
+    ) -> Fault {
+        Fault { code, message: message.into(), rule, fix: fix.into() }
+    }
+
     /// A fault, already boxed, because that is the only shape anything wants one in.
     fn new(
         code: &'static str,

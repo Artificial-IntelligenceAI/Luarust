@@ -44,6 +44,16 @@ pub enum Op {
     /// Leave the function, with the value in `src` when there is one.
     Return { src: Reg, ty: Ty },
     ReturnNothing,
+    /// A new array of `count` elements, taken from the registers at `items`.
+    NewArray { dst: Reg, items: Reg, count: u16, ty: Ty },
+    /// A new array of `length` elements, every one of them what is in `value`.
+    Filled { dst: Reg, length: Reg, value: Reg, ty: Ty },
+    /// One element of an array, indexed by the `rank` registers at `at`.
+    At { dst: Reg, array: Reg, at: Reg, rank: u8, ty: Ty },
+    /// Put `value` in one element of an array.
+    StoreAt { array: Reg, at: Reg, rank: u8, value: Reg, ty: Ty },
+    /// How many elements an array holds.
+    Count { dst: Reg, array: Reg, ty: Ty },
     /// Turn a `bool` register around.
     Not { dst: Reg, src: Reg },
     /// Jump if a `bool` register is false.
@@ -145,6 +155,21 @@ impl Chunk {
             }
             Op::Neg { dst, src, ty } => format!("neg          r{dst}, r{src}    -- {}", ty.word()),
             Op::Not { dst, src } => format!("not          r{dst}, r{src}"),
+            Op::NewArray { dst, items, count, ty } => {
+                format!("array.new    r{dst}, r{items}..{count}    -- {}", ty.written())
+            }
+            Op::Filled { dst, length, value, ty } => {
+                format!("array.fill   r{dst}, r{length}, r{value}    -- {}", ty.written())
+            }
+            Op::At { dst, array, at, rank, ty } => {
+                format!("array.at     r{dst}, r{array}, r{at}..{rank}    -- {}", ty.written())
+            }
+            Op::StoreAt { array, at, rank, value, ty } => {
+                format!("array.put    r{array}, r{at}..{rank}, r{value}    -- {}", ty.written())
+            }
+            Op::Count { dst, array, ty } => {
+                format!("array.count  r{dst}, r{array}    -- {}", ty.word())
+            }
             Op::JumpIfFalse { cond, target } => format!("jump.false   r{cond}, {target}"),
             Op::JumpIfTrue { cond, target } => format!("jump.true    r{cond}, {target}"),
             Op::Compare { op, operands, dst, lhs, rhs } => format!(

@@ -10,6 +10,7 @@
 //! answers by construction rather than by two implementations being written carefully.
 
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
+use luarust_core::heap;
 use luarust_parse::ast::LogicOp;
 use luarust_check::value::{
     DEPTH_LIMIT, Fault, Overflow, Value, binary_op, compare, format_of, holds, int_compare,
@@ -27,6 +28,7 @@ type Outcome<T> = Result<T, Stopped>;
 
 /// Run a checked program, writing whatever it prints to `out`.
 pub fn run(program: &Checked, out: &mut impl Write) -> Outcome<()> {
+    heap::clear();
     let mut machine = Machine {
         slots: vec![None; program.slots],
         overflow: program.overflow,
@@ -148,6 +150,16 @@ impl Machine<'_> {
 
             Stmt::Break { .. } => Ok(Flow::Broke),
 
+            Stmt::StoreAt { array, at, value, span } => {
+                let held = self.eval(array, out)?;
+                let value = self.eval(value, out)?;
+                let ty = array.ty();
+                let handle = handle_of(&held);
+                let index = self.offset(ty, handle, at, *span, out)?;
+                heap::store(handle, index, &value);
+                Ok(Flow::Went)
+            }
+
             Stmt::Return { value, .. } => {
                 let value = match value {
                     Some(expr) => Some(self.eval(expr, out)?),
@@ -245,6 +257,42 @@ impl Machine<'_> {
         }
     }
 
+    /// Where an index lands, counting from one and flattening a shape row by row.
+    ///
+    /// `'m'[|2|, |3|]` in a `2x3` is the second row's third column, which is element five
+    /// counting from nought — rows laid end to end, the way the literal writes them.
+    fn offset(
+        &mut self,
+        ty: Ty,
+        handle: u32,
+        at: &[Expr],
+        span: Span,
+        out: &mut impl Write,
+    ) -> Outcome<usize> {
+        let of = ty.array().expect("only an array is indexed");
+        let dims = of.dims();
+        let mut flat = 0usize;
+
+        for (place, index) in at.iter().enumerate() {
+            let held = self.eval(index, out)?.as_i128().unwrap_or(0);
+            // Counted from one, so nought is no element and the first is one.
+            let size = dims.get(place).copied().unwrap_or(0) as i128;
+            let past = if dims.is_empty() {
+                heap::length(handle) as i128
+            } else {
+                size
+            };
+            if held < 1 || held > past {
+                return Err(Stopped {
+                    fault: out_of_range(held, past),
+                    span,
+                });
+            }
+            flat = flat * dims.get(place).copied().unwrap_or(1) as usize + (held as usize - 1);
+        }
+        Ok(flat)
+    }
+
     fn eval(&mut self, expr: &Expr, out: &mut impl Write) -> Outcome<Value> {
         match expr {
             Expr::Const(value) => Ok(value.clone()),
@@ -322,6 +370,54 @@ impl Machine<'_> {
                 Ok(self.call(*func, values, *span, out)?.expect("it answers a value"))
             }
 
+            // A new array every time this is reached, so two passes of a loop are two
+            // arrays rather than one written over twice.
+            Expr::NewArray { ty, items, span } => {
+                let of = ty.array().expect("a new array has an array type");
+                let mut held = Vec::with_capacity(items.len());
+                for item in items {
+                    held.push(self.eval(item, out)?);
+                }
+                let _ = span;
+                Ok(heap::handle(*ty, heap::of(of.element, &held)))
+            }
+
+            Expr::Filled { ty, length, value, span } => {
+                let of = ty.array().expect("a filled array has an array type");
+                let length = self.eval(length, out)?;
+                let value = self.eval(value, out)?;
+                let count = length.as_i128().unwrap_or(0);
+                if count < 0 {
+                    return Err(Stopped {
+                        fault: Fault::of(
+                            "R0014",
+                            "this asks for an array of fewer than no elements.",
+                            "an array holds none or more",
+                            "give it a length of nought or more.",
+                        ),
+                        span: *span,
+                    });
+                }
+                Ok(heap::handle(*ty, heap::make(of.element, count as usize, &value)))
+            }
+
+            Expr::At { array, at, span, .. } => {
+                let ty = array.ty();
+                let held = self.eval(array, out)?;
+                let handle = handle_of(&held);
+                let index = self.offset(ty, handle, at, *span, out)?;
+                heap::read(handle, index).ok_or_else(|| Stopped {
+                    fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
+                    span: *span,
+                })
+            }
+
+            Expr::Count { array, ty, .. } => {
+                let held = self.eval(array, out)?;
+                let count = heap::length(handle_of(&held)) as u64;
+                Ok(Value::Num { ty: *ty, bits: count })
+            }
+
             Expr::Binary { op, ty, lhs, rhs, span } => {
                 let lhs = self.eval(lhs, out)?;
                 let rhs = self.eval(rhs, out)?;
@@ -361,4 +457,26 @@ fn ordering(ty: Ty, a: &Value, b: &Value) -> Comparison {
         return int_compare(ty, *x, *y);
     }
     compare(a, b)
+}
+
+/// The array a value points at.
+fn handle_of(value: &Value) -> u32 {
+    match value {
+        Value::Num { bits, .. } => *bits as u32,
+        other => unreachable!("an array value is a handle, and this is {other:?}"),
+    }
+}
+
+/// Reaching for an element that is not there.
+fn out_of_range(at: i128, length: i128) -> Fault {
+    Fault::of(
+        "R0015",
+        format!("there is no element {at} here."),
+        "an array is counted from one, up to how many it holds",
+        if length == 0 {
+            "this one holds nothing at all.".to_string()
+        } else {
+            format!("this one holds {length}, so the last is {length} and the first is 1.")
+        },
+    )
 }

@@ -48,7 +48,28 @@ pub struct Declined {
 /// function that called itself would overwrite the cells its caller was still using. The
 /// fix is a stack of cells rather than a fixed row of them; until then a program with
 /// functions in it goes to the VM, which has no such problem.
-pub fn accepts(_chunk: &Chunk) -> Result<(), Declined> {
+pub fn accepts(chunk: &Chunk) -> Result<(), Declined> {
+    // Arrays are declined for now. The heap they live in is on the Rust side, so every
+    // element would be a call back into it -- which is precisely the thing packing them
+    // was supposed to stop. Doing it properly means the machine code reaching into the
+    // heap itself, and that wants doing once rather than twice.
+    let array_op = |op: &Op| {
+        matches!(
+            op,
+            Op::NewArray { .. }
+                | Op::Filled { .. }
+                | Op::At { .. }
+                | Op::StoreAt { .. }
+                | Op::Count { .. }
+        )
+    };
+    if chunk.code.iter().any(array_op)
+        || chunk.funcs.iter().any(|routine| routine.code.iter().any(array_op))
+    {
+        return Err(Declined {
+            because: "it has arrays, and the machine code cannot reach the heap yet".to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -742,6 +763,15 @@ impl<'ctx> Emitter<'ctx> {
                 self.builder
                     .build_return(Some(&self.context.i64_type().const_zero()))
                     .expect("a return");
+            }
+
+            // `accepts` has already turned away any chunk with one of these in it.
+            Op::NewArray { .. }
+            | Op::Filled { .. }
+            | Op::At { .. }
+            | Op::StoreAt { .. }
+            | Op::Count { .. } => {
+                unreachable!("a chunk with arrays is declined before it gets here")
             }
 
             Op::Halt => {

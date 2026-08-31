@@ -233,7 +233,7 @@ impl<'a> Parser<'a> {
     fn binding(&mut self, hoisted: &[(String, Span)]) -> Result<Binding> {
         let start = self.peek().span;
         let mut own = Vec::new();
-        while self.peek_kind() == Kind::Word {
+        while chainable(self.peek_kind()) {
             let token = self.advance();
             own.push((self.text(token).to_string(), token.span));
             if !self.eat(Kind::Dot) {
@@ -277,6 +277,46 @@ impl<'a> Parser<'a> {
     /// Sort one chain word into the slot it belongs in, complaining if it fits none of
     /// them or if that slot is already taken.
     fn absorb(&mut self, attrs: &mut Attributes, word: &str, span: Span) {
+        // `array`, then optionally a shape, then what it holds. Written in that order
+        // because that is how it reads: an array, of this shape, of these.
+        if word == "array" {
+            if attrs.array.is_some() {
+                self.errors.push(
+                    Diagnostic::new("E0103", "this says `array` twice.".to_string())
+                        .primary(span, "written here")
+                        .rule("an array's chain says `array` once, then its shape, then what it holds")
+                        .tip("an array of arrays is not written yet.")
+                        .fix("delete one of them."),
+                );
+                return;
+            }
+            attrs.array = Some((None, span));
+            return;
+        }
+        if let Some(dims) = shape_of(word) {
+            match &mut attrs.array {
+                Some((held @ None, _)) => *held = Some(dims),
+                Some((Some(_), first)) => {
+                    let first = *first;
+                    self.errors.push(
+                        Diagnostic::new("E0103", format!("this says `{word}` after already giving a shape."))
+                            .secondary(first, "the array began here")
+                            .primary(span, "and its shape was said twice")
+                            .rule("an array has one shape")
+                            .fix("delete one of them."),
+                    );
+                }
+                None => self.errors.push(
+                    Diagnostic::new("E0102", format!("`{word}` is a shape, and nothing here is an array."))
+                        .primary(span, "written here")
+                        .rule("a shape belongs to an `array`")
+                        .tip("`array.2x3.ui32` is a two-by-three of `ui32`.")
+                        .fix("write `array` before it, or delete it."),
+                ),
+            }
+            return;
+        }
+
         if let Some(visibility) = Visibility::from_word(word) {
             if let Some((existing, first)) = attrs.visibility {
                 self.errors.push(
@@ -301,10 +341,10 @@ impl<'a> Parser<'a> {
                 return;
             }
             attrs.mutable = Some(span);
-        } else if let Some(ty) = Ty::from_word(word) {
+        } else if let Some(element) = Ty::from_word(word) {
             if let Some((existing, first)) = attrs.ty {
                 self.errors.push(
-                    Diagnostic::new("E0103", format!("this says `{word}` after already saying `{}`.", existing.word()))
+                    Diagnostic::new("E0103", format!("this says `{word}` after already saying `{}`.", existing.written()))
                         .secondary(first, "the type was settled here")
                         .primary(span, "and said again here")
                         .rule("a declaration names one type")
@@ -312,7 +352,30 @@ impl<'a> Parser<'a> {
                 );
                 return;
             }
-            attrs.ty = Some((ty, span));
+            // The type word closes an array that was opened before it, or is the whole
+            // type when there was no array.
+            let Some((dims, opened)) = attrs.array.take() else {
+                attrs.ty = Some((element, span));
+                return;
+            };
+            let made = match &dims {
+                None => luarust_core::ty::growable(element),
+                Some(dims) => luarust_core::ty::fixed(element, dims),
+            };
+            let Some(ty) = made else {
+                self.errors.push(
+                    Diagnostic::new("E0135", "this array's shape is not a shape.".to_string())
+                        .primary(opened.to(span), "written here")
+                        .rule("an array has between one and three dimensions, each of them at least one and at most 65,535")
+                        .tip("a fixed array larger than that wants to be a growable one.")
+                        .fix("give it a smaller shape, or leave the shape out to let it grow."),
+                );
+                // Carry on as if it held one of them, so the declaration does not also
+                // complain about having no type. One mistake, one complaint.
+                attrs.ty = Some((element, span));
+                return;
+            };
+            attrs.ty = Some((ty, opened.to(span)));
         } else {
             self.errors.push(
                 Diagnostic::new("E0102", format!("`{word}` is not part of a declaration."))
@@ -331,7 +394,22 @@ impl<'a> Parser<'a> {
         let mut targets = Vec::new();
         loop {
             let token = self.expect(Kind::Name, "`set` changes variables, which are named in quotes")?;
-            targets.push(Ident { text: name_value(self.text(token)).to_string(), span: token.span });
+            let name = Ident { text: name_value(self.text(token)).to_string(), span: token.span };
+            // A list after the name is an element of it rather than the whole thing.
+            targets.push(if self.peek_kind() == Kind::OpenList {
+                self.advance();
+                let mut at = Vec::new();
+                loop {
+                    at.push(self.value_expr()?);
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                let close = self.expect(Kind::CloseList, "an index closes with `]`")?;
+                Target::Element { span: name.span.to(close.span), array: name, at }
+            } else {
+                Target::Name(name)
+            });
             if !self.eat(Kind::Comma) {
                 break;
             }
@@ -416,13 +494,15 @@ impl<'a> Parser<'a> {
                 };
                 Ok(PrintItem::Escape { value, span: token.span })
             }
-            // A name in a print list is being read, not declared.
+            // A name in a print list is being read, not declared -- and a list after it
+            // is an index into it rather than the next item.
             Kind::Name => {
                 let token = self.advance();
-                Ok(PrintItem::Value(Expr::Name(Ident {
+                let name = Expr::Name(Ident {
                     text: name_value(self.text(token)).to_string(),
                     span: token.span,
-                })))
+                });
+                self.maybe_index(name).map(PrintItem::Value)
             }
             _ => self.value_expr().map(PrintItem::Value),
         }
@@ -696,6 +776,30 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A list after something already read is an index into it. A *quoted* name before a
+    /// bracket indexes; a bare word before one calls. Nothing else could be either.
+    fn maybe_index(&mut self, of: Expr) -> Result<Expr> {
+        let mut held = of;
+        while self.peek_kind() == Kind::OpenList {
+            let open = self.advance().span;
+            let mut at = Vec::new();
+            loop {
+                at.push(self.value_expr()?);
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+            let close = self.expect(Kind::CloseList, "an index closes with `]`")?;
+            held = Expr::Index {
+                span: held.span().to(close.span),
+                array: Box::new(held),
+                at,
+            };
+            let _ = open;
+        }
+        Ok(held)
+    }
+
     /// `name[a, b]` — a call, in a value slot or inside a math block alike.
     fn call(&mut self) -> Result<Expr> {
         let word = self.advance();
@@ -849,9 +953,14 @@ impl<'a> Parser<'a> {
     }
 
     /// The `.word.word` run after a keyword.
+    /// The dotted words after a keyword.
+    ///
+    /// A number or a shape counts as one, because an array's chain has them in it:
+    /// `array.8.ui32` and `array.2x3.ui32`. Whatever the chain is for decides whether
+    /// that made any sense.
     fn chain_words(&mut self) -> Vec<(String, Span)> {
         let mut words = Vec::new();
-        while self.peek_kind() == Kind::Dot && self.peek_at(1).kind == Kind::Word {
+        while self.peek_kind() == Kind::Dot && chainable(self.peek_at(1).kind) {
             self.advance(); // `.`
             let token = self.advance();
             words.push((self.text(token).to_string(), token.span));
@@ -885,13 +994,32 @@ impl<'a> Parser<'a> {
                     span: token.span,
                 })
             }
-            // Quotes hold a name, here as everywhere else, so this reads the variable.
+            // Quotes hold a name, here as everywhere else, so this reads the variable --
+            // or an element of it, when a list follows.
             Kind::Name => {
                 let token = self.advance();
-                Ok(Expr::Name(Ident {
+                let name = Expr::Name(Ident {
                     text: name_value(self.text(token)).to_string(),
                     span: token.span,
-                }))
+                });
+                self.maybe_index(name)
+            }
+
+            // A list where a value is wanted is an array of these. The outer brackets of
+            // a declaration are the values, one per name; this is one of them.
+            Kind::OpenList => {
+                let open = self.advance().span;
+                let mut items = Vec::new();
+                if self.peek_kind() != Kind::CloseList {
+                    loop {
+                        items.push(self.value_expr()?);
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                let close = self.expect(Kind::CloseList, "an array closes with `]`")?;
+                Ok(Expr::Items { items, span: open.to(close.span) })
             }
             Kind::Word if self.word() == Some("math") => {
                 let start = self.advance().span;
@@ -1138,13 +1266,15 @@ impl<'a> Parser<'a> {
                 })
             }
 
-            // Inside a math block the quotes hold a variable, not a literal.
+            // Inside a math block the quotes hold a variable, not a literal -- or an
+            // element of one, when a list follows.
             Kind::Name => {
                 let token = self.advance();
-                Ok(Expr::Name(Ident {
+                let name = Expr::Name(Ident {
                     text: name_value(self.text(token)).to_string(),
                     span: token.span,
-                }))
+                });
+                self.maybe_index(name)
             }
             Kind::OpenGroup => {
                 self.advance();
@@ -1175,6 +1305,23 @@ struct Attributes {
     visibility: Option<(Visibility, Span)>,
     mutable: Option<Span>,
     ty: Option<(Ty, Span)>,
+    /// An `array` that has been seen and not yet closed by the type it holds, with its
+    /// shape if one was given.
+    array: Option<(Option<Vec<u32>>, Span)>,
+}
+
+/// Whether a token may be one item of a dotted chain.
+fn chainable(kind: Kind) -> bool {
+    // A number and a shape are here for arrays: `array.8.ui32`, `array.2x3.ui32`.
+    matches!(kind, Kind::Word | Kind::Number | Kind::Shape)
+}
+
+/// A chain item read as an array's shape: `8` is one dimension, `2x3` is two.
+fn shape_of(word: &str) -> Option<Vec<u32>> {
+    if word.is_empty() || !word.bytes().all(|b| b.is_ascii_digit() || b == b'x') {
+        return None;
+    }
+    word.split('x').map(|part| part.parse().ok()).collect()
 }
 
 #[cfg(test)]
@@ -1221,6 +1368,14 @@ mod tests {
             Expr::Call { name, args, .. } => {
                 let shown: Vec<String> = args.iter().map(show).collect();
                 format!("({} {})", name.text, shown.join(" "))
+            }
+            Expr::Index { array, at, .. } => {
+                let shown: Vec<String> = at.iter().map(show).collect();
+                format!("(at {} {})", show(array), shown.join(" "))
+            }
+            Expr::Items { items, .. } => {
+                let shown: Vec<String> = items.iter().map(show).collect();
+                format!("(array {})", shown.join(" "))
             }
         }
     }
@@ -1649,4 +1804,67 @@ mod tests {
         assert_eq!(codes("loop.while [|true|] { break when |3|; }"), ["E0132"]);
     }
 
+    #[test]
+    fn an_array_type_reads_out_of_the_chain() {
+        for (written, want) in [
+            ("array.ui32", "array.ui32"),
+            ("array.8.ui32", "array.8.ui32"),
+            ("array.2x3.b64", "array.2x3.b64"),
+            ("array.2x3x4.i8", "array.2x3x4.i8"),
+        ] {
+            let program = clean(&format!("var.local.{written} ['xs'] = [filled[|0|]];"));
+            let Stmt::Var(var) = &program.stmts[0] else { panic!("a declaration") };
+            assert_eq!(var.bindings[0].ty.written(), want);
+        }
+    }
+
+    #[test]
+    fn the_rest_of_the_chain_still_works_around_it() {
+        let program = clean("var.local.mut.array.4.ui8 ['xs'] = [filled[|0|]];");
+        let Stmt::Var(var) = &program.stmts[0] else { panic!("a declaration") };
+        assert!(var.bindings[0].mutable);
+        assert_eq!(var.bindings[0].visibility, Visibility::Local);
+        assert_eq!(var.bindings[0].ty.written(), "array.4.ui8");
+    }
+
+    #[test]
+    fn a_shape_without_an_array_and_an_array_without_a_shape() {
+        // A shape belongs to an `array`, and says so.
+        assert_eq!(codes("var.local.2x3.ui32 ['m'] = [filled[|0|]];"), ["E0102"]);
+        // Zero of something is not a shape, and neither is more than three dimensions.
+        assert_eq!(codes("var.local.array.0.ui32 ['xs'] = [filled[|0|]];"), ["E0135"]);
+        assert_eq!(codes("var.local.array.1x2x3x4.ui32 ['xs'] = [filled[|0|]];"), ["E0135"]);
+    }
+
+    #[test]
+    fn a_quoted_name_before_a_bracket_indexes_and_a_bare_word_calls() {
+        assert_eq!(math("'xs'[|1|]"), "(at xs |1|)");
+        assert_eq!(math("'m'[|1|, |2|]"), "(at m |1| |2|)");
+        assert_eq!(math("count['xs']"), "(count xs)");
+        // And an index is a term like any other, so arithmetic works on one.
+        assert_eq!(math("'xs'[|1|] + 'xs'[|2|]"), "(+ (at xs |1|) (at xs |2|))");
+    }
+
+    #[test]
+    fn a_list_where_a_value_is_wanted_is_an_array_of_them() {
+        let program = clean("var.local.array.3.ui8 ['xs'] = [[|1|, |2|, |3|]];");
+        let Stmt::Var(var) = &program.stmts[0] else { panic!("a declaration") };
+        assert_eq!(show(&var.values[0]), "(array |1| |2| |3|)");
+        // An empty one is still one.
+        let program = clean("var.local.array.ui8 ['xs'] = [[]];");
+        let Stmt::Var(var) = &program.stmts[0] else { panic!("a declaration") };
+        assert_eq!(show(&var.values[0]), "(array )");
+    }
+
+    #[test]
+    fn the_outer_brackets_are_still_one_value_per_name() {
+        // Two names, two arrays -- not one array of two things.
+        let program = clean("var.local.array.1.ui8 ['a', 'b'] = [[|1|], [|2|]];");
+        let Stmt::Var(var) = &program.stmts[0] else { panic!("a declaration") };
+        assert_eq!(var.bindings.len(), 2);
+        assert_eq!(var.values.len(), 2);
+        assert_eq!(show(&var.values[0]), "(array |1|)");
+    }
+
 }
+

@@ -52,6 +52,8 @@ pub enum Stmt {
     /// Ask, in order, and run the first body whose condition held. `otherwise` is the
     /// `else`, and is empty when there was none.
     If { arms: Vec<Arm>, otherwise: Vec<Stmt>, span: Span },
+    /// Put a value in one element of an array.
+    StoreAt { array: Expr, at: Vec<Expr>, value: Expr, span: Span },
     /// Leave the function, with a value when it has one to give.
     Return { value: Option<Expr>, span: Span },
     /// Call something for what it does. Whatever it answers, if anything, is dropped.
@@ -102,6 +104,15 @@ pub enum Expr {
     /// `func` indexes [`Checked::funcs`]; `ty` is what that function answers, which a
     /// call in a value position must have.
     Call { func: usize, ty: Ty, args: Vec<Expr>, span: Span },
+    /// A new array holding these, in order. New every time it is reached, because two
+    /// passes of a loop must not be writing into one array.
+    NewArray { ty: Ty, items: Vec<Expr>, span: Span },
+    /// A new array of `length` elements, every one of them `value`.
+    Filled { ty: Ty, length: Box<Expr>, value: Box<Expr>, span: Span },
+    /// One element. `ty` is the element's type; `at` has one index per dimension.
+    At { array: Box<Expr>, at: Vec<Expr>, ty: Ty, span: Span },
+    /// How many elements an array holds, as whatever type is expecting the answer.
+    Count { array: Box<Expr>, ty: Ty, span: Span },
 }
 
 impl Expr {
@@ -113,7 +124,11 @@ impl Expr {
             | Expr::Binary { ty, .. }
             | Expr::Neg { ty, .. } => *ty,
             Expr::Compare { .. } | Expr::Logic { .. } | Expr::Not { .. } => Ty::Bool,
-            Expr::Call { ty, .. } => *ty,
+            Expr::Call { ty, .. }
+            | Expr::NewArray { ty, .. }
+            | Expr::Filled { ty, .. }
+            | Expr::At { ty, .. }
+            | Expr::Count { ty, .. } => *ty,
         }
     }
 
@@ -127,6 +142,10 @@ impl Expr {
             | Expr::Compare { span, .. }
             | Expr::Logic { span, .. }
             | Expr::Call { span, .. }
+            | Expr::NewArray { span, .. }
+            | Expr::Filled { span, .. }
+            | Expr::At { span, .. }
+            | Expr::Count { span, .. }
             | Expr::Not { span, .. } => *span,
         }
     }

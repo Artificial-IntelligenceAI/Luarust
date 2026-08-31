@@ -1,0 +1,24 @@
+-- Arrays: fixed, shaped, and growable.
+var.local.mut.array.5.ui32 ['xs'] = [[|10|, |20|, |30|, |40|, |50|]];
+print["xs is " 'xs' ", holding " count['xs'] \n];
+print["the first is " 'xs'[|1|] " and the last is " 'xs'[|5|] \n];
+
+set ['xs'[|3|]] = [|99|];
+print["after changing the third: " 'xs' \n];
+
+var.local.mut.ui32 ['total'] = [|0|];
+loop.temp.range.ui32 ['i'] = [|1|, count['xs']] {
+    set ['total'] = [math { 'total' + 'xs'['i'] }];
+}
+print["they add up to " 'total' \n];
+
+-- A shaped one is written flat, row by row.
+var.local.array.2x3.ui8 ['m'] = [[
+    |1|, |2|, |3|,
+    |4|, |5|, |6|
+]];
+print["m[1,1] is " 'm'[|1|, |1|] " and m[2,3] is " 'm'[|2|, |3|] \n];
+
+-- And one made rather than written out.
+var.local.array.ui8 ['zeros'] = [filled[|4|, |0|]];
+print["four of nothing: " 'zeros' \n];

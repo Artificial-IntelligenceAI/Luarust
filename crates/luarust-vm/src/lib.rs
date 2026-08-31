@@ -24,6 +24,8 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
+use luarust_core::Ty;
+use luarust_core::heap;
 use luarust_core::value::{
     DEPTH_LIMIT, Fault, Stopped, Value, int_compare, binary_op, compare, format_of, holds, int_op, negate,
 };
@@ -44,6 +46,7 @@ struct Frame {
 
 /// Run a compiled chunk.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
+    heap::clear();
     // A register the checker has proved is written before it is read. The placeholder is
     // never observed by a program that got this far.
     let placeholder = Value::Bool(false);
@@ -188,6 +191,49 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let _ = out.flush();
             }
 
+            Op::NewArray { dst, items, count, ty } => {
+                let of = ty.array().expect("a new array has an array type");
+                let held: Vec<Value> = (0..count as usize)
+                    .map(|n| registers[items as usize + n].clone())
+                    .collect();
+                registers[dst as usize] = heap::handle(ty, heap::of(of.element, &held));
+            }
+
+            Op::Filled { dst, length, value, ty } => {
+                let of = ty.array().expect("a filled array has an array type");
+                let count = registers[length as usize].as_i128().unwrap_or(0);
+                if count < 0 {
+                    return Err(Stopped { fault: fewer_than_none(), span: spans[here] });
+                }
+                let fill = registers[value as usize].clone();
+                registers[dst as usize] =
+                    heap::handle(ty, heap::make(of.element, count as usize, &fill));
+            }
+
+            Op::At { dst, array, at, rank, ty } => {
+                let handle = handle_of(&registers[array as usize]);
+                let index = offset(ty, handle, registers, at, rank)
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
+                registers[dst as usize] = heap::read(handle, index).ok_or(Stopped {
+                    fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
+                    span: spans[here],
+                })?;
+            }
+
+            Op::StoreAt { array, at, rank, value, ty } => {
+                let handle = handle_of(&registers[array as usize]);
+                let index = offset(ty, handle, registers, at, rank)
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
+                let held = registers[value as usize].clone();
+                heap::store(handle, index, &held);
+            }
+
+            Op::Count { dst, array, ty } => {
+                let handle = handle_of(&registers[array as usize]);
+                registers[dst as usize] =
+                    Value::Num { ty, bits: heap::length(handle) as u64 };
+            }
+
             Op::Not { dst, src } => {
                 registers[dst as usize] = Value::Bool(!truth(&registers[src as usize]));
             }
@@ -280,4 +326,62 @@ fn truth(value: &Value) -> bool {
         Value::Bool(answer) => *answer,
         other => unreachable!("a condition checked as `bool` held {other:?}"),
     }
+}
+
+/// The array a value points at.
+fn handle_of(value: &Value) -> u32 {
+    match value {
+        Value::Num { bits, .. } => *bits as u32,
+        other => unreachable!("an array value is a handle, and this is {other:?}"),
+    }
+}
+
+/// Where an index lands, counted from one and flattened row by row.
+fn offset(
+    ty: Ty,
+    handle: u32,
+    registers: &[Value],
+    at: u16,
+    rank: u8,
+) -> Result<usize, Fault> {
+    let of = ty.array().expect("only an array is indexed");
+    let dims = of.dims();
+    let mut flat = 0usize;
+
+    for place in 0..rank as usize {
+        let held = registers[at as usize + place].as_i128().unwrap_or(0);
+        let past = if dims.is_empty() {
+            heap::length(handle) as i128
+        } else {
+            i128::from(dims[place])
+        };
+        if held < 1 || held > past {
+            return Err(out_of_range(held, past));
+        }
+        flat = flat * dims.get(place).copied().unwrap_or(1) as usize + (held as usize - 1);
+    }
+    Ok(flat)
+}
+
+/// Reaching for an element that is not there.
+fn out_of_range(at: i128, length: i128) -> Fault {
+    Fault::of(
+        "R0015",
+        format!("there is no element {at} here."),
+        "an array is counted from one, up to how many it holds",
+        if length == 0 {
+            "this one holds nothing at all.".to_string()
+        } else {
+            format!("this one holds {length}, so the last is {length} and the first is 1.")
+        },
+    )
+}
+
+fn fewer_than_none() -> Fault {
+    Fault::of(
+        "R0014",
+        "this asks for an array of fewer than no elements.",
+        "an array holds none or more",
+        "give it a length of nought or more.",
+    )
 }

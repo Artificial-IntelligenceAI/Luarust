@@ -143,6 +143,7 @@ name = "luarust-interp"
 version = "0.0.0"
 dependencies = [
  "luarust-check",
+ "luarust-core",
  "luarust-diag",
  "luarust-lex",
  "luarust-num",

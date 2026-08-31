@@ -36,7 +36,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -310,6 +310,42 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_ty(out, ty);
         }
         Op::ReturnNothing => out.push(17),
+        Op::NewArray { dst, items, count, ty } => {
+            out.push(18);
+            put_u16(out, dst);
+            put_u16(out, items);
+            put_u16(out, count);
+            put_ty(out, ty);
+        }
+        Op::Filled { dst, length, value, ty } => {
+            out.push(19);
+            put_u16(out, dst);
+            put_u16(out, length);
+            put_u16(out, value);
+            put_ty(out, ty);
+        }
+        Op::At { dst, array, at, rank, ty } => {
+            out.push(20);
+            put_u16(out, dst);
+            put_u16(out, array);
+            put_u16(out, at);
+            out.push(rank);
+            put_ty(out, ty);
+        }
+        Op::StoreAt { array, at, rank, value, ty } => {
+            out.push(21);
+            put_u16(out, array);
+            put_u16(out, at);
+            out.push(rank);
+            put_u16(out, value);
+            put_ty(out, ty);
+        }
+        Op::Count { dst, array, ty } => {
+            out.push(22);
+            put_u16(out, dst);
+            put_u16(out, array);
+            put_ty(out, ty);
+        }
         Op::Not { dst, src } => {
             out.push(12);
             put_u16(out, dst);
@@ -663,6 +699,35 @@ fn check_code(
                 }
             }
             Op::Return { src, .. } => register(src)?,
+            Op::NewArray { dst, items, count, .. } => {
+                register(dst)?;
+                for n in 0..count {
+                    register(items + n)?;
+                }
+            }
+            Op::Filled { dst, length, value, .. } => {
+                register(dst)?;
+                register(length)?;
+                register(value)?;
+            }
+            Op::At { dst, array, at, rank, .. } => {
+                register(dst)?;
+                register(array)?;
+                for n in 0..u16::from(rank) {
+                    register(at + n)?;
+                }
+            }
+            Op::StoreAt { array, at, rank, value, .. } => {
+                register(array)?;
+                register(value)?;
+                for n in 0..u16::from(rank) {
+                    register(at + n)?;
+                }
+            }
+            Op::Count { dst, array, .. } => {
+                register(dst)?;
+                register(array)?;
+            }
             Op::ReturnNothing => {}
             Op::Halt => {}
         }
@@ -850,6 +915,33 @@ impl<'a> Cursor<'a> {
                 rhs: self.u16()?,
             },
             12 => Op::Not { dst: self.u16()?, src: self.u16()? },
+            18 => Op::NewArray {
+                dst: self.u16()?,
+                items: self.u16()?,
+                count: self.u16()?,
+                ty: self.ty()?,
+            },
+            19 => Op::Filled {
+                dst: self.u16()?,
+                length: self.u16()?,
+                value: self.u16()?,
+                ty: self.ty()?,
+            },
+            20 => Op::At {
+                dst: self.u16()?,
+                array: self.u16()?,
+                at: self.u16()?,
+                rank: self.u8()?,
+                ty: self.ty()?,
+            },
+            21 => Op::StoreAt {
+                array: self.u16()?,
+                at: self.u16()?,
+                rank: self.u8()?,
+                value: self.u16()?,
+                ty: self.ty()?,
+            },
+            22 => Op::Count { dst: self.u16()?, array: self.u16()?, ty: self.ty()? },
             15 => Op::Call {
                 func: self.u32()?,
                 base: self.u16()?,
