@@ -12,7 +12,7 @@ on:
 
 jobs:
   diagnose:
-    name: an SSE store, read back narrow
+    name: an SSE store no compiler may take apart
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -64,8 +64,7 @@ jobs:
                   sum = regs[0].bits;
               }
               long t1 = now_ms();
-              printf("narrow %5ld ms   %lu
-", t1 - t0, sum);
+              printf("narrow %5ld ms   %lu\n", t1 - t0, sum);
 
               t0 = now_ms();
               sum = 0;
@@ -88,8 +87,7 @@ jobs:
                   sum = regs[0].bits;
               }
               t1 = now_ms();
-              printf("wide   %5ld ms   %lu
-", t1 - t0, sum);
+              printf("wide   %5ld ms   %lu\n", t1 - t0, sum);
               return 0;
           }
 
@@ -97,6 +95,6 @@ jobs:
           sed -i 's/^          //' forward2.c
           cc -O2 -o forward2 forward2.c
           echo "--- 16-byte vector stores present, says objdump:"
-          objdump -d forward2 | grep -cE "movups|movaps|movdqu"
+          objdump -d forward2 | grep -cE "movups|movaps|movdqu|movdqa"
           for _ in 1 2 3; do ./forward2 100000000; echo; done
           exit 0
