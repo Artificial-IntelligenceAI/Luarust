@@ -106,7 +106,11 @@ const SNIPPETS = () => [
   snippet("while", "a loop with a condition", "loop.perm.while.${1:ui8} ['${2:n}'] [math { ${3:condition} }] {\n\t$0\n\tbreak when reached |${4:100}|;\n}"),
   snippet("if", "a decision", "if [math { ${1:condition} }] {\n\t$0\n}"),
   snippet("print", "write a line", "print[${1:\"text\"} \\n];"),
-  snippet("array", "an array", "var.local.array.${1:3}.${2:ui32} ['${3:name}'] = [[|${4:1}|]];"),
+  // Written with `filled`, not written out: a fixed array's length is in its type, so a
+  // snippet with the length in one hole and the elements in another compiles only while
+  // the two agree, and the first thing anybody does to a snippet is change a hole.
+  snippet("array", "an array, filled", "var.local.array.${1:ui32} ['${2:name}'] = [filled[|${3:3}|, |${4:0}|]];"),
+  snippet("array-written", "an array, written out", "var.local.array.3.${1:ui32} ['${2:name}'] = [[|${3:1}|, |${4:2}|, |${5:3}|]];"),
 ];
 
 /**
