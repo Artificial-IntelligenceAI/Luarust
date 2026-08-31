@@ -23,6 +23,8 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Module;
+use inkwell::passes::PassBuilderOptions;
+use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
 use luarust_check::value::{Fault, Overflow, Stopped, Value};
@@ -79,6 +81,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, D
 
     let mut emitter = Emitter::new(&context, &module, &engine, chunk);
     emitter.emit(chunk, &module);
+    optimise(&module);
     let spans = std::mem::take(&mut emitter.spans);
 
     let compiled = unsafe {
@@ -105,7 +108,38 @@ pub fn emit_ir(chunk: &Chunk) -> Result<String, Declined> {
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
     let mut emitter = Emitter::new(&context, &module, &engine, chunk);
     emitter.emit(chunk, &module);
+    // Optimised, because that is what actually runs. `dis` is where the unoptimised
+    // shape of a program is on show.
+    optimise(&module);
     Ok(module.print_to_string().to_string())
+}
+
+/// Run LLVM's own optimiser over the module before anything is compiled.
+///
+/// `OptimizationLevel::Aggressive` on the execution engine is the *codegen* level --
+/// instruction selection, scheduling, register allocation. It runs no IR passes at all,
+/// so without this every register stays the `alloca` it was emitted as, and a check
+/// against a divisor the module can see is a literal is still a branch at run time.
+///
+/// Failing is not fatal. An unoptimised module is slower and correct, which is a much
+/// better answer than no module.
+fn optimise(module: &Module<'_>) {
+    if Target::initialize_native(&InitializationConfig::default()).is_err() {
+        return;
+    }
+    let triple = TargetMachine::get_default_triple();
+    let Ok(target) = Target::from_triple(&triple) else { return };
+    let Some(machine) = target.create_target_machine(
+        &triple,
+        &TargetMachine::get_host_cpu_name().to_string(),
+        &TargetMachine::get_host_cpu_features().to_string(),
+        OptimizationLevel::Aggressive,
+        RelocMode::Default,
+        CodeModel::JITDefault,
+    ) else {
+        return;
+    };
+    let _ = module.run_passes("default<O3>", &machine, PassBuilderOptions::create());
 }
 
 /// Turn what the compiled program returned back into a fault.
