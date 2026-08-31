@@ -249,7 +249,7 @@ fn a_chunk_cannot_ask_for_registers_nothing_could_name() {
         "the register count is not where this test thinks it is"
     );
 
-    let mut asking = |registers: u32| {
+    let asking = |registers: u32| {
         let mut bytes = written.clone();
         bytes[at..at + 4].copy_from_slice(&registers.to_le_bytes());
         serialize::read(&bytes).map(|_| ())
