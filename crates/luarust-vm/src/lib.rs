@@ -99,13 +99,13 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             Op::Call { func, base, argc, dst } => {
                 if depth >= DEPTH_LIMIT {
                     return Err(Stopped {
-                        fault: Fault {
+                        fault: Box::new(Fault {
                             code: "R0011",
                             message: format!("this has called itself {DEPTH_LIMIT} deep."),
                             rule: "a call may only go so deep before the program is stopped",
                             fix: "give the recursion a case that stops, or write it as a loop."
                                 .to_string(),
-                        },
+                        }),
                         span: spans[here],
                     });
                 }
@@ -141,7 +141,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     });
                 };
                 let bits = int_op(op, ty, *a, *b, chunk.overflow)
-                    .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = Value::Num { ty, bits };
             }
 
@@ -152,7 +152,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     &registers[rhs as usize],
                     chunk.overflow,
                 )
-                .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
+                .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = value;
             }
 
@@ -176,7 +176,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::Neg { dst, src, .. } => {
                 let value = negate(&registers[src as usize], chunk.overflow)
-                    .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = value;
             }
 
@@ -415,7 +415,7 @@ fn offset(
     registers: &[Value],
     at: u16,
     rank: u8,
-) -> Result<usize, Fault> {
+) -> Result<usize, Box<Fault>> {
     let of = ty.array().expect("only an array is indexed");
     let dims = of.dims();
     let mut flat = 0usize;
@@ -436,8 +436,8 @@ fn offset(
 }
 
 /// Reaching for an element that is not there.
-fn out_of_range(at: i128, length: i128) -> Fault {
-    Fault::of(
+fn out_of_range(at: i128, length: i128) -> Box<Fault> {
+    Box::new(Fault::of(
         "R0015",
         format!("there is no element {at} here."),
         "an array is counted from one, up to how many it holds",
@@ -446,7 +446,7 @@ fn out_of_range(at: i128, length: i128) -> Fault {
         } else {
             format!("this one holds {length}, so the last is {length} and the first is 1.")
         },
-    )
+    ))
 }
 
 /// A chunk whose instruction disagrees with what its registers hold.
@@ -456,20 +456,20 @@ fn out_of_range(at: i128, length: i128) -> Fault {
 /// a type tag indexes nothing, so nothing at load can tell a `ui8` tag from a `bool` tag.
 /// This is where the disagreement finally shows, and it is a broken file rather than a
 /// broken program, so it says so.
-fn not_as_described(saying: &str) -> Fault {
-    Fault::of(
+fn not_as_described(saying: &str) -> Box<Fault> {
+    Box::new(Fault::of(
         "R0016",
         "this chunk does not hold what it says it holds.",
         "an instruction's type is the type of the values it works on",
         format!("rebuild it from the source: {saying}"),
-    )
+    ))
 }
 
-fn fewer_than_none() -> Fault {
-    Fault::of(
+fn fewer_than_none() -> Box<Fault> {
+    Box::new(Fault::of(
         "R0014",
         "this asks for an array of fewer than no elements.",
         "an array holds none or more",
         "give it a length of nought or more.",
-    )
+    ))
 }

@@ -230,7 +230,7 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
             fix: "run it with `luarust interp` to find out what happened.".into(),
         },
     };
-    Err(Stopped { fault, span })
+    Err(Stopped { fault: Box::new(fault), span })
 }
 
 

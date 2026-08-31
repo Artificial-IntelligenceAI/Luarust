@@ -199,7 +199,10 @@ impl Fault {
 /// behaviour.
 #[derive(Clone, Debug)]
 pub struct Stopped {
-    pub fault: Fault,
+    /// Boxed for the same reason [`Answer`] boxes its fault: this rides in the return
+    /// type of every step both interpreters take, and behind a pointer the whole
+    /// `Result` fits in a register pair instead of moving 96 bytes through memory.
+    pub fault: Box<Fault>,
     pub span: Span,
 }
 
