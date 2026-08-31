@@ -1284,8 +1284,7 @@ Everything reads its `N` from the command line so it cannot be folded away, exce
 which has no argv yet and has it written into the source. The scaling table is what would
 catch that if it ever began to matter.
 
-The `benchmark` workflow in this repository runs both tables on a GitHub runner, which is
-a shared x86-64 machine whose numbers move by a third between runs — the tables above were
-taken locally instead, on an idle M5, every row in one sitting. Both are honest and they
-do not agree: the same JIT was 1.27× C on that runner and is 1.05× here. Rankings survive the
-move between machines far better than ratios do.
+The `benchmark` workflow in this repository is what produced the x86-64 column, on a
+shared runner whose numbers move by a third between runs; the M5 column was taken locally
+on an idle machine. Both are honest and they do not agree — see the two-column table
+above, where the JIT holds its place and the two interpreters do not.
