@@ -5,8 +5,12 @@
 # mod-minus-add delta matches the C idiv delta, the x86-64 gap is divide latency.
 name: diagnose
 
+# On push rather than dispatch: a workflow not on the default branch cannot be
+# dispatched, but a push event runs the file as of the pushed commit.
 on:
-  workflow_dispatch:
+  push:
+    branches: [fable/perf]
+    paths: ['.github/workflows/diagnose.yml']
 
 jobs:
   diagnose:
