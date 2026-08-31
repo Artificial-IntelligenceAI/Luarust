@@ -33,11 +33,30 @@ const GUARD: u32 = 3;
 ///
 /// Accepts an optional sign, digits, and at most one decimal point. No exponent form yet:
 /// nothing in the language writes one.
+/// How wide the reading is done, whatever width the answer is.
+///
+/// Digits go into one whole number and the point becomes a division by `10^k`, so both
+/// grow with how many digits were written, not with the format. A `b256` prints its value
+/// exactly in about two hundred and forty of them, and reading that back needs the digits
+/// (~800 bits), the divisor (~800), and the shift that gives the quotient its precision
+/// (~240) -- none of which fits in the 512 bits a `b256` answer is returned in.
+///
+/// So the reading is done at 2048 bits and the quotient, which is only ever
+/// `precision + GUARD` bits wide, is narrowed at the end. That is what lets a program read
+/// back every number it prints. A literal longer than this still answers `TooLong`, which
+/// is honest: it is a limit, just not one the language runs into by writing a number down.
+const WIDE: usize = 32;
+
 pub fn from_decimal<const W: usize>(
     fmt: Format,
     mode: Round,
     text: &str,
 ) -> Result<Uint<W>, Invalid> {
+    read_wide::<W>(fmt, mode, text)
+}
+
+/// The reading itself, at [`WIDE`], answering at `W`.
+fn read_wide<const W: usize>(fmt: Format, mode: Round, text: &str) -> Result<Uint<W>, Invalid> {
     let mut chars = text.chars().peekable();
 
     let mut negative = false;
@@ -54,8 +73,8 @@ pub fn from_decimal<const W: usize>(
 
     // Every digit, point or not, as one whole number; and how many of them were after the
     // point, which is the power of ten to divide by at the end.
-    let ten = Uint::<W>::from_u64(10);
-    let mut digits = Uint::<W>::ZERO;
+    let ten = Uint::<WIDE>::from_u64(10);
+    let mut digits = Uint::<WIDE>::ZERO;
     let mut any = false;
     let mut fraction_digits = 0u32;
     let mut seen_point = false;
@@ -87,13 +106,13 @@ pub fn from_decimal<const W: usize>(
 
     // A whole number needs no dividing: hand the digits straight to the rounding step.
     if fraction_digits == 0 {
-        return Ok(round_and_pack(fmt, mode, negative, digits, 0));
+        return Ok(round_and_pack(fmt, mode, negative, narrow::<W>(digits)?, 0));
     }
 
     // Otherwise the value is `digits / 10^fraction_digits`, and dividing is where the one
     // rounding happens. Shift far enough left that the quotient has the precision the
     // format wants plus the guard bits, then let the remainder be the sticky bit.
-    let mut divisor = Uint::<W>::from_u64(1);
+    let mut divisor = Uint::<WIDE>::from_u64(1);
     for _ in 0..fraction_digits {
         let (product, carry) = divisor.mul_wide(ten);
         if !carry.is_zero() {
@@ -104,7 +123,7 @@ pub fn from_decimal<const W: usize>(
 
     let want = fmt.precision + GUARD;
     let shift = (want + divisor.bit_len()).saturating_sub(digits.bit_len());
-    if digits.bit_len() + shift > Uint::<W>::BITS {
+    if digits.bit_len() + shift > Uint::<WIDE>::BITS {
         return Err(Invalid::TooLong);
     }
 
@@ -112,7 +131,23 @@ pub fn from_decimal<const W: usize>(
     if !remainder.is_zero() {
         quotient.set_bit(0);
     }
-    Ok(round_and_pack(fmt, mode, negative, quotient, -(shift as i32)))
+    Ok(round_and_pack(fmt, mode, negative, narrow::<W>(quotient)?, -(shift as i32)))
+}
+
+/// A wide value into the width the answer is returned in.
+///
+/// Whatever does not fit was never going to be part of the answer -- a significand is
+/// `precision + GUARD` bits and every format's is far inside `W` -- but a whole number
+/// written out longer than that is a real literal that this cannot hold, and says so
+/// rather than quietly dropping the top of it.
+fn narrow<const W: usize>(value: Uint<WIDE>) -> Result<Uint<W>, Invalid> {
+    let limbs = value.limbs();
+    if limbs[W..].iter().any(|limb| *limb != 0) {
+        return Err(Invalid::TooLong);
+    }
+    let mut out = [0u64; W];
+    out.copy_from_slice(&limbs[..W]);
+    Ok(Uint::from_limbs(out))
 }
 
 #[cfg(test)]

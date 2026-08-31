@@ -230,16 +230,10 @@ mod tests {
         assert_ne!(b, c);
     }
 
-    /// Exact means it reads back — as far as the literal parser can go.
-    ///
-    /// It accumulates a literal's digits into a fixed-width integer, so it stops at about
-    /// a hundred and fifty of them. Four of the five formats are inside that. A `b256`'s
-    /// exact expansion is around two hundred and forty digits, so what is printed for one
-    /// is true and cannot be pasted back in. That is a limit of reading, not of writing,
-    /// and [`a_b256_prints_more_than_it_can_read_back`] pins it so it is not forgotten.
+    /// Exact means it reads back. At every format, with nothing left over.
     #[test]
     fn every_written_value_reads_back_as_itself() {
-        for fmt in [Format::B16, Format::B32, Format::B64, Format::B128] {
+        for fmt in [Format::B16, Format::B32, Format::B64, Format::B128, Format::B256] {
             for text in ["0.1", "1", "3", "0.333333333333333333333333333", "12345.6789", "-7.25"] {
                 let bits = literal::from_decimal::<8>(fmt, Round::TiesToEven, text).expect("read");
                 let written = to_text(fmt, bits).expect("finite");
@@ -277,17 +271,21 @@ mod tests {
         assert!(to_text(Format::B64, tenth).unwrap().len() > 50, "the exact one is long");
     }
 
-    /// The one place printing outruns reading, recorded rather than hidden.
+    /// A `b256` prints about two hundred and forty digits, and reads every one of them.
+    ///
+    /// It did not, for a while: the parser accumulated a literal's digits into the width
+    /// the answer came back in, which stopped near a hundred and fifty of them, so what a
+    /// `b256` printed could not be pasted back into a program.
     #[test]
-    fn a_b256_prints_more_than_it_can_read_back() {
+    fn a_b256_reads_back_everything_it_prints() {
         let bits = literal::from_decimal::<8>(Format::B256, Round::TiesToEven, "0.1").expect("read");
         let written = to_text(Format::B256, bits).expect("finite");
         let digits = written.chars().filter(char::is_ascii_digit).count();
         assert!(digits > 200, "a b256 tenth is about 240 digits, not {digits}");
         assert_eq!(
             literal::from_decimal::<8>(Format::B256, Round::TiesToEven, &written),
-            Err(super::super::literal::Invalid::TooLong),
-            "reading it back needs a wider accumulator than the literal parser has"
+            Ok(bits),
+            "what it printed should read back as the number it printed"
         );
     }
 }
