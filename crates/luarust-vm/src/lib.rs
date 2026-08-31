@@ -126,10 +126,11 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
         dst: 0,
     }];
 
-    // Translated once, up front. A map over every instruction costs what a handful of
-    // executed ones do, so this is paid back before the first loop finishes.
+    // The top level always runs, so it is translated up front; a routine is translated
+    // the first time something enters it — the same reasoning that keeps the JIT from
+    // compiling what nothing calls, at a much smaller price.
     let top = widen(&chunk.code);
-    let routines: Vec<Vec<Micro>> = chunk.funcs.iter().map(|f| widen(&f.code)).collect();
+    let mut routines: Vec<Option<Vec<Micro>>> = vec![None; chunk.funcs.len()];
 
     // Two loops rather than one. The outer runs once per call, and settles which code is
     // being run and where its registers are; the inner runs once per instruction and has
@@ -143,7 +144,15 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
         };
         let (code, spans) = match routine {
             None => (&top[..], &chunk.spans[..]),
-            Some(index) => (&routines[index][..], &chunk.funcs[index].spans[..]),
+            Some(index) => {
+                if routines[index].is_none() {
+                    routines[index] = Some(widen(&chunk.funcs[index].code));
+                }
+                (
+                    &routines[index].as_ref().expect("filled just above")[..],
+                    &chunk.funcs[index].spans[..],
+                )
+            }
         };
         let depth = frames.len() - 1;
 
