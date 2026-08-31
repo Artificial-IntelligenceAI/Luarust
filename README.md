@@ -1079,22 +1079,44 @@ The benchmark is a dependent chain — `sum = (sum + i) mod 1000000007`, a hundr
 times, in a signed 64-bit integer. Each value needs the one before it, so it cannot be
 folded into a formula, vectorised, or run out of order. Everybody actually loops.
 
-| | 100M | vs C |
-| --- | --- | --- |
-| C, clang -O2 | 266 ms | 1.00× |
-| Rust, rustc -O | 266 ms | 1.00× |
-| **Luarust**, LLVM JIT | **278 ms** | **1.05×** |
-| Java 21 | 283 ms | 1.06× |
-| PyPy 7.3.23 | 313 ms | 1.18× |
-| Lua 5.5.1 | 414 ms | 1.56× |
-| LuaJIT 2.1 | 443 ms | 1.67× |
-| Luarust, bytecode VM | 1,125 ms | 4.23× |
-| Luarust, tree-walker | 2,605 ms | 9.79× |
-| CPython 3.13 | 3,839 ms | 14.43× |
+| | 100M | vs C | | 100M | vs C |
+| --- | --- | --- | --- | --- | --- |
+| **x86-64** | | | **Apple M5** | | |
+| C, clang -O2 | 392 ms | 1.00× | C, clang -O2 | 266 ms | 1.00× |
+| Rust, rustc -O | 421 ms | 1.07× | Rust, rustc -O | 266 ms | 1.00× |
+| Java 21 | 429 ms | 1.09× | **Luarust**, LLVM JIT | **278 ms** | **1.05×** |
+| PyPy 7.3 | 468 ms | 1.19× | Java 21 | 283 ms | 1.06× |
+| **Luarust**, LLVM JIT | **526 ms** | **1.34×** | PyPy 7.3.23 | 313 ms | 1.18× |
+| Lua 5.4 | 772 ms | 1.97× | Lua 5.5.1 | 414 ms | 1.56× |
+| LuaJIT | 1,010 ms | 2.58× | LuaJIT 2.1 | 443 ms | 1.67× |
+| Luarust, bytecode VM | 3,673 ms | 9.37× | Luarust, bytecode VM | 1,125 ms | 4.23× |
+| CPython | 7,231 ms | 18.45× | Luarust, tree-walker | 2,605 ms | 9.79× |
+| Luarust, tree-walker | 10,130 ms | 25.84× | CPython 3.13 | 3,839 ms | 14.43× |
 
-One Apple M5, one job, best of three, every runner measured in the same sitting. **Every
-one of them had to print 15000000** — the harness works the answer out from the closed
-form and refuses to report a timing for anything that did not produce it. That is not belt-and-braces: the literal syntax changed
+**Two machines, because one was not enough to tell the truth with.** The left column is a
+GitHub runner; the right is an idle Apple M5. Same commit, same programs, and they do not
+agree about where this language stands.
+
+The JIT survives the move: third on both, behind C and Rust, ahead of Java and PyPy,
+somewhere between 1.05× and 1.34× C.
+
+**The two interpreters do not.** The tree-walker is 9.79× C on the M5 and 25.84× on
+x86-64, and that is not a ratio shifting — it changes places with CPython. Ahead of it on
+one machine, behind it on the other. The VM moves the same way, 4.23× to 9.37×.
+
+Everything else stays put. CPython moves 1.28× between the two machines; our VM moves
+2.2× and the tree-walker 2.6×. Whatever this is, it lands on these two and spares the
+eight rows around them, so it is not simply that one machine is slower at interpreting —
+CPython is a bytecode interpreter too, and it barely moved.
+
+This table used to hold the M5 column alone, and said that rankings survive a change of
+machine better than ratios do. They do not, and the tree-walker beating CPython was a
+fact about one laptop reported as a fact about the language. It was
+[issue #1](https://github.com/Artificial-IntelligenceAI/Luarust/issues/1) that caught it.
+
+Both columns are best of three, every runner measured in the same sitting as every other.
+**Every one of them had to print 15000000** — the harness works the answer out from the
+closed form and refuses to report a timing for anything that did not produce it. That is not belt-and-braces: the literal syntax changed
 under the benchmark's own source file at one point, and all three Luarust rows spent a
 while reporting five milliseconds, which is what three compiler errors take to print.
 
@@ -1108,18 +1130,26 @@ Taking the slope between the two sizes below removes whatever a runner spends be
 starts — a process launching, a JVM warming, LLVM compiling — and leaves what one
 iteration costs:
 
-| | ns/iteration | vs C |
-| --- | --- | --- |
-| C, clang -O2 | 2.50 | 1.00× |
-| Rust, rustc -O | 2.50 | 1.00× |
-| Java 21 | 2.51 | 1.00× |
-| Luarust, LLVM JIT | 2.53 | 1.01× |
-| PyPy 7.3.23 | 2.86 | 1.14× |
-| Lua 5.5.1 | 3.98 | 1.59× |
-| LuaJIT 2.1 | 4.24 | 1.70× |
+| | M5 ns/iter | vs C | x86-64 ns/iter | vs C |
+| --- | --- | --- | --- | --- |
+| C, clang -O2 | 2.50 | 1.00× | 3.90 | 1.00× |
+| Rust, rustc -O | 2.50 | 1.00× | 4.19 | 1.07× |
+| Java 21 | 2.51 | 1.00× | 3.90 | 1.00× |
+| Luarust, LLVM JIT | 2.53 | 1.01× | 5.12 | 1.31× |
+| PyPy | 2.86 | 1.14× | 4.32 | 1.11× |
+| Lua | 3.98 | 1.59× | 7.69 | 1.97× |
+| LuaJIT | 4.24 | 1.70× | 10.08 | 2.58× |
+| Luarust, bytecode VM | 11.03 | 4.41× | 36.68 | 9.40× |
+| CPython | 38.06 | 15.22× | 72.14 | 18.50× |
+| Luarust, tree-walker | 25.79 | 10.32× | 101.18 | 25.94× |
 
-Lua 5.5 is ahead of LuaJIT here for a reason worth knowing: LuaJIT is Lua 5.1, where every
-number is a double, so its `%` is floating-point, while 5.5 has real integers.
+Lua is ahead of LuaJIT on both machines for a reason worth knowing: LuaJIT is Lua 5.1,
+where every number is a double, so its `%` is floating-point, while 5.4 and 5.5 have real
+integers.
+
+The tree-walker's row is the one to look at. Twice the cost per iteration would be a
+machine being slower; four times, while everything around it moves by a third, is
+something about how that interpreter uses a processor. It has not been chased down.
 
 That JIT row was **482 ms and 4.58 ns** until very recently, and what changed was not the
 code generator. `OptimizationLevel::Aggressive` on the execution engine sets the *codegen*
