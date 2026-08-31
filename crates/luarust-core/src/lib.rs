@@ -8,6 +8,7 @@
 //! program carrying a runtime and a delivered program carrying the whole toolchain, and
 //! the rule for this language is that nothing ships that the program does not use.
 
+pub mod heap;
 pub mod ty;
 pub mod value;
 

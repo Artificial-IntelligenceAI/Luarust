@@ -181,6 +181,16 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
     // Not everything that can be compared is a number. Two things of the same type are
     // either the same or they are not, which is what `=` asks — and without this, `=` on
     // text answered "unordered", and unordered makes all three comparisons false.
+    // Two arrays are the same array when they are the same array. Asking whether they
+    // hold the same things would make `=` mean something different here than it means
+    // everywhere else, where it asks whether two things are one thing.
+    if a.ty().array().is_some() && a.ty() == b.ty() {
+        let (Value::Num { bits: x, .. }, Value::Num { bits: y, .. }) = (a, b) else {
+            return Comparison::Unordered;
+        };
+        return if x == y { Comparison::Equal } else { Comparison::Unordered };
+    }
+
     let ordering = match (a, b) {
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
 
@@ -801,6 +811,16 @@ impl std::fmt::Display for Value {
             // printing `0.333…` is the one thing this type exists not to do.
             Value::Exact(value) => write!(f, "{value}"),
 
+            // The elements, in the brackets an array is written in. The handle itself is
+            // never shown: it is where the array is, not what it is.
+            _ if self.ty().array().is_some() => {
+                let Value::Num { bits, .. } = self else { unreachable!("an array is a handle") };
+                let handle = *bits as u32;
+                let written: Vec<String> = (0..crate::heap::length(handle))
+                    .map(|at| crate::heap::read(handle, at).expect("in range").to_string())
+                    .collect();
+                write!(f, "[{}]", written.join(", "))
+            }
             _ if self.ty().is_integer() => write!(f, "{}", self.as_i128().unwrap()),
             // A decimal writes out exactly, always: its significand *is* decimal digits,
             // so this is arranging them rather than searching for a shortest form.
