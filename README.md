@@ -12,7 +12,7 @@ We ran some benchmarks, **Luarust is one of the slowest languages ever 😭.**
 ### Why pick Luarust, and why not
 | Why pick Luarust | Why not |
 | --- | --- |
-| Compile once, run basically anywhere | One of the slowest JIT languages |
+| Compile once, run basically anywhere | One of the slowest languages |
 | High-level | No direct electricity manipulation |
 | Final product only has the things that are needed (once again, unlike fucking `Go` 🤣) | It doesn't give you everything (e.g. time manipulation) |
 | Very helpful error messages (hahaha, guess what? Unlike fucking `C` 🤣) | Error messages may be too long |
