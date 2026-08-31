@@ -1,14 +1,13 @@
 # Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
 #
-# Round 1 killed the divide-latency hypothesis. Round 2's same-op-count control showed
-# the mod op costs no more than a subtract, and its profiles found the time: 16-byte SSE
-# stores of Value and Result structs to the stack, with int_op's jump-table dispatch
-# second. The interpreters move structs through memory on the dependent chain; Apple
-# silicon forwards store-to-load at nearly no cost, Zen 4 charges every hop.
+# Round 3's lesson beyond the numbers: the runner pool is heterogeneous (EPYC 9V74 one
+# sitting, Xeon 6973P the next), so nothing compares across runs. Everything below runs
+# interleaved in one job, with C along as the machine's own yardstick.
 #
-# Round 3 measures the first fix: HEAD boxes the Fault inside Stopped (Result<Value,
-# Stopped> falls 96 -> 32 bytes), HEAD^ does not. Both are built and timed in the same
-# sitting, since the runner's numbers move by a third between sittings.
+# Round 4 races three builds: unboxed baseline, boxed Stopped, and boxed plus
+# inline(always) on int_op. Boxing was flat on x86 in round 3; the profiles say the
+# remaining per-op cost is the int_op call and its inner dispatch, and the Value store
+# into the register file. inline(always) prices the first of those.
 name: diagnose
 
 on:
@@ -18,27 +17,32 @@ on:
 
 jobs:
   diagnose:
-    name: boxed against unboxed, on x86-64
+    name: three builds, one sitting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 2
+          fetch-depth: 10
 
       - name: Machine
         run: |
           uname -m; nproc
           grep -m1 "model name" /proc/cpuinfo || true
 
-      - name: Build both
+      - name: Build all three
         run: |
+          # HEAD carries inline(always); the boxing landed in 14c87bc; its parent is
+          # the unboxed baseline. Named by content, not by position, so a later commit
+          # on the branch cannot silently shift what this job measures.
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-inline
+          git checkout 14c87bc -- crates/
           cargo build --release -p luarust-cli
           cp target/release/luarust luarust-boxed
-          git checkout HEAD^ -- crates/
+          git checkout 14c87bc^ -- crates/
           cargo build --release -p luarust-cli
           cp target/release/luarust luarust-unboxed
           git checkout HEAD -- crates/
-          cmp -s luarust-boxed luarust-unboxed && echo "::error::the two builds are identical" || true
 
       - name: Programs
         run: |
@@ -57,13 +61,25 @@ jobs:
           }
           print['sum'];
           EOF
+          cat > bench_mod.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+              long n = atol(argv[1]), sum = 0;
+              for (long i = 1; i <= n; i++) sum = (sum + i) % 1000000007L;
+              printf("%ld", sum);
+              return 0;
+          }
+          EOF
+          sed -i 's/^          //' bench_mod.c
+          cc -O2 -o bench_mod bench_mod.c
 
       - name: Times, interleaved
         run: |
           set +e
           declare -A best last_out
           for round in 1 2 3; do
-            for v in unboxed boxed; do
+            for v in unboxed boxed inline; do
               for prog in modloop addloop; do
                 for eng in run interp; do
                   t0=$(date +%s%N)
@@ -77,39 +93,11 @@ jobs:
                 done
               done
             done
+            t0=$(date +%s%N); out=$(./bench_mod 100000000); t1=$(date +%s%N)
+            ms=$(( (t1 - t0) / 1000000 ))
+            cur=${best[C]:-99999999}; [ "$ms" -lt "$cur" ] && best[C]=$ms
+            last_out[C]=$out
           done
           for key in "${!best[@]}"; do
             printf "%-28s %7s ms   %s\n" "$key" "${best[$key]}" "${last_out[$key]}"
           done | sort
-
-      - name: Profile the boxed build
-        run: |
-          set +e
-          sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1
-          PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1)
-          [ -z "$PERF" ] && PERF=perf
-          sudo sysctl -w kernel.perf_event_paranoid=1 >/dev/null 2>&1
-          mkdir -p prof
-          profile() {
-            local tag="$1"; shift
-            echo "======== $tag"
-            $PERF record -q -o "$tag.data" -F 997 -e task-clock "$@" >/dev/null 2>&1
-            $PERF report -i "$tag.data" --stdio --percent-limit 1 2>/dev/null \
-              | grep -v "^#" | grep -v "^$" | head -15 | tee "prof/$tag.report"
-            $PERF report -i "$tag.data" --stdio --percent-limit 5 2>/dev/null \
-              | awk '$1 ~ /%/ { $1=""; $2=""; $3=""; $4=""; print }' \
-              | while read -r sym; do
-                  echo "======== annotate: $sym" >> "prof/$tag.annotate"
-                  $PERF annotate -i "$tag.data" --stdio --percent-limit 0.2 --symbol="$sym" >> "prof/$tag.annotate" 2>/dev/null
-                done
-          }
-          profile boxed-vm-add     ./luarust-boxed run addloop.lr
-          profile boxed-vm-mod     ./luarust-boxed run modloop.lr
-          profile boxed-interp-mod ./luarust-boxed interp modloop.lr
-          exit 0
-
-      - name: Keep the annotated profiles
-        uses: actions/upload-artifact@v4
-        with:
-          name: profiles-boxed
-          path: prof/
