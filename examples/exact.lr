@@ -1,4 +1,4 @@
--- The sum every article about floating point opens with, done twice.
+# The sum every article about floating point opens with, done twice.
 var.local.b64 ['a'] = [|0.1|];
 var.local.b64 ['b'] = [|0.2|];
 print["as b64: " math { 'a' + 'b' } \n];
@@ -7,9 +7,9 @@ var.local.er ['x'] = [|0.1|];
 var.local.er ['y'] = [|0.2|];
 print["as er:  " math { 'x' + 'y' } \n];
 
--- A third, three times. No binary float can write one down at all.
+# A third, three times. No binary float can write one down at all.
 var.local.er ['third'] = [|1/3|];
 print["three thirds: " math { ('third' + 'third') + 'third' } \n];
 
--- And a number no fixed width could hold.
+# And a number no fixed width could hold.
 print["2 to the 200: " math { er |2| ** er |200| } \n];

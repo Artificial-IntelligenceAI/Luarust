@@ -48,8 +48,8 @@
   ],
   "repository": {
     "comment": {
-      "match": "--.*$",
-      "name": "comment.line.double-dash.luarust"
+      "match": "#\\d*d?.*$",
+      "name": "comment.line.number-sign.luarust"
     },
     "text": {
       "name": "string.quoted.double.luarust",

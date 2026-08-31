@@ -1,4 +1,4 @@
--- What a loop looks like when something has to survive it.
+# What a loop looks like when something has to survive it.
 var.local.mut.ui32 ['total'] = [|0|];
 
 loop.temp.range.ui32 ['i'] = [|1|, |10|] {

@@ -1,10 +1,10 @@
--- Functions, including one that calls itself.
+# Functions, including one that calls itself.
 fn.local.ui64 ['factorial'] [ui64 'n'] {
     if [math { 'n' </= ui64 |1| }] { return |1|; }
     return math { 'n' * factorial[math { 'n' - ui64 |1| }] };
 }
 
--- Order in the file does not matter: this is called above where it is written.
+# Order in the file does not matter: this is called above where it is written.
 fn.local.nothing ['announce'] [str 'what', ui64 'value'] {
     print['what' " is " 'value' \n];
 }

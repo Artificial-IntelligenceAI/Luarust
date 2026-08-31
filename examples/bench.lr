@@ -1,4 +1,4 @@
--- The dependent-chain benchmark, timed by the language itself.
+# The dependent-chain benchmark, timed by the language itself.
 var.local.mut.ui64 ['sum'] = [|0|];
 var.local.b64 ['start'] = [time.now];
 

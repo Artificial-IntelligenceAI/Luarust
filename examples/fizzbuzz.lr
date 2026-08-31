@@ -1,4 +1,4 @@
--- The one program every language gets asked to write, which is really a test of `if`.
+# The one program every language gets asked to write, which is really a test of `if`.
 loop.temp.range.ui8 ['n'] = [|1|, |15|] {
     if [math { 'n' mod ui8 |15| = ui8 |0| }] {
         print["fizzbuzz" \n];

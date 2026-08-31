@@ -56,8 +56,8 @@ a written value reads — the same four characters are a number under `b16` and 
 `str`:
 
 ```luarust
-var.local.b16 ['x'] = [|1000|];    -- the number 1000
-var.local.str ['y'] = [|1000|];    -- the text "1000"
+var.local.b16 ['x'] = [|1000|];    # the number 1000
+var.local.str ['y'] = [|1000|];    # the text "1000"
 ```
 
 ### Several at once
@@ -120,7 +120,7 @@ name has to appear twice and the brackets get in the way of a very small idea:
 
 ```luarust
 set ['total'] = [math { 'total' + 'i' }];
-handback 'i' as 'total';                     -- the same thing
+handback 'i' as 'total';                     # the same thing
 ```
 
 `handback` adds, and only adds. A running product or a subtraction is a `set` — piling
@@ -147,7 +147,7 @@ to make it. `b16` carries eleven bits of significand, and most decimals are not 
 
 ```luarust
 var.local.b16 ['a'] = [|0.1|];
-print['a' \n];                 -- 0.0999755859375
+print['a' \n];                 # 0.0999755859375
 ```
 
 That *is* `b16 '0.1'` — the nearest `b16` to a tenth, exactly. Luarust will not print a
@@ -161,7 +161,7 @@ value stands:
 ```luarust
 var.local.b16 ['x', 'y'] = [|3|, |4|];
 var.local.b16 ['z']      = [math { 'x' + 'y' }];
-print['z' \n];                                     -- 7
+print['z' \n];                                     # 7
 ```
 
 Single quotes mean here what they mean in a print list: `'x'` is the variable. Numbers,
@@ -189,7 +189,7 @@ already expected.
 Grouping is `( )`, because `[ ]` and `{ }` are both spoken for:
 
 ```luarust
-var.local.b16 ['w'] = [math { ('x' + 'y') * 'x' }];   -- 21
+var.local.b16 ['w'] = [math { ('x' + 'y') * 'x' }];   # 21
 ```
 
 Most operators have more than one spelling, and they all mean exactly the same thing:
@@ -224,8 +224,8 @@ Remainder is the operation mathematics and the C family disagree about, and Luar
 with mathematics: the result takes the sign of the **divisor**, not the dividend.
 
 ```luarust
-math { -7 mod 3 }     -- 2,  not -1
-math { 7 mod -3 }     -- -2, not 1
+math { -7 mod 3 }     # 2,  not -1
+math { 7 mod -3 }     # -2, not 1
 ```
 
 So `'i' mod 3` cycles `0 1 2` however `'i'` is signed, which is what anyone counting
@@ -238,11 +238,11 @@ Six of them, and they answer `bool`:
 ```luarust
 var.local.i32 ['a', 'b'] = [|3|, |5|];
 
-var.local.bool ['less']    = [math { 'a' <   'b' }];    -- true
-var.local.bool ['more']    = [math { 'a' >   'b' }];    -- false
-var.local.bool ['at most'] = [math { 'a' </= 'a' }];    -- true
-var.local.bool ['same']    = [math { 'a' =   'a' }];    -- true
-var.local.bool ['differs'] = [math { 'a' !=  'b' }];    -- true
+var.local.bool ['less']    = [math { 'a' <   'b' }];    # true
+var.local.bool ['more']    = [math { 'a' >   'b' }];    # false
+var.local.bool ['at most'] = [math { 'a' </= 'a' }];    # true
+var.local.bool ['same']    = [math { 'a' =   'a' }];    # true
+var.local.bool ['differs'] = [math { 'a' !=  'b' }];    # true
 ```
 
 `</=` and `>/=` are one operator each, and the `/` in them is the "or" of *less than or
@@ -360,14 +360,14 @@ if ['flag'] { … }
 ```luarust
 var.local.mut.array.5.ui32 ['xs'] = [[|10|, |20|, |30|, |40|, |50|]];
 
-print['xs'[|1|] "   " count['xs'] \n];    -- 10   5
+print['xs'[|1|] "   " count['xs'] \n];    # 10   5
 set ['xs'[|3|]] = [|99|];
 
 var.local.array.2x3.ui8 ['m'] = [[
     |1|, |2|, |3|,
     |4|, |5|, |6|
 ]];
-print['m'[|2|, |3|] \n];                   -- 6
+print['m'[|2|, |3|] \n];                   # 6
 ```
 
 `array.ui32` grows; `array.5.ui32` is five for ever; `array.2x3.ui8` is two rows of
@@ -423,7 +423,7 @@ fn.local.array.ui32 ['doubled'] [array.3.ui32 'xs'] {
     }
     return 'out';
 }
-print["doubled " doubled[[|1|, |2|, |3|]] \n];   -- doubled [2, 4, 6]
+print["doubled " doubled[[|1|, |2|, |3|]] \n];   # doubled [2, 4, 6]
 ```
 
 Nothing is copied. A handle is what travels, so passing a hundred thousand elements costs
@@ -567,8 +567,8 @@ one. The message says exactly that rather than guessing.
 said:
 
 ```luarust
-loop.temp.range.ui8 ['i'] = [|1|, |5|] { … }    -- 'i' is gone at the brace
-loop.perm.range.ui8 ['i'] = [|1|, |5|] { … }    -- 'i' is still there afterwards
+loop.temp.range.ui8 ['i'] = [|1|, |5|] { … }    # 'i' is gone at the brace
+loop.perm.range.ui8 ['i'] = [|1|, |5|] { … }    # 'i' is still there afterwards
 ```
 
 A `perm` counter holds **the last value it actually took** — five, not six. Languages
@@ -639,10 +639,10 @@ is not what a timer is for.
 Every declaration carries one of four, and the first three mean what they usually mean:
 
 ```luarust
-var.local.str      ['name'] = [|Tankun|];   -- the block it is written in, and no further
-var.global.str     ['name'] = [|Tankun|];   -- the whole program
-var.public.str     ['name'] = [|Tankun|];   -- and exported, so importers see it too
-var.restricted.str ['name'] = [|Tankun|];   -- nobody, anywhere, on purpose
+var.local.str      ['name'] = [|Tankun|];   # the block it is written in, and no further
+var.global.str     ['name'] = [|Tankun|];   # the whole program
+var.public.str     ['name'] = [|Tankun|];   # and exported, so importers see it too
+var.restricted.str ['name'] = [|Tankun|];   # nobody, anywhere, on purpose
 ```
 
 **`restricted`** means the variable exists, it holds its value, and nothing is allowed
@@ -651,7 +651,7 @@ to touch it. The declaration compiles. Every use of it does not.
 You can say it out loud, as above. It is also what you get by saying nothing:
 
 ```luarust
-var.str ['name'] = [|Tankun|];   -- declared, and unusable
+var.str ['name'] = [|Tankun|];   # declared, and unusable
 ```
 
 This is a joke, and it is also the default, so if you would rather hear about it where
@@ -785,7 +785,7 @@ Exactly what it holds, and not the text that was typed to make it:
 
 ```luarust
 var.local.b64 ['a'] = [|0.1|];
-print['a' \n];        -- 0.1000000000000000055511151231257827021181583404541015625
+print['a' \n];        # 0.1000000000000000055511151231257827021181583404541015625
 ```
 
 That is not a trick and nothing was rounded to produce it. `0.1` is not representable in
@@ -834,10 +834,10 @@ in it rounds and nothing in it overflows:
 ```luarust
 var.local.er ['a'] = [|0.1|];
 var.local.er ['b'] = [|0.2|];
-print[math { 'a' + 'b' } \n];       -- 3/10, not 0.30000000000000004
+print[math { 'a' + 'b' } \n];       # 3/10, not 0.30000000000000004
 
 var.local.er ['third'] = [|1/3|];
-print[math { ('third' + 'third') + 'third' } \n];   -- exactly 1
+print[math { ('third' + 'third') + 'third' } \n];   # exactly 1
 ```
 
 **A written `er` may be a fraction** — `|1/3|` — which no decimal could have said. A type
@@ -868,12 +868,12 @@ digits — seven, sixteen and thirty-four of them — so a tenth is a tenth:
 ```luarust
 var.local.d64 ['a'] = [|0.1|];
 var.local.b64 ['x'] = [|0.1|];
-print[math { 'a' + d64 |0.2| } \n];    -- 0.3
-print[math { 'x' + b64 |0.2| } \n];    -- 0.30000000000000004
+print[math { 'a' + d64 |0.2| } \n];    # 0.3
+print[math { 'x' + b64 |0.2| } \n];    # 0.30000000000000004
 
 var.local.d64 ['price'] = [|19.99|];
-print[math { 'price' x d64 |3| } \n];         -- 59.97
-print[math { d64 |20.00| - 'price' } \n];     -- 0.01
+print[math { 'price' x d64 |3| } \n];         # 59.97
+print[math { d64 |20.00| - 'price' } \n];     # 0.01
 ```
 
 They are **floats**, not exact rationals, and that is the difference between reaching for
@@ -927,6 +927,31 @@ or once for the whole project:
 [defaults]
 overflow = "trap"
 ```
+
+## Comments
+
+A comment begins with `#` and runs to the end of the line. A number straight after it says
+how many lines, counting the one it is written on, and a `d` counts *down* from it instead:
+
+```luarust
+# this line
+#3        this line and the two after it
+#3d       this line and the three after it
+```
+
+So `#3` and `#2d` cover the same three lines, and a comment that reaches past the end of
+the file simply ends there. `#0` is refused — nought lines is not a number of lines.
+
+The number has to be written straight after the `#`, with nothing between, which is what
+separates a count from a remark that begins with a number:
+
+```luarust
+# 3 things to fix here      this line
+#3 things to fix here       this line and the two after it
+```
+
+Code before a `#` on the same line still runs, so a count of three from halfway down a
+line means the rest of that line and two whole lines after it.
 
 ## Errors
 

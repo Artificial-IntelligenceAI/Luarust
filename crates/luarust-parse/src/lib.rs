@@ -192,6 +192,16 @@ impl<'a> Parser<'a> {
                     .tip("a name is written in quotes, so a bare word here is being read as a keyword.")
                     .fix("check the spelling, or put the statement's keyword in front of it."),
             ),
+            // `--` began a comment once. Anybody with Luarust written before that changed
+            // meets this error first, and "a statement was expected" is true and no help.
+            None if start.kind == Kind::Minus && self.peek_at(1).kind == Kind::Minus => self
+                .fail(
+                    Diagnostic::new("E0101", "a comment is written with `#` now.")
+                        .primary(start.span, "`--` was the old way of starting one")
+                        .rule("a comment begins with `#` and runs to the end of the line")
+                        .tip("`#` is this line; `#3` is three lines counting this one, and `#3d` is three lines down from it.")
+                        .fix("write `#` instead of `--`."),
+                ),
             None => self.fail(
                 Diagnostic::new("E0101", "a statement was expected here.")
                     .primary(start.span, format!("{} is here instead", start.kind.describe()))

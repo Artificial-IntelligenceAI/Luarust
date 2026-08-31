@@ -1,5 +1,5 @@
--- How many steps the Collatz sequence takes to reach one. Nobody knows a bound, which
--- is exactly why this cannot be a counting loop.
+# How many steps the Collatz sequence takes to reach one. Nobody knows a bound, which
+# is exactly why this cannot be a counting loop.
 var.local.mut.ui64 ['n'] = [|27|];
 
 loop.perm.while.ui32 ['steps'] [math { 'n' != ui64 |1| }] {

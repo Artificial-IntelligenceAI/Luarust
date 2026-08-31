@@ -102,7 +102,7 @@ impl<'a> Lexer<'a> {
                 c if c.is_whitespace() => self.bump(),
 
                 // `--` runs to the end of the line. A lone `-` is subtraction.
-                '-' if self.peek_at(1) == Some('-') => self.skip_comment(),
+                '#' => self.skip_comment(),
 
                 '[' => self.punctuation(Kind::OpenList),
                 ']' => self.punctuation(Kind::CloseList),
@@ -213,12 +213,53 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A comment, and however many lines after it were asked for.
+    ///
+    /// `#` on its own is this line. `#3` is three lines counting this one, and `#3d` is
+    /// three lines *down* from this one, so four in all. The number and the `d` are read
+    /// straight after the `#`, with nothing between: `# 3 things` is a comment that says
+    /// three things, and `#3 things` is three lines.
     fn skip_comment(&mut self) {
-        while let Some(c) = self.peek() {
-            if c == '\n' {
-                break;
-            }
+        let start = self.at;
+        self.bump(); // the `#`
+
+        let digits_at = self.at;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.bump();
+        }
+        let digits = &self.source[digits_at..self.at];
+        let down = if digits.is_empty() { false } else { self.peek() == Some('d') };
+        if down {
+            self.bump();
+        }
+
+        // How many lines this comment covers, counting the one it is written on.
+        let lines = match digits.parse::<u32>() {
+            Err(_) => 1,
+            Ok(0) => {
+                let span = Span::new(start, self.at);
+                self.errors.push(
+                    Diagnostic::new("E0004", "this comments out no lines at all.".to_string())
+                        .primary(span, "written here")
+                        .rule("a comment covers the line it is written on, and may cover more")
+                        .tip("`#` is this line, `#3` is three lines, `#3d` is three lines down from this one.")
+                        .fix("write `#` on its own, or give it a number of one or more."),
+                );
+                1
+            }
+            Ok(n) if down => n.saturating_add(1),
+            Ok(n) => n,
+        };
+
+        // The rest of this line, and then whole lines, however many were asked for. A
+        // comment reaching past the end of the file simply ends there.
+        for _ in 0..lines {
+            while let Some(c) = self.peek() {
+                self.bump();
+                if c == '\n' {
+                    break;
+                }
+            }
         }
     }
 
@@ -369,6 +410,66 @@ fn is_word_start(c: char) -> bool {
 
 fn is_word_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+#[cfg(test)]
+mod counted_comments {
+    use super::*;
+
+    fn kinds(source: &str) -> Vec<Kind> {
+        lex(source).tokens.iter().map(|t| t.kind).collect()
+    }
+
+    /// `#` on its own is the line it is written on, and nothing after it.
+    #[test]
+    fn a_bare_hash_is_one_line() {
+        assert_eq!(kinds("# a remark\nvar\n"), [Kind::Word, Kind::End]);
+    }
+
+    /// `#3` is three lines counting the one it is on, so two more follow it out.
+    #[test]
+    fn a_number_says_how_many_lines() {
+        assert_eq!(kinds("#3\ngone\ngone\nvar\n"), [Kind::Word, Kind::End]);
+        assert_eq!(kinds("#1\nvar\n"), [Kind::Word, Kind::End]);
+        // Counting from the line it is on means a `#2` after code still lets the code by.
+        assert_eq!(kinds("var #2\ngone\nvar\n"), [Kind::Word, Kind::Word, Kind::End]);
+    }
+
+    /// `#3d` is three lines *down*, so four in all.
+    #[test]
+    fn d_counts_downwards_from_here() {
+        assert_eq!(kinds("#3d\ngone\ngone\ngone\nvar\n"), [Kind::Word, Kind::End]);
+        // The same number without the `d` leaves that last line alone.
+        assert_eq!(
+            kinds("#3\ngone\ngone\nvar\n"),
+            kinds("#2d\ngone\ngone\nvar\n"),
+            "`#3` and `#2d` cover the same three lines"
+        );
+    }
+
+    /// Only digits written straight after the `#` are a count.
+    #[test]
+    fn a_space_makes_it_a_remark_again() {
+        // `# 3 things` says three things; `#3 things` is three lines.
+        assert_eq!(kinds("# 3 things\nvar\n"), [Kind::Word, Kind::End]);
+        assert_eq!(kinds("#3 things\ngone\ngone\nvar\n"), [Kind::Word, Kind::End]);
+    }
+
+    /// Reaching past the end of the file simply ends there.
+    #[test]
+    fn a_comment_may_outrun_the_file() {
+        let lexed = lex("var\n#9\ngone\n");
+        assert!(lexed.ok(), "running off the end is not a mistake");
+        assert_eq!(lexed.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(), [Kind::Word, Kind::End]);
+    }
+
+    /// Nought lines is not a number of lines.
+    #[test]
+    fn nought_lines_is_refused() {
+        let lexed = lex("#0\nvar\n");
+        assert_eq!(lexed.errors.len(), 1);
+        assert_eq!(lexed.errors[0].code, "E0004");
+    }
 }
 
 #[cfg(test)]
@@ -543,13 +644,13 @@ mod tests {
 
     #[test]
     fn comments_run_to_the_end_of_the_line() {
-        let source = "var.local.b16 ['x'] = [|1|];  -- the number one\nprint['x'];";
+        let source = "var.local.b16 ['x'] = [|1|];  # the number one\nprint['x'];";
         clean(source);
         assert!(!texts(source).iter().any(|t| t.contains("number one")));
         assert_eq!(kinds(source).iter().filter(|k| **k == Kind::Semicolon).count(), 2);
         // A comment at the very end of a file needs no newline after it.
-        clean("-- nothing but a remark");
-        assert_eq!(kinds("-- nothing but a remark"), [Kind::End]);
+        clean("# nothing but a remark");
+        assert_eq!(kinds("# nothing but a remark"), [Kind::End]);
     }
 
     #[test]
