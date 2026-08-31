@@ -25,7 +25,7 @@ pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
 use luarust_core::value::{
-    DEPTH_LIMIT, Fault, Stopped, Value, binary_op, compare, format_of, holds, int_op, negate,
+    DEPTH_LIMIT, Fault, Stopped, Value, int_compare, binary_op, compare, format_of, holds, int_op, negate,
 };
 use luarust_num::binary::{self, Comparison, Round};
 use std::io::Write;
@@ -56,27 +56,36 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
         dst: 0,
     }];
 
-    loop {
+    // Two loops rather than one. The outer runs once per call, and settles which code is
+    // being run and where its registers are; the inner runs once per instruction and has
+    // both of those in hand already. Doing it in one loop meant finding the frame, and
+    // then matching on which routine it was in, before every single instruction -- work
+    // that only changes when a call does.
+    'activation: loop {
+        let (routine, mut at) = {
+            let frame = frames.last().expect("a frame is always open");
+            (frame.routine, frame.at)
+        };
+        let (code, spans) = match routine {
+            None => (&chunk.code[..], &chunk.spans[..]),
+            Some(index) => (&chunk.funcs[index].code[..], &chunk.funcs[index].spans[..]),
+        };
         let depth = frames.len() - 1;
-        let frame = frames.last_mut().expect("a frame is always open");
-        let code = match frame.routine {
-            None => &chunk.code,
-            Some(index) => &chunk.funcs[index].code,
-        };
-        let spans = match frame.routine {
-            None => &chunk.spans,
-            Some(index) => &chunk.funcs[index].spans,
-        };
-        let at = frame.at;
-        let op = code[at];
-        let span = spans[at];
-        frame.at += 1;
-        let registers = &mut frame.registers;
-        // Where to go next, decided inside the match and applied once it lets go of the
-        // frame it is holding.
-        let mut jump: Option<usize> = None;
 
-        match op {
+        // What ended the inner loop, decided while the registers are still borrowed and
+        // acted on once they are not.
+        let step = {
+            let registers = &mut frames.last_mut().expect("a frame is always open").registers;
+            loop {
+                let op = code[at];
+                // Where this instruction came from is only ever wanted when something
+                // goes wrong, and nothing goes wrong on the overwhelming majority of
+                // instructions. Fetching it here cost sixteen bytes a time for the
+                // benefit of the path that does not run.
+                let here = at;
+                at += 1;
+
+                match op {
             Op::Halt => return Ok(()),
 
             Op::Call { func, base, argc, dst } => {
@@ -89,30 +98,19 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                             fix: "give the recursion a case that stops, or write it as a loop."
                                 .to_string(),
                         },
-                        span,
+                        span: spans[here],
                     });
                 }
-                let routine = &chunk.funcs[func as usize];
-                let mut fresh = vec![placeholder.clone(); routine.registers];
+                let mut fresh = vec![placeholder.clone(); chunk.funcs[func as usize].registers];
                 for n in 0..argc as usize {
                     fresh[n] = registers[base as usize + n].clone();
                 }
-                frames.push(Frame { routine: Some(func as usize), at: 0, registers: fresh, dst });
-                continue;
+                break Step::Called { func: func as usize, fresh, dst };
             }
 
-            Op::Return { src, .. } => {
-                let answer = registers[src as usize].clone();
-                let finished = frames.pop().expect("a frame is always open");
-                let caller = frames.last_mut().expect("something called it");
-                caller.registers[finished.dst as usize] = answer;
-                continue;
-            }
+            Op::Return { src, .. } => break Step::Returned(Some(registers[src as usize].clone())),
 
-            Op::ReturnNothing => {
-                frames.pop();
-                continue;
-            }
+            Op::ReturnNothing => break Step::Returned(None),
 
             Op::Const { dst, konst } => {
                 registers[dst as usize] = chunk.consts[konst as usize].clone();
@@ -132,7 +130,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     unreachable!("the checker said these are integers")
                 };
                 let bits = int_op(op, ty, *a, *b, chunk.overflow)
-                    .map_err(|fault| Stopped { fault, span })?;
+                    .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
                 registers[dst as usize] = Value::Num { ty, bits };
             }
 
@@ -143,8 +141,18 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     &registers[rhs as usize],
                     chunk.overflow,
                 )
-                .map_err(|fault| Stopped { fault, span })?;
+                .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
                 registers[dst as usize] = value;
+            }
+
+            Op::Compare { op, operands, dst, lhs, rhs } if operands.is_integer() => {
+                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+                    (&registers[lhs as usize], &registers[rhs as usize])
+                else {
+                    unreachable!("an integer comparison has integers")
+                };
+                registers[dst as usize] =
+                    Value::Bool(holds(op, int_compare(operands, *a, *b)));
             }
 
             Op::Compare { op, dst, lhs, rhs, .. } => {
@@ -154,7 +162,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::Neg { dst, src, .. } => {
                 let value = negate(&registers[src as usize], chunk.overflow)
-                    .map_err(|fault| Stopped { fault, span })?;
+                    .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
                 registers[dst as usize] = value;
             }
 
@@ -186,23 +194,47 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::JumpIfFalse { cond, target } => {
                 if !truth(&registers[cond as usize]) {
-                    jump = Some(target as usize);
+                    at = target as usize;
                 }
             }
 
             Op::JumpIfTrue { cond, target } => {
                 if truth(&registers[cond as usize]) {
-                    jump = Some(target as usize);
+                    at = target as usize;
                 }
             }
 
-            Op::Jump { target } => jump = Some(target as usize),
+            Op::Jump { target } => at = target as usize,
+
+            // The whole point of the type being on the instruction: an integer
+            // comparison is a machine comparison, not an inspection of two values.
+            Op::JumpIfGreater { lhs, rhs, ty, target } if ty.is_integer() => {
+                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+                    (&registers[lhs as usize], &registers[rhs as usize])
+                else {
+                    unreachable!("an integer comparison has integers")
+                };
+                if int_compare(ty, *a, *b) == Comparison::Greater {
+                    at = target as usize;
+                }
+            }
+
+            Op::JumpIfEqual { lhs, rhs, ty, target } if ty.is_integer() => {
+                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+                    (&registers[lhs as usize], &registers[rhs as usize])
+                else {
+                    unreachable!("an integer comparison has integers")
+                };
+                if a == b {
+                    at = target as usize;
+                }
+            }
 
             Op::JumpIfGreater { lhs, rhs, target, .. } => {
                 if compare(&registers[lhs as usize], &registers[rhs as usize])
                     == Comparison::Greater
                 {
-                    jump = Some(target as usize);
+                    at = target as usize;
                 }
             }
 
@@ -210,15 +242,34 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 if compare(&registers[lhs as usize], &registers[rhs as usize])
                     == Comparison::Equal
                 {
-                    jump = Some(target as usize);
+                    at = target as usize;
+                }
+            }
+                }
+            }
+        };
+
+        match step {
+            Step::Called { func, fresh, dst } => {
+                frames.last_mut().expect("a frame is always open").at = at;
+                frames.push(Frame { routine: Some(func), at: 0, registers: fresh, dst });
+            }
+            Step::Returned(answer) => {
+                let finished = frames.pop().expect("a frame is always open");
+                if let Some(answer) = answer {
+                    let caller = frames.last_mut().expect("something called it");
+                    caller.registers[finished.dst as usize] = answer;
                 }
             }
         }
-
-        if let Some(to) = jump {
-            frames.last_mut().expect("a frame is always open").at = to;
-        }
+        continue 'activation;
     }
+}
+
+/// What ended a run of instructions: something that changes which frame is running.
+enum Step {
+    Called { func: usize, fresh: Vec<Value>, dst: u16 },
+    Returned(Option<Value>),
 }
 
 /// What a condition answered. The checker refuses anything that is not a `bool` long

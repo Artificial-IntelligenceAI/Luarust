@@ -12,7 +12,8 @@
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_parse::ast::LogicOp;
 use luarust_check::value::{
-    DEPTH_LIMIT, Fault, Overflow, Value, binary_op, compare, format_of, holds, negate, one_of,
+    DEPTH_LIMIT, Fault, Overflow, Value, binary_op, compare, format_of, holds, int_compare,
+    int_op, negate, one_of,
 };
 pub use luarust_check::value::Stopped;
 use luarust_diag::Span;
@@ -134,7 +135,7 @@ impl Machine<'_> {
                     if let Some((slot, ty)) = counter {
                         let held = self.slots[*slot].clone().expect("the counter was set");
                         let next = binary_op(BinOp::Add, &held, &one_of(*ty), self.overflow)
-                            .map_err(|fault| Stopped { fault, span: *span })?;
+                            .map_err(|fault| Stopped { fault: *fault, span: *span })?;
                         self.slots[*slot] = Some(next);
                     }
                     match self.block(body, out)? {
@@ -177,7 +178,7 @@ impl Machine<'_> {
         let mut current = from;
 
         // Counting down is an empty range rather than a reversed one, so nothing runs.
-        if compare(&current, &to) == Comparison::Greater {
+        if ordering(ty, &current, &to) == Comparison::Greater {
             return Ok(Flow::Went);
         }
 
@@ -190,11 +191,11 @@ impl Machine<'_> {
                 Flow::Broke => return Ok(Flow::Went),
                 returned => return Ok(returned),
             }
-            if compare(&current, &to) != Comparison::Less {
+            if ordering(ty, &current, &to) != Comparison::Less {
                 return Ok(Flow::Went);
             }
             current = binary_op(BinOp::Add, &current, &one, Overflow::Wrap)
-                .map_err(|fault| Stopped { fault, span })?;
+                .map_err(|fault| Stopped { fault: *fault, span })?;
         }
     }
 
@@ -282,7 +283,7 @@ impl Machine<'_> {
 
             Expr::Neg { operand, span, .. } => {
                 let value = self.eval(operand, out)?;
-                negate(&value, self.overflow).map_err(|fault| Stopped { fault, span: *span })
+                negate(&value, self.overflow).map_err(|fault| Stopped { fault: *fault, span: *span })
             }
 
             // A NaN is not less than, greater than, or equal to anything, itself
@@ -321,11 +322,20 @@ impl Machine<'_> {
                 Ok(self.call(*func, values, *span, out)?.expect("it answers a value"))
             }
 
-            Expr::Binary { op, lhs, rhs, span, .. } => {
+            Expr::Binary { op, ty, lhs, rhs, span } => {
                 let lhs = self.eval(lhs, out)?;
                 let rhs = self.eval(rhs, out)?;
+                // The checker already said what these are, so the integers go straight to
+                // the arithmetic rather than through a dispatch that works it out again.
+                if ty.is_integer()
+                    && let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (&lhs, &rhs)
+                {
+                    let bits = int_op(*op, *ty, *a, *b, self.overflow)
+                        .map_err(|fault| Stopped { fault: *fault, span: *span })?;
+                    return Ok(Value::Num { ty: *ty, bits });
+                }
                 binary_op(*op, &lhs, &rhs, self.overflow)
-                    .map_err(|fault| Stopped { fault, span: *span })
+                    .map_err(|fault| Stopped { fault: *fault, span: *span })
             }
         }
     }
@@ -338,4 +348,17 @@ fn truth(value: &Value) -> bool {
         Value::Bool(answer) => *answer,
         other => unreachable!("a condition checked as `bool` held {other:?}"),
     }
+}
+
+/// How two values of a known type order.
+///
+/// The same answer [`compare`] gives, reached without asking the values what they are:
+/// the loop that calls this already knows, and it calls it twice a pass.
+fn ordering(ty: Ty, a: &Value, b: &Value) -> Comparison {
+    if ty.is_integer()
+        && let (Value::Num { bits: x, .. }, Value::Num { bits: y, .. }) = (a, b)
+    {
+        return int_compare(ty, *x, *y);
+    }
+    compare(a, b)
 }

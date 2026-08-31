@@ -882,10 +882,19 @@ whether the counter has *reached* its bound before stepping, rather than steppin
 testing, which is what lets `[|253|, |255|]` finish in a `ui8` instead of wrapping round
 forever. That is one extra comparison per iteration, on purpose.
 
-The VM and the tree-walker are both slower than they were before functions arrived — the
-VM by about 5% and the tree-walker by about 12%. The VM's run loop now finds its frame
-before every instruction rather than holding one register file for the whole program,
-which is the obvious thing to fix and has not been fixed yet.
+The two slow paths have both been through a profiler since. Four things came out of it,
+in the order they were worth:
+
+| | |
+| --- | --- |
+| **A fault was eighty bytes** — two `String`s — so `Result<u64, Fault>` went back through memory on every addition to carry an eight-byte answer. Boxed, it fits in a register pair | VM 18%, tree-walker 11% |
+| **Comparing two integers asked the values what they were**, twice, and sign-extended both to 128 bits. The instruction already says what they are, and equal integers of one type have equal bits | VM 4%, tree-walker 9% |
+| **The VM found its frame before every instruction**, and matched on which routine it was in, to fetch code that only changes when a call does. Two loops now: one per call, one per instruction | VM 4% |
+| **`int_op` was a call**, and is now inlined | VM 2% |
+
+None of it changed what anything does; the profiler simply said where the time was, which
+was not where I would have guessed. The gap the JIT still has over the VM is dispatch:
+one machine instruction against a jump table and a bounds check.
 
 Before any of it means anything, each timing is checked for whether it still contains a
 loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a

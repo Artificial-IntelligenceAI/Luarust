@@ -65,6 +65,15 @@ pub enum Value {
     Exact(std::rc::Rc<Exact>),
 }
 
+/// What every operation gives back: an answer, or a fault behind a pointer.
+///
+/// Boxed, and that is a decision about speed rather than about style. A [`Fault`] is
+/// eighty bytes — two `String`s and two names — so `Result<u64, Fault>` was eighty bytes
+/// going back through memory on every single addition, to carry an eight-byte answer
+/// along a path that almost never runs. Behind a pointer the whole thing fits in a
+/// register pair.
+pub type Answer<T> = Result<T, Box<Fault>>;
+
 /// Something that went wrong while a program was running.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fault {
@@ -75,8 +84,14 @@ pub struct Fault {
 }
 
 impl Fault {
-    fn new(code: &'static str, message: impl Into<String>, rule: &'static str, fix: impl Into<String>) -> Self {
-        Self { code, message: message.into(), rule, fix: fix.into() }
+    /// A fault, already boxed, because that is the only shape anything wants one in.
+    fn new(
+        code: &'static str,
+        message: impl Into<String>,
+        rule: &'static str,
+        fix: impl Into<String>,
+    ) -> Box<Self> {
+        Box::new(Self { code, message: message.into(), rule, fix: fix.into() })
     }
 }
 
@@ -100,6 +115,27 @@ impl Stopped {
             .rule(self.fault.rule)
             .fix(self.fault.fix.clone())
     }
+}
+
+/// Order two integers of one width, from their bits.
+///
+/// The instruction already says what they are, so none of this has to be worked out from
+/// the values again: two integers of the same type are equal exactly when their bits are,
+/// because a value is always stored masked to its width, and ordering them is one machine
+/// comparison once the sign is settled. Going through [`compare`] instead was a quarter
+/// of the VM's time on a counting loop.
+pub fn int_compare(ty: Ty, a: u64, b: u64) -> Comparison {
+    if a == b {
+        return Comparison::Equal;
+    }
+    let greater = if ty.is_signed() {
+        // Push the sign bit to the top so the comparison sees it, whatever the width.
+        let shift = 64 - ty.int_bits().unwrap_or(64);
+        ((a << shift) as i64) > ((b << shift) as i64)
+    } else {
+        a > b
+    };
+    if greater { Comparison::Greater } else { Comparison::Less }
 }
 
 /// Order two values of the same type.
@@ -291,7 +327,7 @@ impl Value {
 
 /// Arithmetic on two exact rationals. Nothing rounds and nothing overflows, so the only
 /// ways this can fail are the ones that have no answer at all.
-fn exact_op(op: BinOp, a: &Exact, b: &Exact) -> Result<Value, Fault> {
+fn exact_op(op: BinOp, a: &Exact, b: &Exact) -> Answer<Value> {
     use luarust_num::exact::Trouble;
     let outcome = match op {
         BinOp::Add => Ok(a.add(b)),
@@ -351,7 +387,7 @@ fn decimal_op(op: BinOp, fmt: decimal::Format, lhs: &Value, rhs: &Value) -> Valu
 }
 
 /// `lhs op rhs`, both already known to be the same type.
-pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Result<Value, Fault> {
+pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Answer<Value> {
     let ty = lhs.ty();
     if let (Value::Exact(a), Value::Exact(b)) = (lhs, rhs) {
         return exact_op(op, a, b);
@@ -394,7 +430,7 @@ pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Res
     }
 }
 
-fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -> Result<Value, Fault> {
+fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -> Answer<Value> {
     let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (lhs, rhs) else {
         unreachable!("both were checked to be integers");
     };
@@ -408,7 +444,8 @@ fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -
 /// also, measurably, most of what a program's time goes on: doing this at 128 bits and
 /// then range-checking the answer cost about five nanoseconds an operation more than
 /// doing it at the width the number is actually kept at.
-pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Result<u64, Fault> {
+#[inline]
+pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Answer<u64> {
     macro_rules! at_width {
         ($signed:ty, $unsigned:ty) => {{
             let a = a as $unsigned as $signed;
@@ -496,7 +533,7 @@ pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Result<u
     }
 }
 
-fn divide_by_zero() -> Fault {
+fn divide_by_zero() -> Box<Fault> {
     Fault::new(
         "R0002",
         "this divides a whole number by zero.",
@@ -505,7 +542,7 @@ fn divide_by_zero() -> Fault {
     )
 }
 
-fn remainder_by_zero() -> Fault {
+fn remainder_by_zero() -> Box<Fault> {
     Fault::new(
         "R0003",
         "this takes a remainder against zero.",
@@ -514,7 +551,7 @@ fn remainder_by_zero() -> Fault {
     )
 }
 
-fn does_not_fit(ty: Ty) -> Fault {
+fn does_not_fit(ty: Ty) -> Box<Fault> {
     Fault::new(
         "R0005",
         format!("this does not fit in `{}`.", ty.word()),
@@ -524,7 +561,7 @@ fn does_not_fit(ty: Ty) -> Fault {
 }
 
 /// Raising to a power, which is rare enough to stay where it was.
-fn power(op: BinOp, ty: Ty, a: i128, b: i128, overflow: Overflow) -> Result<u64, Fault> {
+fn power(op: BinOp, ty: Ty, a: i128, b: i128, overflow: Overflow) -> Answer<u64> {
     debug_assert_eq!(op, BinOp::Pow);
     if b < 0 {
         return Err(Fault::new(
@@ -548,7 +585,7 @@ fn power(op: BinOp, ty: Ty, a: i128, b: i128, overflow: Overflow) -> Result<u64,
 
 
 /// `b64` arithmetic on the hardware, taking and returning the stored bits.
-pub fn f64_op(op: BinOp, a: u64, b: u64) -> Result<u64, Fault> {
+pub fn f64_op(op: BinOp, a: u64, b: u64) -> Answer<u64> {
     let (x, y) = (f64::from_bits(a), f64::from_bits(b));
     let value = match op {
         BinOp::Add => x + y,
@@ -576,7 +613,7 @@ pub fn f64_op(op: BinOp, a: u64, b: u64) -> Result<u64, Fault> {
 }
 
 /// `b32` arithmetic on the hardware, taking and returning the stored bits.
-pub fn f32_op(op: BinOp, a: u64, b: u64) -> Result<u64, Fault> {
+pub fn f32_op(op: BinOp, a: u64, b: u64) -> Answer<u64> {
     let (x, y) = (f32::from_bits(a as u32), f32::from_bits(b as u32));
     let value = match op {
         BinOp::Add => x + y,
@@ -600,7 +637,7 @@ pub fn f32_op(op: BinOp, a: u64, b: u64) -> Result<u64, Fault> {
     Ok(value.to_bits() as u64)
 }
 
-fn float_op(op: BinOp, ty: Ty, a: Bits, b: Bits) -> Result<Value, Fault> {
+fn float_op(op: BinOp, ty: Ty, a: Bits, b: Bits) -> Answer<Value> {
     let fmt = format_of(ty).expect("a float type has a format");
     let mode = Round::TiesToEven;
     let bits = match op {
@@ -655,7 +692,7 @@ fn truncate(fmt: Format, value: Bits) -> Bits {
 /// program actually writes. A fractional exponent is refused rather than approximated:
 /// IEEE 754 does not require `pow` to be correctly rounded, and an answer the three
 /// execution paths might disagree about is worse than no answer at all.
-fn float_pow(fmt: Format, ty: Ty, base: Bits, exponent: Bits) -> Result<Value, Fault> {
+fn float_pow(fmt: Format, ty: Ty, base: Bits, exponent: Bits) -> Answer<Value> {
     let e = binary::unpack(fmt, exponent);
     let whole = truncate(fmt, exponent);
     if whole != exponent || e.class == binary::Class::Nan || e.class == binary::Class::Infinite {
@@ -697,7 +734,7 @@ fn float_pow(fmt: Format, ty: Ty, base: Bits, exponent: Bits) -> Result<Value, F
 }
 
 /// Negation. Exact for every value.
-pub fn negate(value: &Value, overflow: Overflow) -> Result<Value, Fault> {
+pub fn negate(value: &Value, overflow: Overflow) -> Answer<Value> {
     match value {
         Value::Exact(value) => Ok(Value::Exact(std::rc::Rc::new(value.negated()))),
         Value::Num { ty, .. } | Value::Wide { ty, .. } if ty.is_decimal() => {
