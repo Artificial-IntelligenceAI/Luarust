@@ -8,6 +8,7 @@ const { spawn } = require("child_process");
 const vscode = require("vscode");
 const complete = require("./complete");
 const completeToml = require("./complete-toml");
+const comments = require("./comments");
 
 /** Where `luarust` is, as the settings have it. */
 function command() {
@@ -165,6 +166,7 @@ function activate(context) {
 
   complete.register(context);
   completeToml.register(context);
+  comments.register(context);
 
   vscode.workspace.textDocuments.forEach((d) => when() !== "never" && now(d));
 }

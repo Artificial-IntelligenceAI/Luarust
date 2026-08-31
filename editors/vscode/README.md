@@ -55,6 +55,16 @@ does the rest:
 9:8   [C0005] `"sometimes"` is not something `mode` can be set to.
 ```
 
+**Counted comments are greyed properly.** `#3` covers three lines and `#3d` covers four,
+which a TextMate grammar cannot express — it matches inside one line and cannot reach
+forward. So the grammar colours the `#3` itself and a semantic token provider colours what
+it swallows.
+
+That provider re-implements a rule the lexer owns, which is a copy, and a copy drifts. It
+is checked against the compiler rather than against an opinion: a file where every line
+prints its own number, run for real, and what came out has to be exactly the lines the
+provider left lit. `check-comments.js`, in CI.
+
 **Commands**, from the palette: check, run, run through the JIT, and show the bytecode.
 The last three open a terminal so the output is yours to keep.
 
@@ -134,6 +144,7 @@ them drifted:
 - the types completion offers must be exactly the types that exist
 - the project file's sections and keys must be exactly what `luarust-conf` reads
 - every value suggested for a setting must be one that reader accepts
+- the lines greyed as comments must be the lines the compiler comments out
 
 `check-manifest.py` checks the other half: that the extension *starts*. Highlighting is
 declarative and works whether or not the JavaScript ever runs, so a missing activation

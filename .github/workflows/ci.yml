@@ -109,6 +109,12 @@ jobs:
         run: python3 editors/vscode/check-manifest.py
       - name: Each word is offered once, and each snippet says what it inserts
         run: node editors/vscode/check-suggestions.js
+      # The comment provider re-implements a rule the lexer owns, so it is checked
+      # against the compiler rather than against an opinion about what it should do.
+      - name: The editor greys exactly what the compiler comments out
+        run: |
+          cargo build --release -p luarust-cli
+          node editors/vscode/check-comments.js target/release/luarust
       - name: The extension is valid JSON and valid JavaScript
         run: |
           for f in editors/vscode/package.json \
