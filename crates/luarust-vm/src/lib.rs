@@ -135,7 +135,10 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
                     (&registers[lhs as usize], &registers[rhs as usize])
                 else {
-                    unreachable!("the checker said these are integers")
+                    return Err(Stopped {
+                        fault: not_as_described("this says it works on whole numbers"),
+                        span: spans[here],
+                    });
                 };
                 let bits = int_op(op, ty, *a, *b, chunk.overflow)
                     .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
@@ -157,7 +160,10 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
                     (&registers[lhs as usize], &registers[rhs as usize])
                 else {
-                    unreachable!("an integer comparison has integers")
+                    return Err(Stopped {
+                        fault: not_as_described("this says it compares whole numbers"),
+                        span: spans[here],
+                    });
                 };
                 registers[dst as usize] =
                     Value::Bool(holds(op, int_compare(operands, *a, *b)));
@@ -176,7 +182,12 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::TimeNow { dst, ty } => {
                 let seconds = started.elapsed().as_secs_f64();
-                let fmt = format_of(ty).expect("the clock is read as a float");
+                let Some(fmt) = format_of(ty) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says the clock is read as a float"),
+                        span: spans[here],
+                    });
+                };
                 let bits = binary::from_decimal::<8>(
                     fmt,
                     Round::TiesToEven,
@@ -222,7 +233,12 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             }
 
             Op::At { dst, array, at, rank, ty } => {
-                let handle = handle_of(&registers[array as usize]);
+                let Some(handle) = handle_of(&registers[array as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it indexes an array"),
+                        span: spans[here],
+                    });
+                };
                 let index = offset(ty, handle, registers, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = heap::read(handle, index).ok_or(Stopped {
@@ -232,7 +248,12 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             }
 
             Op::StoreAt { array, at, rank, value, ty } => {
-                let handle = handle_of(&registers[array as usize]);
+                let Some(handle) = handle_of(&registers[array as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it indexes an array"),
+                        span: spans[here],
+                    });
+                };
                 let index = offset(ty, handle, registers, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 let held = registers[value as usize].clone();
@@ -240,23 +261,46 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             }
 
             Op::Count { dst, array, ty } => {
-                let handle = handle_of(&registers[array as usize]);
+                let Some(handle) = handle_of(&registers[array as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it indexes an array"),
+                        span: spans[here],
+                    });
+                };
                 registers[dst as usize] =
                     Value::Num { ty, bits: heap::length(handle) as u64 };
             }
 
             Op::Not { dst, src } => {
-                registers[dst as usize] = Value::Bool(!truth(&registers[src as usize]));
+                let Some(answer) = truth(&registers[src as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it negates a truth"),
+                        span: spans[here],
+                    });
+                };
+                registers[dst as usize] = Value::Bool(!answer);
             }
 
             Op::JumpIfFalse { cond, target } => {
-                if !truth(&registers[cond as usize]) {
+                let Some(answer) = truth(&registers[cond as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it branches on a truth"),
+                        span: spans[here],
+                    });
+                };
+                if !answer {
                     at = target as usize;
                 }
             }
 
             Op::JumpIfTrue { cond, target } => {
-                if truth(&registers[cond as usize]) {
+                let Some(answer) = truth(&registers[cond as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it branches on a truth"),
+                        span: spans[here],
+                    });
+                };
+                if answer {
                     at = target as usize;
                 }
             }
@@ -269,7 +313,10 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
                     (&registers[lhs as usize], &registers[rhs as usize])
                 else {
-                    unreachable!("an integer comparison has integers")
+                    return Err(Stopped {
+                        fault: not_as_described("this says it compares whole numbers"),
+                        span: spans[here],
+                    });
                 };
                 if int_compare(ty, *a, *b) == Comparison::Greater {
                     at = target as usize;
@@ -280,7 +327,10 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
                     (&registers[lhs as usize], &registers[rhs as usize])
                 else {
-                    unreachable!("an integer comparison has integers")
+                    return Err(Stopped {
+                        fault: not_as_described("this says it compares whole numbers"),
+                        span: spans[here],
+                    });
                 };
                 if a == b {
                     at = target as usize;
@@ -342,18 +392,19 @@ enum Step {
 /// What a condition answered. The checker refuses anything that is not a `bool` long
 /// before a chunk exists, and a chunk read off disk has its own check, so there is
 /// nothing to decide here.
-fn truth(value: &Value) -> bool {
+fn truth(value: &Value) -> Option<bool> {
     match value {
-        Value::Bool(answer) => *answer,
-        other => unreachable!("a condition checked as `bool` held {other:?}"),
+        Value::Bool(answer) => Some(*answer),
+        // Not a `bool`, which the checker makes impossible and a corrupt chunk does not.
+        _ => None,
     }
 }
 
 /// The array a value points at.
-fn handle_of(value: &Value) -> u32 {
+fn handle_of(value: &Value) -> Option<u32> {
     match value {
-        Value::Num { bits, .. } => *bits as u32,
-        other => unreachable!("an array value is a handle, and this is {other:?}"),
+        Value::Num { bits, .. } => Some(*bits as u32),
+        _ => None,
     }
 }
 
@@ -395,6 +446,22 @@ fn out_of_range(at: i128, length: i128) -> Fault {
         } else {
             format!("this one holds {length}, so the last is {length} and the first is 1.")
         },
+    )
+}
+
+/// A chunk whose instruction disagrees with what its registers hold.
+///
+/// The compiler never writes one. A file that arrived from somewhere else may say
+/// anything, and every other field it contains is checked against something it indexes —
+/// a type tag indexes nothing, so nothing at load can tell a `ui8` tag from a `bool` tag.
+/// This is where the disagreement finally shows, and it is a broken file rather than a
+/// broken program, so it says so.
+fn not_as_described(saying: &str) -> Fault {
+    Fault::of(
+        "R0016",
+        "this chunk does not hold what it says it holds.",
+        "an instruction's type is the type of the values it works on",
+        format!("rebuild it from the source: {saying}"),
     )
 }
 

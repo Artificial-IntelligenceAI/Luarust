@@ -121,15 +121,52 @@ fn a_chunk_that_points_at_nothing_is_refused() {
 fn no_byte_anywhere_can_make_it_panic() {
     // The property that matters most. A chunk arriving from somewhere else may be
     // anything at all, and the only two acceptable outcomes are a chunk or a complaint.
-    let whole = serialize::write(&compiled(EVERYTHING), "test.lr", EVERYTHING);
+    //
+    // This used to stop at `read`, and that is how it missed the thing it is named for: a
+    // type tag is a byte like any other, a flipped bit turns a valid tag into a *different*
+    // valid tag, the chunk loads without complaint, and the VM panics when the register
+    // turns out to hold something else. Loading it is half the test. Running it is the
+    // other half.
+    //
+    // Every single-bit flip, because that is what makes a tag wrong rather than invalid --
+    // `^ 0xff` on a tag gives a number no type has, which `read` refuses, and the
+    // interesting case never runs.
+    let source = "var.local.mut.ui8 ['n'] = [|3|];\n\
+                  var.local.bool ['yes'] = [|true|];\n\
+                  if [math { 'yes' }] { set ['n'] = [math { 'n' + ui8 |1| }]; }\n\
+                  print['n' \\n];\n";
+    let whole = serialize::write(&compiled(source), "test.lr", source);
+
     let mut checked = 0;
     for at in 0..whole.len() {
-        for flip in [0x01u8, 0x80, 0xff] {
+        for bit in 0..8u32 {
             let mut broken = whole.clone();
-            broken[at] ^= flip;
-            // Either it reads, or it says why. Panicking is the failure.
-            let _ = serialize::read(&broken);
+            broken[at] ^= 1 << bit;
             checked += 1;
+
+            // A corrupt constant can describe a program that never finishes -- a loop
+            // whose step became nought is still a program, and no reading of it could say
+            // otherwise. So this runs in a thread and lets a slow one be, while a panic
+            // still comes back as one.
+            //
+            // The bytes cross the thread, not the chunk: a chunk holds `Rc`s and is not
+            // `Send`, and reading is half of what is being tested anyway.
+            let (tell, hear) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let outcome = std::panic::catch_unwind(|| {
+                    if let Ok(loaded) = serialize::read(&broken) {
+                        let mut sink = Vec::new();
+                        let _ = luarust_vm::run(&loaded.chunk, &mut sink);
+                    }
+                });
+                let _ = tell.send(outcome.is_ok());
+            });
+            match hear.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(true) => {}
+                Ok(false) => panic!("a bit flip at byte {at}, bit {bit} panicked the VM"),
+                // Still running: a program that does not finish, which is allowed.
+                Err(_) => {}
+            }
         }
     }
     assert!(checked > 1000, "only tried {checked} corruptions");
