@@ -384,6 +384,7 @@ impl Checker {
             lhs: Box::new(ir::Expr::Load { slot: target.slot, ty: target.ty, span: handback.target.span }),
             rhs: Box::new(ir::Expr::Load { slot: source.slot, ty: source.ty, span: handback.source.span }),
             span: handback.span,
+            nonnegative: false,
         };
         vec![ir::Stmt::Store { slot: target.slot, value: sum, span: handback.span }]
     }
@@ -1067,6 +1068,7 @@ impl Checker {
                     lhs: Box::new(value),
                     rhs: Box::new(hundred),
                     span: *span,
+                    nonnegative: false,
                 })
             }
 
@@ -1245,7 +1247,7 @@ impl Checker {
                     );
                     return None;
                 }
-                Some(ir::Expr::Binary { op: *op, ty, lhs: Box::new(lhs), rhs: Box::new(rhs), span: *span })
+                Some(ir::Expr::Binary { op: *op, ty, lhs: Box::new(lhs), rhs: Box::new(rhs), span: *span, nonnegative: false })
             }
         }
     }

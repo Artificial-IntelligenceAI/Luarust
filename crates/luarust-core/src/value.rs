@@ -199,7 +199,10 @@ impl Fault {
 /// behaviour.
 #[derive(Clone, Debug)]
 pub struct Stopped {
-    pub fault: Fault,
+    /// Boxed for the same reason [`Answer`] boxes its fault: this rides in the return
+    /// type of every step both interpreters take, and behind a pointer the whole
+    /// `Result` fits in a register pair instead of moving 96 bytes through memory.
+    pub fault: Box<Fault>,
     pub span: Span,
 }
 
@@ -552,7 +555,7 @@ fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -
 /// also, measurably, most of what a program's time goes on: doing this at 128 bits and
 /// then range-checking the answer cost about five nanoseconds an operation more than
 /// doing it at the width the number is actually kept at.
-#[inline]
+#[inline(always)]
 pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Answer<u64> {
     macro_rules! at_width {
         ($signed:ty, $unsigned:ty) => {{

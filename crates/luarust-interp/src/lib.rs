@@ -155,7 +155,7 @@ impl Machine<'_> {
                     if let Some((slot, ty)) = counter {
                         let held = self.slots[*slot].clone().expect("the counter was set");
                         let next = binary_op(BinOp::Add, &held, &one_of(*ty), self.overflow)
-                            .map_err(|fault| Stopped { fault: *fault, span: *span })?;
+                            .map_err(|fault| Stopped { fault, span: *span })?;
                         self.slots[*slot] = Some(next);
                     }
                     match self.block(body, out)? {
@@ -225,7 +225,7 @@ impl Machine<'_> {
                 return Ok(Flow::Went);
             }
             current = binary_op(BinOp::Add, &current, &one, Overflow::Wrap)
-                .map_err(|fault| Stopped { fault: *fault, span })?;
+                .map_err(|fault| Stopped { fault, span })?;
         }
     }
 
@@ -239,13 +239,13 @@ impl Machine<'_> {
     ) -> Outcome<Option<Value>> {
         if self.depth >= DEPTH_LIMIT {
             return Err(Stopped {
-                fault: Fault {
+                fault: Box::new(Fault {
                     code: "R0011",
                     message: format!("this has called itself {DEPTH_LIMIT} deep."),
                     rule: "a call may only go so deep before the program is stopped",
                     fix: "give the recursion a case that stops, or write it as a loop."
                         .to_string(),
-                },
+                }),
                 span,
             });
         }
@@ -318,12 +318,12 @@ impl Machine<'_> {
             Expr::Load { slot, ty, span } => match &self.slots[*slot] {
                 Some(value) => Ok(value.clone()),
                 None => Err(Stopped {
-                    fault: Fault {
+                    fault: Box::new(Fault {
                         code: "R0009",
                         message: "this is read before it was ever given a value.".to_string(),
                         rule: "a variable holds a value from the moment it is declared",
                         fix: format!("give it a `{}` value where it is declared.", ty.word()),
-                    },
+                    }),
                     span: *span,
                 }),
             },
@@ -335,12 +335,12 @@ impl Machine<'_> {
                 let text = format!("{seconds:.9}");
                 let bits = binary::from_decimal::<8>(fmt, Round::TiesToEven, &text).map_err(|_| {
                     Stopped {
-                        fault: Fault {
+                        fault: Box::new(Fault {
                             code: "R0010",
                             message: "the clock could not be read.".to_string(),
                             rule: "`time.now` is a count of seconds",
                             fix: "report this: it should not be able to happen.".to_string(),
-                        },
+                        }),
                         span: *span,
                     }
                 })?;
@@ -349,7 +349,7 @@ impl Machine<'_> {
 
             Expr::Neg { operand, span, .. } => {
                 let value = self.eval(operand, out)?;
-                negate(&value, self.overflow).map_err(|fault| Stopped { fault: *fault, span: *span })
+                negate(&value, self.overflow).map_err(|fault| Stopped { fault, span: *span })
             }
 
             // A NaN is not less than, greater than, or equal to anything, itself
@@ -407,12 +407,12 @@ impl Machine<'_> {
                 let count = length.as_i128().unwrap_or(0);
                 if count < 0 {
                     return Err(Stopped {
-                        fault: Fault::of(
+                        fault: Box::new(Fault::of(
                             "R0014",
                             "this asks for an array of fewer than no elements.",
                             "an array holds none or more",
                             "give it a length of nought or more.",
-                        ),
+                        )),
                         span: *span,
                     });
                 }
@@ -436,7 +436,7 @@ impl Machine<'_> {
                 Ok(Value::Num { ty: *ty, bits: count })
             }
 
-            Expr::Binary { op, ty, lhs, rhs, span } => {
+            Expr::Binary { op, ty, lhs, rhs, span, .. } => {
                 let lhs = self.eval(lhs, out)?;
                 let rhs = self.eval(rhs, out)?;
                 // The checker already said what these are, so the integers go straight to
@@ -445,11 +445,11 @@ impl Machine<'_> {
                     && let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (&lhs, &rhs)
                 {
                     let bits = int_op(*op, *ty, *a, *b, self.overflow)
-                        .map_err(|fault| Stopped { fault: *fault, span: *span })?;
+                        .map_err(|fault| Stopped { fault, span: *span })?;
                     return Ok(Value::Num { ty: *ty, bits });
                 }
                 binary_op(*op, &lhs, &rhs, self.overflow)
-                    .map_err(|fault| Stopped { fault: *fault, span: *span })
+                    .map_err(|fault| Stopped { fault, span: *span })
             }
         }
     }
@@ -486,8 +486,8 @@ fn handle_of(value: &Value) -> u32 {
 }
 
 /// Reaching for an element that is not there.
-fn out_of_range(at: i128, length: i128) -> Fault {
-    Fault::of(
+fn out_of_range(at: i128, length: i128) -> Box<Fault> {
+    Box::new(Fault::of(
         "R0015",
         format!("there is no element {at} here."),
         "an array is counted from one, up to how many it holds",
@@ -496,5 +496,5 @@ fn out_of_range(at: i128, length: i128) -> Fault {
         } else {
             format!("this one holds {length}, so the last is {length} and the first is 1.")
         },
-    )
+    ))
 }

@@ -543,7 +543,7 @@ impl Compiler {
                 self.next = mark;
             }
 
-            Expr::Binary { op, ty, lhs, rhs, span } => {
+            Expr::Binary { op, ty, lhs, rhs, span, .. } => {
                 // Take both sides before writing the answer, since `dst` may well be one
                 // of them -- `set ['sum'] = [math { 'sum' + 'i' }]` is the common case.
                 let mark = self.next;

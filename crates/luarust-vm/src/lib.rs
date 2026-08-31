@@ -24,7 +24,7 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
-use luarust_core::Ty;
+use luarust_core::{BinOp, Ty};
 use luarust_core::heap;
 use luarust_core::value::{
     DEPTH_LIMIT, Fault, Stopped, Value, int_compare, binary_op, compare, format_of, holds, int_op, negate,
@@ -42,6 +42,78 @@ struct Frame {
     registers: Vec<Value>,
     /// The register in the *caller* that receives the answer.
     dst: u16,
+}
+
+/// The instruction the machine actually steps, as opposed to the one the chunk stores.
+///
+/// The one hot case — integer arithmetic — is split so the operation is an opcode
+/// rather than a field. Stored as `Binary { op, .. }`, the operation is data, and
+/// x86-64 pays a second dispatch inside `int_op` for every single instruction; split,
+/// the outer match lands on an arm where the operation is a constant, and the inner
+/// match folds away at compile time. The arithmetic itself is still `int_op`, so this
+/// changes where a decision is made and not what any answer is. The chunk format does
+/// not know this type exists.
+#[derive(Clone, Copy)]
+enum Micro {
+    Add { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Sub { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Mul { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Div { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Mod { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Other(Op),
+}
+
+/// One-for-one, so every jump target and span index survives unchanged.
+fn widen(code: &[Op]) -> Vec<Micro> {
+    code.iter()
+        .map(|&op| match op {
+            Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Add { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Sub, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Sub { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Mul, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Mul { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Div, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Div { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Mod, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Mod { ty, dst, lhs, rhs }
+            }
+            other => Micro::Other(other),
+        })
+        .collect()
+}
+
+/// The integer-arithmetic step, once per [`Micro`] opcode, so the operation reaches
+/// `int_op` as a constant and the dispatch on it disappears into the code.
+macro_rules! int_arm {
+    ($binop:expr, $ty:expr, $dst:expr, $lhs:expr, $rhs:expr,
+     $registers:expr, $spans:expr, $here:expr, $overflow:expr) => {{
+        let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+            (&$registers[$lhs as usize], &$registers[$rhs as usize])
+        else {
+            return Err(Stopped {
+                fault: not_as_described("this says it works on whole numbers"),
+                span: $spans[$here],
+            });
+        };
+        let bits = int_op($binop, $ty, *a, *b, $overflow)
+            .map_err(|fault| Stopped { fault, span: $spans[$here] })?;
+        // Written a field at a time when the slot already holds a number, which it
+        // almost always does: a whole-value write is a 16-byte vector store, and the
+        // narrow loads that read it back next instruction stall on x86-64 until it
+        // drains to cache — measured at 12x the matched-width cost on Zen 3, and the
+        // single largest reason the VM was slower there than the machine explains.
+        if let Value::Num { ty: t, bits: b } = &mut $registers[$dst as usize] {
+            *t = $ty;
+            *b = bits;
+        } else {
+            $registers[$dst as usize] = Value::Num { ty: $ty, bits };
+        }
+    }};
 }
 
 /// Run a compiled chunk.
@@ -64,6 +136,12 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
         dst: 0,
     }];
 
+    // The top level always runs, so it is translated up front; a routine is translated
+    // the first time something enters it — the same reasoning that keeps the JIT from
+    // compiling what nothing calls, at a much smaller price.
+    let top = widen(&chunk.code);
+    let mut routines: Vec<Option<Vec<Micro>>> = vec![None; chunk.funcs.len()];
+
     // Two loops rather than one. The outer runs once per call, and settles which code is
     // being run and where its registers are; the inner runs once per instruction and has
     // both of those in hand already. Doing it in one loop meant finding the frame, and
@@ -75,8 +153,16 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             (frame.routine, frame.at)
         };
         let (code, spans) = match routine {
-            None => (&chunk.code[..], &chunk.spans[..]),
-            Some(index) => (&chunk.funcs[index].code[..], &chunk.funcs[index].spans[..]),
+            None => (&top[..], &chunk.spans[..]),
+            Some(index) => {
+                if routines[index].is_none() {
+                    routines[index] = Some(widen(&chunk.funcs[index].code));
+                }
+                (
+                    &routines[index].as_ref().expect("filled just above")[..],
+                    &chunk.funcs[index].spans[..],
+                )
+            }
         };
         let depth = frames.len() - 1;
 
@@ -94,18 +180,35 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 at += 1;
 
                 match op {
+            Micro::Add { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Sub { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Sub, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Mul { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Mul, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Div { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Div, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Mod { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Mod, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+
+            Micro::Other(op) => match op {
             Op::Halt => return Ok(()),
 
             Op::Call { func, base, argc, dst } => {
                 if depth >= DEPTH_LIMIT {
                     return Err(Stopped {
-                        fault: Fault {
+                        fault: Box::new(Fault {
                             code: "R0011",
                             message: format!("this has called itself {DEPTH_LIMIT} deep."),
                             rule: "a call may only go so deep before the program is stopped",
                             fix: "give the recursion a case that stops, or write it as a loop."
                                 .to_string(),
-                        },
+                        }),
                         span: spans[here],
                     });
                 }
@@ -141,7 +244,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     });
                 };
                 let bits = int_op(op, ty, *a, *b, chunk.overflow)
-                    .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = Value::Num { ty, bits };
             }
 
@@ -152,7 +255,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     &registers[rhs as usize],
                     chunk.overflow,
                 )
-                .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
+                .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = value;
             }
 
@@ -176,7 +279,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 
             Op::Neg { dst, src, .. } => {
                 let value = negate(&registers[src as usize], chunk.overflow)
-                    .map_err(|fault| Stopped { fault: *fault, span: spans[here] })?;
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = value;
             }
 
@@ -352,6 +455,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     at = target as usize;
                 }
             }
+                },
                 }
             }
         };
@@ -415,7 +519,7 @@ fn offset(
     registers: &[Value],
     at: u16,
     rank: u8,
-) -> Result<usize, Fault> {
+) -> Result<usize, Box<Fault>> {
     let of = ty.array().expect("only an array is indexed");
     let dims = of.dims();
     let mut flat = 0usize;
@@ -436,8 +540,8 @@ fn offset(
 }
 
 /// Reaching for an element that is not there.
-fn out_of_range(at: i128, length: i128) -> Fault {
-    Fault::of(
+fn out_of_range(at: i128, length: i128) -> Box<Fault> {
+    Box::new(Fault::of(
         "R0015",
         format!("there is no element {at} here."),
         "an array is counted from one, up to how many it holds",
@@ -446,7 +550,7 @@ fn out_of_range(at: i128, length: i128) -> Fault {
         } else {
             format!("this one holds {length}, so the last is {length} and the first is 1.")
         },
-    )
+    ))
 }
 
 /// A chunk whose instruction disagrees with what its registers hold.
@@ -456,20 +560,20 @@ fn out_of_range(at: i128, length: i128) -> Fault {
 /// a type tag indexes nothing, so nothing at load can tell a `ui8` tag from a `bool` tag.
 /// This is where the disagreement finally shows, and it is a broken file rather than a
 /// broken program, so it says so.
-fn not_as_described(saying: &str) -> Fault {
-    Fault::of(
+fn not_as_described(saying: &str) -> Box<Fault> {
+    Box::new(Fault::of(
         "R0016",
         "this chunk does not hold what it says it holds.",
         "an instruction's type is the type of the values it works on",
         format!("rebuild it from the source: {saying}"),
-    )
+    ))
 }
 
-fn fewer_than_none() -> Fault {
-    Fault::of(
+fn fewer_than_none() -> Box<Fault> {
+    Box::new(Fault::of(
         "R0014",
         "this asks for an array of fewer than no elements.",
         "an array holds none or more",
         "give it a length of nought or more.",
-    )
+    ))
 }
