@@ -105,17 +105,20 @@ jobs:
           sudo sysctl -w kernel.perf_event_paranoid=1 >/dev/null 2>&1
           sudo sysctl -w kernel.kptr_restrict=0 >/dev/null 2>&1
           LR=./target/release/luarust
+          mkdir -p prof
           profile() {
             local tag="$1"; shift
             echo "======== $tag"
             $PERF record -q -o "$tag.data" -F 997 -e task-clock "$@" >/dev/null 2>&1
-            $PERF report -i "$tag.data" --stdio --percent-limit 1 2>/dev/null | grep -v "^#" | grep -v "^$" | head -15
-            # Instruction-level detail for every symbol carrying at least 5% of the time.
+            $PERF report -i "$tag.data" --stdio --percent-limit 1 2>/dev/null \
+              | grep -v "^#" | grep -v "^$" | head -15 | tee "prof/$tag.report"
+            # The full instruction-level story goes to the artifact, where nothing
+            # truncates it. The log only carries the per-symbol summary above.
             $PERF report -i "$tag.data" --stdio --percent-limit 5 2>/dev/null \
               | awk '$1 ~ /%/ { $1=""; $2=""; $3=""; $4=""; print }' \
               | while read -r sym; do
-                  echo "---- annotate: $sym"
-                  $PERF annotate -i "$tag.data" --stdio --percent-limit 2 --symbol="$sym" 2>/dev/null | head -80
+                  echo "======== annotate: $sym" >> "prof/$tag.annotate"
+                  $PERF annotate -i "$tag.data" --stdio --percent-limit 0.2 --symbol="$sym" >> "prof/$tag.annotate" 2>/dev/null
                 done
           }
           profile vm-add     $LR run addloop.lr
@@ -123,3 +126,9 @@ jobs:
           profile interp-add $LR interp addloop.lr
           profile interp-mod $LR interp modloop.lr
           exit 0
+
+      - name: Keep the annotated profiles
+        uses: actions/upload-artifact@v4
+        with:
+          name: profiles
+          path: prof/
