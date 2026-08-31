@@ -44,6 +44,24 @@ thread_local! {
     static FLOATS: std::cell::Cell<Floats> = const { std::cell::Cell::new(Floats::Exact) };
 }
 
+impl Floats {
+    /// The number it is written as in a chunk, and back.
+    pub fn tag(self) -> u32 {
+        match self {
+            Floats::Exact => 0,
+            Floats::Shortest => 1,
+        }
+    }
+
+    pub fn from_tag(tag: u32) -> Option<Floats> {
+        Some(match tag {
+            0 => Floats::Exact,
+            1 => Floats::Shortest,
+            _ => return None,
+        })
+    }
+}
+
 /// Choose how floats are written out, for the rest of this program's run.
 pub fn set_floats(how: Floats) {
     FLOATS.with(|it| it.set(how));

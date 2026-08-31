@@ -124,6 +124,50 @@ pub fn clear() {
     SINCE.with(|since| since.set(0));
 }
 
+/// What a program does about arrays nothing can reach any more.
+///
+/// It travels in the chunk, because it is a decision about the program rather than about
+/// the machine running it — the same reason `overflow` travels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Collect {
+    /// Never. Right for a program that makes a few arrays and exits.
+    #[default]
+    Off,
+    /// When enough has been handed out to be worth the walk.
+    Silent,
+    /// At every opportunity, for the smallest heap a program can run in.
+    Aggressive,
+}
+
+impl Collect {
+    /// How many bytes may be handed out before a collection, or `None` for never.
+    pub fn threshold(self) -> Option<usize> {
+        match self {
+            Collect::Off => None,
+            Collect::Silent => Some(1 << 20),
+            Collect::Aggressive => Some(4096),
+        }
+    }
+
+    /// The number it is written as in a chunk, and back.
+    pub fn tag(self) -> u32 {
+        match self {
+            Collect::Off => 0,
+            Collect::Silent => 1,
+            Collect::Aggressive => 2,
+        }
+    }
+
+    pub fn from_tag(tag: u32) -> Option<Collect> {
+        Some(match tag {
+            0 => Collect::Off,
+            1 => Collect::Silent,
+            2 => Collect::Aggressive,
+            _ => return None,
+        })
+    }
+}
+
 /// How many bytes may be handed out before the heap asks to be collected.
 ///
 /// `None` turns collection off, which is a real answer: a program that makes a few arrays

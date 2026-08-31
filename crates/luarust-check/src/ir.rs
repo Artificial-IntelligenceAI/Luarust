@@ -5,7 +5,8 @@
 //! an interpreter, a bytecode compiler and a JIT can each take this and none of them has
 //! to work out the same things again, or risk working them out differently.
 
-use crate::value::{Overflow, Value};
+use crate::value::{Floats, Overflow, Value};
+use luarust_core::heap::Collect;
 use luarust_diag::Span;
 use luarust_parse::ast::{BinOp, CmpOp, LogicOp, Ty};
 
@@ -20,6 +21,11 @@ pub struct Checked {
     pub slots: usize,
     /// What to do when a whole number will not fit.
     pub overflow: Overflow,
+    /// What to do about arrays nothing can reach, and how much of a float to write out.
+    /// Settled by the project and carried from here into the chunk, so that a program
+    /// keeps its own answers wherever it is run.
+    pub collect: Collect,
+    pub floats: Floats,
 }
 
 /// One function, with its own slots. The first `params` of them are its parameters, in

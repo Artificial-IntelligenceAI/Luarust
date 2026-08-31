@@ -26,7 +26,8 @@
 //! nobody vouched for.
 
 use crate::chunk::{Chunk, Op, Reg, Routine};
-use luarust_core::value::{Overflow, Value};
+use luarust_core::heap::Collect;
+use luarust_core::value::{Floats, Overflow, Value};
 use luarust_diag::Span;
 use luarust_num::Uint;
 use luarust_core::{BinOp, CmpOp, Ty};
@@ -36,7 +37,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -103,6 +104,10 @@ pub fn write_with(
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, VERSION);
     put_u32(&mut out, u32::from(chunk.overflow == Overflow::Trap));
+    // What the program decided about collecting and about printing floats. Both are the
+    // project's answers, and `luarust-run` has no project file, so they travel here.
+    put_u32(&mut out, chunk.collect.tag());
+    put_u32(&mut out, chunk.floats.tag());
     put_u32(&mut out, chunk.registers as u32);
     put_str(&mut out, path);
 
@@ -492,6 +497,12 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     }
 
     let overflow = if cursor.u32()? == 0 { Overflow::Wrap } else { Overflow::Trap };
+    let tag = cursor.u32()?;
+    let collect = Collect::from_tag(tag)
+        .ok_or(Broken::Unknown { what: "a way of collecting", value: u64::from(tag) })?;
+    let tag = cursor.u32()?;
+    let floats = Floats::from_tag(tag)
+        .ok_or(Broken::Unknown { what: "a way of printing floats", value: u64::from(tag) })?;
     let registers = cursor.u32()? as usize;
     let path = cursor.text()?;
     let source = match cursor.u32()? {
@@ -570,7 +581,8 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
         funcs.push(Routine { code, spans, registers, params, returns });
     }
 
-    let chunk = Chunk { code, spans, consts, texts, registers, overflow, funcs };
+    let chunk =
+        Chunk { code, spans, consts, texts, registers, overflow, collect, floats, funcs };
     check(&chunk)?;
     Ok(Loaded { chunk, path, source })
 }

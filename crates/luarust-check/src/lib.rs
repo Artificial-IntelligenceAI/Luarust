@@ -16,7 +16,9 @@ pub mod ir;
 // needs the checker only before it does. It is still named from here.
 pub use luarust_core::value;
 
+use crate::value::Floats;
 use ir::Checked;
+use luarust_core::heap::Collect;
 use luarust_diag::{Diagnostic, Span};
 use luarust_num::binary::{self, Round};
 use luarust_parse::ast::{
@@ -42,11 +44,18 @@ struct Var {
 pub struct Start {
     pub overflow: Overflow,
     pub visibility_required: bool,
+    pub collect: Collect,
+    pub floats: Floats,
 }
 
 impl Default for Start {
     fn default() -> Self {
-        Start { overflow: Overflow::Wrap, visibility_required: false }
+        Start {
+            overflow: Overflow::Wrap,
+            visibility_required: false,
+            collect: Collect::Off,
+            floats: Floats::Exact,
+        }
     }
 }
 
@@ -64,6 +73,8 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         scopes: vec![HashMap::new()],
         slots: 0,
         overflow: start.overflow,
+        collect: start.collect,
+        floats: start.floats,
         visibility_required: start.visibility_required,
         signatures: HashMap::new(),
         funcs: Vec::new(),
@@ -93,6 +104,8 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         funcs: std::mem::take(&mut checker.funcs),
         slots: checker.slots,
         overflow: checker.overflow,
+        collect: checker.collect,
+        floats: checker.floats,
     };
     (checked, checker.errors)
 }
@@ -101,6 +114,8 @@ struct Checker {
     scopes: Vec<HashMap<String, Var>>,
     slots: usize,
     overflow: Overflow,
+    collect: Collect,
+    floats: Floats,
     visibility_required: bool,
     /// Every function's name, and where it sits in `funcs`.
     signatures: HashMap<String, Signature>,

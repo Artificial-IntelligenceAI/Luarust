@@ -105,21 +105,12 @@ fn what_is_not_a_chunk_is_refused() {
 
 #[test]
 fn a_chunk_that_points_at_nothing_is_refused() {
-    let chunk = compiled(COUNTING);
-    let whole = serialize::write(&chunk, "t.lr", "");
-
-    // Find the first instruction and turn its destination register into one that is not
-    // there. The VM would index straight past the end of its registers.
-    let mut broken = whole.clone();
-    let code_at = broken
-        .windows(8)
-        .position(|w| w == b"\x00\x00\x00\x00\x00\x00\x00\x00")
-        .unwrap_or(0);
-    let _ = code_at;
-
-    // Simpler and surer: rewrite the register count to zero, which makes every register
-    // in the program out of range.
-    broken[16..20].copy_from_slice(&0u32.to_le_bytes());
+    // Say the program has no registers, which makes every register it names out of range.
+    // Built rather than patched: poking a byte offset means the test has an opinion about
+    // where a field sits, and it goes quietly wrong the day a field is added before it.
+    let mut chunk = compiled(COUNTING);
+    chunk.registers = 0;
+    let broken = serialize::write(&chunk, "t.lr", "");
     match serialize::read(&broken) {
         Err(Broken::OutOfRange { what, .. }) => assert_eq!(what, "register"),
         other => panic!("expected a register complaint, got {other:?}"),
@@ -238,21 +229,11 @@ fn a_decimal_survives_being_written_either_way() {
 /// program of nine registers. One flipped byte in a file was enough to ask for it.
 #[test]
 fn a_chunk_cannot_ask_for_registers_nothing_could_name() {
-    let chunk = compiled("var.local.ui64 ['n'] = [|1|]; print['n'];");
-    let written = serialize::write(&chunk, "test.lr", "");
-
-    // The count is a `u32`, just past the eight magic bytes and the two words after them.
-    let at = 16;
-    assert_eq!(
-        u32::from_le_bytes(written[at..at + 4].try_into().expect("four bytes")) as usize,
-        chunk.registers,
-        "the register count is not where this test thinks it is"
-    );
-
-    let asking = |registers: u32| {
-        let mut bytes = written.clone();
-        bytes[at..at + 4].copy_from_slice(&registers.to_le_bytes());
-        serialize::read(&bytes).map(|_| ())
+    // Built rather than patched, so the test has no opinion about where the field sits.
+    let asking = |registers: usize| {
+        let mut chunk = compiled("var.local.ui64 ['n'] = [|1|]; print['n'];");
+        chunk.registers = registers;
+        serialize::read(&serialize::write(&chunk, "test.lr", "")).map(|_| ())
     };
 
     // What an instruction can name is fine, however wasteful.

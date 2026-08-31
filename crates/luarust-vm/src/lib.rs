@@ -47,6 +47,11 @@ struct Frame {
 /// Run a compiled chunk.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
     heap::clear();
+    // A chunk carries what its project decided, so running one applies it. Nothing else
+    // has to be told, and `luarust-run` -- which has no project file and no way to read
+    // one -- behaves as the project said.
+    heap::set_threshold(chunk.collect.threshold());
+    luarust_core::value::set_floats(chunk.floats);
     // A register the checker has proved is written before it is read. The placeholder is
     // never observed by a program that got this far.
     let placeholder = Value::Bool(false);

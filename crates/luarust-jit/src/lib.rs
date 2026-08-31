@@ -81,6 +81,8 @@ fn celled(ty: Ty) -> bool {
 /// `luarust fuzz` checks on every program it writes.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
     accepts(chunk)?;
+    luarust_core::heap::set_threshold(chunk.collect.threshold());
+    luarust_core::value::set_floats(chunk.floats);
 
     let context = Context::create();
     let module = context.create_module("luarust");

@@ -44,6 +44,9 @@ type Outcome<T> = Result<T, Stopped>;
 /// the paths agree whether it collects or not.
 pub fn run(program: &Checked, out: &mut impl Write) -> Outcome<()> {
     heap::clear();
+    // The same answers the chunk would carry, taken from the program directly.
+    heap::set_threshold(program.collect.threshold());
+    luarust_core::value::set_floats(program.floats);
     let mut machine = Machine {
         slots: vec![None; program.slots],
         overflow: program.overflow,

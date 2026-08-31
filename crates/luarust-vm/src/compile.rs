@@ -8,6 +8,8 @@
 //! that reason.
 
 use crate::chunk::{Chunk, Op, Reg, Routine};
+use luarust_core::heap::Collect;
+use luarust_core::value::Floats;
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Overflow, Value, one_of};
 use luarust_diag::Span;
@@ -79,6 +81,8 @@ impl Compiler {
                 texts: Vec::new(),
                 registers: temps as usize,
                 overflow: program.overflow,
+                collect: program.collect,
+                floats: program.floats,
                 funcs: Vec::new(),
             },
             floor: temps,
@@ -101,6 +105,10 @@ impl Compiler {
                 texts: Vec::new(),
                 registers: func.slots,
                 overflow: Overflow::Wrap,
+                // A function body's chunk is scaffolding: its code is lifted into the
+                // program's own chunk, and these two are read from that one.
+                collect: Collect::default(),
+                floats: Floats::default(),
                 funcs: Vec::new(),
             },
             floor: base,

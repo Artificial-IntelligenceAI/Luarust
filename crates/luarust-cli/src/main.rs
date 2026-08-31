@@ -160,21 +160,21 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
             let start = luarust_check::Start {
                 overflow: project.overflow,
                 visibility_required: project.visibility_required,
+                collect: match project.gc {
+                    luarust_conf::Collect::Off => luarust_core::heap::Collect::Off,
+                    luarust_conf::Collect::Silent => luarust_core::heap::Collect::Silent,
+                    luarust_conf::Collect::Aggressive => luarust_core::heap::Collect::Aggressive,
+                },
+                floats: match project.floats {
+                    luarust_conf::Floats::Exact => luarust_core::value::Floats::Exact,
+                    luarust_conf::Floats::Shortest => luarust_core::value::Floats::Shortest,
+                },
             };
             let (program, problems) = luarust_check::check_with(&parsed.program, start);
             errors.extend(problems);
             checked = Some(program);
         }
     }
-
-    // What the project asked for about collecting, before anything runs. `[gc] mode` is
-    // off by default, so a program that never said otherwise never collects and never
-    // pays for a collector.
-    luarust_core::heap::set_threshold(project.gc.threshold());
-    luarust_core::value::set_floats(match project.floats {
-        luarust_conf::Floats::Exact => luarust_core::value::Floats::Exact,
-        luarust_conf::Floats::Shortest => luarust_core::value::Floats::Shortest,
-    });
 
     if !errors.is_empty() {
         eprint!("{}", luarust_diag::report(&source, &errors));

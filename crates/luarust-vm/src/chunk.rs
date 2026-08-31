@@ -5,7 +5,8 @@
 //! the compiler numbered slots for its variables anyway — so the registers are half
 //! allocated before compilation starts.
 
-use luarust_core::value::{Overflow, Value};
+use luarust_core::heap::Collect;
+use luarust_core::value::{Floats, Overflow, Value};
 use luarust_diag::Span;
 use luarust_core::{BinOp, CmpOp, Ty};
 
@@ -80,6 +81,11 @@ pub struct Chunk {
     /// How many registers the machine needs.
     pub registers: usize,
     pub overflow: Overflow,
+    /// What the program does about arrays nothing can reach, and how much of a float it
+    /// writes out. Both travel with the program for the same reason `overflow` does: they
+    /// are decisions the project made, and `luarust-run` has no project file to read.
+    pub collect: Collect,
+    pub floats: Floats,
     /// Every function, each with its own code and its own register file. The constants
     /// and the texts are shared, because they are the same values wherever they appear.
     pub funcs: Vec<Routine>,

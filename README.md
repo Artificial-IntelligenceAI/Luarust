@@ -706,6 +706,11 @@ That rule is why there are two binaries and not one.
 compiled, and it has no lexer, parser, checker or program generator linked into it at all
 — those are facts about writing Luarust, not about running it.
 
+It has no project file either, and never looks for one. A chunk carries what its project
+decided — `overflow`, `[gc] mode`, `float-printing` — so a program keeps its own answers
+wherever it is run, on a machine that has never seen the `Luarust.toml` it was built
+under.
+
 The JIT is a different case, and not a fourth thing left out of the runtime because it is
 only for development. **How a shipped program runs is a choice, and there are three of
 them.** The same `.lrc` runs on the VM, or through the JIT, or — eventually — as native
