@@ -105,6 +105,8 @@ jobs:
       # goes stale quietly. This is what stops that.
       - name: The grammar and the suggestions know what the compiler does
         run: python3 editors/vscode/check-grammar.py
+      - name: The extension will actually start
+        run: python3 editors/vscode/check-manifest.py
       - name: The extension is valid JSON and valid JavaScript
         run: |
           for f in editors/vscode/package.json \

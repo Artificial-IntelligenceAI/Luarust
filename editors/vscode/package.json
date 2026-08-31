@@ -13,6 +13,10 @@
     "Linters"
   ],
   "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:luarust",
+    "onLanguage:luarust-toml"
+  ],
   "contributes": {
     "languages": [
       {
@@ -91,6 +95,16 @@
         "command": "luarust.dis",
         "title": "Luarust: Show the bytecode"
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "[luarust]": {
+        "editor.wordBasedSuggestions": "off",
+        "editor.suggest.showWords": false
+      },
+      "[luarust-toml]": {
+        "editor.wordBasedSuggestions": "off",
+        "editor.suggest.showWords": false
+      }
+    }
   }
 }

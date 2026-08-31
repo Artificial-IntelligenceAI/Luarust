@@ -69,6 +69,10 @@ The last three open a terminal so the output is yours to keep.
 `type` waits for a pause rather than running on the keystroke, because a file being typed
 into is a file that is half-written.
 
+The extension turns VS Code's **word-based suggestions off** for these two languages. They
+offer any word from any open file, which on top of a list that is already exactly right is
+just noise — and worse than noise, because a word that looks like a setting is not one.
+
 ## Installing it
 
 Symlink it into VS Code's extensions folder and restart:
@@ -102,6 +106,12 @@ them drifted:
 - the types completion offers must be exactly the types that exist
 - the project file's sections and keys must be exactly what `luarust-conf` reads
 - every value suggested for a setting must be one that reader accepts
+
+`check-manifest.py` checks the other half: that the extension *starts*. Highlighting is
+declarative and works whether or not the JavaScript ever runs, so a missing activation
+event does not look broken — the file is coloured and the suggestions are simply absent,
+with VS Code's word-based guesses filling the gap. That is a bad thing to have to notice
+by eye.
 
 It runs in CI, and each of those was checked by breaking it on purpose and watching the
 check fail. A guard nobody has seen fail is not a guard.
