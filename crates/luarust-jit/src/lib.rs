@@ -592,8 +592,33 @@ impl<'ctx> Emitter<'ctx> {
             self.funcs.push(declared);
         }
 
+        // Only what the program can reach gets a body. Every call names its target
+        // index and the language has no function pointers, so the reachable set from
+        // the top level is exact — and a chunk full of routines nobody calls costs
+        // compile time for every one of them otherwise. The declarations above stay:
+        // an unreferenced declaration is free, and the indices in `funcs` keep working.
+        fn calls(code: &[Op]) -> impl Iterator<Item = usize> + '_ {
+            code.iter().filter_map(|op| match op {
+                Op::Call { func, .. } => Some(*func as usize),
+                _ => None,
+            })
+        }
+        let mut reachable = vec![false; chunk.funcs.len()];
+        let mut pending: Vec<usize> = calls(&chunk.code).collect();
+        while let Some(index) = pending.pop() {
+            if !std::mem::replace(&mut reachable[index], true) {
+                pending.extend(calls(&chunk.funcs[index].code));
+            }
+        }
+
         for (index, routine) in chunk.funcs.iter().enumerate() {
-            self.emit_routine(chunk, index, routine);
+            if reachable[index] {
+                self.emit_routine(chunk, index, routine);
+            } else {
+                // The runtime finds a routine's cell frame by index, so the slot has
+                // to exist even though nothing can ever enter it.
+                self.templates.push(Vec::new());
+            }
         }
 
         // The top level, whose frame is the one the program starts in.
