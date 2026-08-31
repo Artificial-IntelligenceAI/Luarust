@@ -17,7 +17,7 @@
 use crate::Ty;
 use crate::value::{Bits, Value};
 use luarust_num::Exact;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// The elements, laid out by how wide one is.
@@ -102,14 +102,119 @@ thread_local! {
     /// Every array the program has made.
     ///
     /// A handle is an index into this, so a value that holds an array holds four bytes
-    /// and no destructor. Nothing is freed yet — that is the collector's job, and this is
-    /// the heap it will collect.
+    /// and no destructor.
     static HEAP: RefCell<Vec<Array>> = const { RefCell::new(Vec::new()) };
+
+    /// Slots whose array has been collected, ready to be handed out again.
+    ///
+    /// A dead slot keeps its place in `HEAP` -- an index has to stay an index -- and gives
+    /// up its elements, which is where the memory actually was.
+    static FREE: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+
+    /// Bytes handed out since the last collection, and the figure that asks for another.
+    /// `None` is a program that has said it does not want collecting.
+    static SINCE: Cell<usize> = const { Cell::new(0) };
+    static THRESHOLD: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 /// Forget every array. Called when a program begins, so one run never sees another's.
 pub fn clear() {
     HEAP.with(|heap| heap.borrow_mut().clear());
+    FREE.with(|free| free.borrow_mut().clear());
+    SINCE.with(|since| since.set(0));
+}
+
+/// How many bytes may be handed out before the heap asks to be collected.
+///
+/// `None` turns collection off, which is a real answer: a program that makes a few arrays
+/// and exits should not pay for a collector it has no use for.
+pub fn set_threshold(bytes: Option<usize>) {
+    THRESHOLD.with(|t| t.set(bytes));
+    SINCE.with(|since| since.set(0));
+}
+
+/// Whether enough has been handed out since the last collection to want another.
+///
+/// Asking is free. The answer is a load and a compare, so a program with collection off
+/// pays one predictable branch per array it makes and nothing else at all.
+pub fn wants_collecting() -> bool {
+    match THRESHOLD.with(Cell::get) {
+        None => false,
+        Some(limit) => SINCE.with(Cell::get) >= limit,
+    }
+}
+
+/// Free every array no root can reach, and return how many went.
+///
+/// Mark and sweep, and no more than that is needed: an array's elements are scalars, so
+/// nothing in this language can contain itself and there are no cycles to chase. What
+/// cannot be reached from a root is garbage, and reference counting would have found
+/// exactly the same set.
+///
+/// A swept slot keeps its index and loses its elements. Indices have to stay stable
+/// because a handle *is* an index, and the elements are where the memory was: dropping
+/// the store hands the bytes back to the allocator there and then.
+pub fn collect<'a>(roots: impl IntoIterator<Item = &'a Value>) -> usize {
+    let live = HEAP.with(|heap| heap.borrow().len());
+    if live == 0 {
+        SINCE.with(|since| since.set(0));
+        return 0;
+    }
+
+    let mut marked = vec![false; live];
+    let mut pending: Vec<u32> = Vec::new();
+    for root in roots {
+        note(root, &mut marked, &mut pending);
+    }
+
+    // An element that is itself an array cannot be written today -- the parser refuses
+    // `array` twice -- but the heap can hold one, and a collector that assumed otherwise
+    // would be a trap laid for whoever writes them.
+    while let Some(index) = pending.pop() {
+        let inner: Vec<Value> = HEAP.with(|heap| {
+            let heap = heap.borrow();
+            let array = &heap[index as usize];
+            if array.element.array().is_none() {
+                return Vec::new();
+            }
+            (0..array.len()).map(|at| load(array, at)).collect()
+        });
+        for value in &inner {
+            note(value, &mut marked, &mut pending);
+        }
+    }
+
+    let mut freed = 0;
+    HEAP.with(|heap| {
+        FREE.with(|free| {
+            let mut heap = heap.borrow_mut();
+            let mut free = free.borrow_mut();
+            for (index, alive) in marked.iter().enumerate() {
+                if *alive || heap[index].store.is_empty() {
+                    continue;
+                }
+                heap[index].store = store_for(heap[index].element, 0);
+                free.push(index as u32);
+                freed += 1;
+            }
+        });
+    });
+    SINCE.with(|since| since.set(0));
+    freed
+}
+
+/// Mark one value, and queue it if it is an array whose elements might hold more.
+fn note(value: &Value, marked: &mut [bool], pending: &mut Vec<u32>) {
+    let Value::Num { ty, bits } = value else { return };
+    if ty.array().is_none() {
+        return;
+    }
+    let index = *bits as usize;
+    if index >= marked.len() || marked[index] {
+        return;
+    }
+    marked[index] = true;
+    pending.push(index as u32);
 }
 
 /// How many arrays are alive, and how many bytes their elements take.
@@ -144,11 +249,7 @@ pub fn make(element: Ty, len: usize, fill: &Value) -> u32 {
     for at in 0..len {
         write(&mut array, at, fill);
     }
-    HEAP.with(|heap| {
-        let mut heap = heap.borrow_mut();
-        heap.push(array);
-        (heap.len() - 1) as u32
-    })
+    place(array)
 }
 
 /// Make an array holding exactly these, in order.
@@ -157,8 +258,18 @@ pub fn of(element: Ty, items: &[Value]) -> u32 {
     for (at, item) in items.iter().enumerate() {
         write(&mut array, at, item);
     }
+    place(array)
+}
+
+/// Put an array in the heap, in a swept slot if there is one, and count what it cost.
+fn place(array: Array) -> u32 {
+    SINCE.with(|since| since.set(since.get().saturating_add(array.bytes())));
     HEAP.with(|heap| {
         let mut heap = heap.borrow_mut();
+        if let Some(index) = FREE.with(|free| free.borrow_mut().pop()) {
+            heap[index as usize] = array;
+            return index;
+        }
         heap.push(array);
         (heap.len() - 1) as u32
     })
@@ -483,5 +594,87 @@ mod reaching {
             let handle = of(ty, &[]);
             assert_eq!(base_of(handle).1, width_of(ty), "{}", ty.word());
         }
+    }
+}
+
+#[cfg(test)]
+mod collecting {
+    use super::*;
+    use crate::ty;
+
+    fn int(ty: Ty, n: u64) -> Value {
+        Value::Num { ty, bits: n }
+    }
+
+    /// A `ui8` array's handle, as a value a root set would hold.
+    fn held(index: u32) -> Value {
+        handle(ty::growable(Ty::U8).expect("a `ui8` array type"), index)
+    }
+
+    #[test]
+    fn what_nothing_points_at_goes() {
+        clear();
+        make(Ty::U8, 1000, &int(Ty::U8, 7));
+        assert_eq!(footprint(), (1, 1000), "the array should be there to start with");
+
+        let freed = collect(&[]);
+        assert_eq!(freed, 1, "with no roots at all, the array is garbage");
+        assert_eq!(footprint().1, 0, "and its thousand bytes should have gone back");
+    }
+
+    #[test]
+    fn what_a_root_points_at_stays() {
+        clear();
+        let kept = make(Ty::U8, 100, &int(Ty::U8, 1));
+        let dropped = make(Ty::U8, 900, &int(Ty::U8, 2));
+
+        let roots = [held(kept)];
+        assert_eq!(collect(&roots), 1, "only the unreachable one goes");
+        assert_eq!(footprint().1, 100, "and the reachable one keeps its hundred bytes");
+        assert_eq!(length(kept), 100, "the kept array is still readable");
+        assert_eq!(length(dropped), 0, "the swept one gave up its elements");
+    }
+
+    #[test]
+    fn a_swept_slot_is_handed_out_again() {
+        clear();
+        let first = make(Ty::U8, 50, &int(Ty::U8, 0));
+        collect(&[]);
+        let second = make(Ty::U8, 50, &int(Ty::U8, 0));
+        assert_eq!(first, second, "the second array should reuse the first one's slot");
+        assert_eq!(footprint().0, 1, "so the heap does not grow at all");
+    }
+
+    #[test]
+    fn a_loop_that_makes_and_forgets_does_not_grow() {
+        clear();
+        // What the collector exists for: a program that makes an array, stops looking at
+        // it, and goes round again. Without sweeping this is a thousand live arrays.
+        for _ in 0..1000 {
+            let made = make(Ty::U64, 100, &int(Ty::U64, 3));
+            let roots = [held(made)];
+            collect(&roots);
+        }
+        let (arrays, bytes) = footprint();
+        // Two slots, not one: the next array is made before the last one is collected, so
+        // both are in play for a moment and the loop alternates between them. Two is the
+        // point -- it is a thousand iterations and the heap did not grow with them.
+        assert_eq!(arrays, 2, "two slots, taking turns, for a thousand arrays");
+        assert_eq!(bytes, 800, "holding one array's worth of elements, not a thousand");
+    }
+
+    #[test]
+    fn collecting_is_off_until_it_is_asked_for() {
+        clear();
+        set_threshold(None);
+        make(Ty::U8, 10_000, &int(Ty::U8, 0));
+        assert!(!wants_collecting(), "a program that said no should never be asked");
+
+        set_threshold(Some(4096));
+        assert!(!wants_collecting(), "setting a threshold starts the count over");
+        make(Ty::U8, 5000, &int(Ty::U8, 0));
+        assert!(wants_collecting(), "past the threshold, it wants collecting");
+        collect(&[]);
+        assert!(!wants_collecting(), "and having collected, it does not");
     }
 }

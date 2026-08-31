@@ -25,10 +25,10 @@ We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.**
 | An error names the rule that was broken and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language with no standard library, no `sqrt`, and no way to read a file or take an argument |
 | Nothing is implicit — no conversion, no truthiness, no coercion. Two types meet only where something said they should | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
 | Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all | Nothing is built on top of them. The tower is wide and the library on it is empty |
-| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | Nothing frees them. The heap only grows while a program runs, because the collector is designed and not yet written |
+| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | The collector runs on the VM and not yet in compiled code, so a JIT run keeps every array it makes |
 | Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine that builds it. That is a big dependency for a small language |
 | Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
-| Only what a program uses gets delivered. No garbage collector, no parser, no JIT on the device | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
+| Only what a program uses gets delivered, and `[gc] mode` is off until asked for — a program that makes no arrays pays nothing for a collector, measurably: 125 ms either way | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
 | 1.05× C on the dependent-chain benchmark, and 1.01× C per iteration once startup is taken out — ahead of Java, PyPy, Lua and LuaJIT | It was 1.85× until somebody noticed the JIT had never been asked to run LLVM's optimiser. Finding a 1.8× by turning something on is not the same as earning it |
 | It is small enough to read. Thirteen crates, about 20,500 lines, and the whole thing fits in a head | It is one person's hobby project at version 0.0.0, and stability is **not a guarantee** |
 
@@ -411,7 +411,51 @@ A value holds a **handle** into the heap, which fits in the space a number uses.
 array costs nothing to have around: no new kind of value, and none of the drop-checking
 that a reference-counted one would put on every assignment in the language.
 
-Nothing is freed yet. That is a collector's job, and this is the heap it will collect.
+### Collecting them
+
+Nothing frees an array on its own, so a program that makes one every time round a loop
+grows for as long as it runs. The collector is what stops that, and it is **off unless
+asked for**:
+
+```toml
+[gc]
+mode = "silent"
+```
+
+`"off"` never collects, `"silent"` collects when a megabyte has been handed out since the
+last time, and `"aggressive"` does it every four kilobytes. Two hundred thousand arrays of
+two hundred `ui64`, made and forgotten one at a time:
+
+| `[gc] mode` | peak memory | time |
+| --- | --- | --- |
+| `"off"` | 359.7 MB | 103 ms |
+| `"silent"` | 3.3 MB | 74 ms |
+| `"aggressive"` | 2.0 MB | 70 ms |
+
+Collecting is *faster* than not collecting here, which is not a trick: three hundred and
+sixty megabytes have to be asked for, faulted in and given back, and reusing one slot two
+hundred thousand times does none of that. And a program that makes no arrays pays nothing
+either way — 125 ms with collection off and 125 ms with it at its most eager — because
+what it costs to ask is a load and a compare on the line that makes an array, and that
+line never runs.
+
+It is **mark and sweep**, and nothing more elaborate is needed. An array's elements are
+scalars, so no value in this language can contain itself and there are no cycles to chase;
+what no root can reach is garbage, and a reference count would have found exactly the same
+set. A swept slot keeps its index, because a handle *is* an index, and gives up its
+elements, because that is where the memory was.
+
+**The VM collects. The tree-walker and the JIT do not**, and the reason is the same one
+both times. The VM's intermediate values live in registers, and registers are roots. The
+tree-walker's live in Rust locals up the recursion — the vector being filled for an array
+that is half-built — where nothing can enumerate them. Compiled code's live in machine
+registers, which is the same problem again and is exactly what `gc.statepoint` exists to
+solve; it is not wired up yet.
+
+None of that can make the paths disagree, because **collecting changes no output**. So
+`luarust fuzz` runs with the VM sweeping every four kilobytes and the other two never
+sweeping at all: if a collector ever freed something a program could still reach, it
+would show up there as a disagreement rather than as a wrong answer months later.
 
 ## Loops
 
@@ -593,6 +637,9 @@ overflow = "trap"
 [build]
 embed-source = false
 decimal-encoding = "dpd"
+
+[gc]
+mode = "silent"
 ```
 
 Anything under `[defaults]` applies to every file in the project, so a preference you
@@ -619,8 +666,9 @@ mistake in a source file is, because it decides how every file in the project is
 ## What ships
 
 Nothing goes onto the machine that runs a program unless that program uses it. There is
-no garbage collector, and a program in integers and the hardware floats never allocates
-at all: the only heap in a value is the one strings and the wide floats need.
+no garbage collector unless `[gc] mode` asked for one, and a program in integers and the
+hardware floats never allocates at all: the only heap in a value is the one strings and
+the wide floats need.
 
 That rule is why there are two binaries and not one.
 

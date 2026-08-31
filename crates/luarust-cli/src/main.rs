@@ -135,6 +135,11 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         }
     }
 
+    // What the project asked for about collecting, before anything runs. `[gc] mode` is
+    // off by default, so a program that never said otherwise never collects and never
+    // pays for a collector.
+    luarust_core::heap::set_threshold(project.gc.threshold());
+
     if !errors.is_empty() {
         eprint!("{}", luarust_diag::report(&source, &errors));
         return ExitCode::FAILURE;
@@ -369,6 +374,13 @@ fn verify(program: &luarust_check::ir::Checked, source: &SourceFile) -> ExitCode
 /// Type-directed, so every generated program compiles -- one that did not would be
 /// rejected identically by both paths and would prove nothing.
 fn fuzz(count: u64) -> ExitCode {
+    // Collecting hard, on purpose, and only on one of the paths. The VM sweeps its heap
+    // every four kilobytes; the tree-walker and the JIT never sweep at all. A collector
+    // that freed something a program could still reach would show up here as a
+    // disagreement, which is a far better way to find out than a wrong answer months
+    // later in something that matters.
+    luarust_core::heap::set_threshold(luarust_conf::Collect::Aggressive.threshold());
+
     let mut ran = 0u64;
     #[cfg(feature = "jit")]
     let mut took = 0u64;

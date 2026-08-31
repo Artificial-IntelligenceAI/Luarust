@@ -27,6 +27,21 @@ type Outcome<T> = Result<T, Stopped>;
 
 
 /// Run a checked program, writing whatever it prints to `out`.
+/// The tree-walker does not collect, and cannot as it stands.
+///
+/// Its intermediate values live in Rust locals up the recursion -- the `held` vector
+/// being filled for a new array, an argument evaluated but not yet passed. The collector
+/// is handed roots, and it cannot be handed those: they are on the Rust stack where
+/// nothing can enumerate them. Sweeping here would free an array the program was in the
+/// middle of building.
+///
+/// The VM has no such trouble, because its intermediates live in registers and registers
+/// are roots. That difference is the whole reason a real collector for compiled code
+/// needs statepoints: machine registers are the same problem again.
+///
+/// This costs nothing that matters. The tree-walker is the oracle the other paths are
+/// checked against, not something anybody ships, and collecting changes no output -- so
+/// the paths agree whether it collects or not.
 pub fn run(program: &Checked, out: &mut impl Write) -> Outcome<()> {
     heap::clear();
     let mut machine = Machine {

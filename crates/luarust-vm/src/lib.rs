@@ -197,6 +197,9 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     .map(|n| registers[items as usize + n].clone())
                     .collect();
                 registers[dst as usize] = heap::handle(ty, heap::of(of.element, &held));
+                if heap::wants_collecting() {
+                    break Step::Collecting;
+                }
             }
 
             Op::Filled { dst, length, value, ty } => {
@@ -208,6 +211,9 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 let fill = registers[value as usize].clone();
                 registers[dst as usize] =
                     heap::handle(ty, heap::make(of.element, count as usize, &fill));
+                if heap::wants_collecting() {
+                    break Step::Collecting;
+                }
             }
 
             Op::At { dst, array, at, rank, ty } => {
@@ -307,6 +313,13 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     caller.registers[finished.dst as usize] = answer;
                 }
             }
+            Step::Collecting => {
+                frames.last_mut().expect("a frame is always open").at = at;
+                // Every register of every frame is a root. A register the checker has
+                // proved is written before it is read may still hold the placeholder, and
+                // a `bool` is not a handle, so nothing false is kept alive by looking.
+                heap::collect(frames.iter().flat_map(|frame| frame.registers.iter()));
+            }
         }
         continue 'activation;
     }
@@ -316,6 +329,9 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 enum Step {
     Called { func: usize, fresh: Vec<Value>, dst: u16 },
     Returned(Option<Value>),
+    /// The heap has asked to be collected, which cannot happen in here: the roots are
+    /// every frame's registers and this loop is holding one frame's borrowed.
+    Collecting,
 }
 
 /// What a condition answered. The checker refuses anything that is not a `bool` long

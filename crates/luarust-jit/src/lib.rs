@@ -70,6 +70,15 @@ fn celled(ty: Ty) -> bool {
 }
 
 /// Compile a program and run it, or hand it back.
+///
+/// **Compiled code does not collect yet.** A handle lives in an `i64` register, and by the
+/// time LLVM has finished with it there is no way from Rust to say which registers hold
+/// one -- that is what `gc.statepoint` exists for, and it is not wired up. So a JIT run
+/// keeps every array it makes, exactly as every run did before there was a collector.
+///
+/// Nothing is unsound about that and nothing disagrees: collecting changes no output, so
+/// the VM sweeping and the JIT not sweeping still produce the same answers, which is what
+/// `luarust fuzz` checks on every program it writes.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
     accepts(chunk)?;
 

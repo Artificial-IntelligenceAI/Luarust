@@ -25,6 +25,39 @@ pub struct Project {
     /// significand a chunk uses. They hold the same numbers, so nothing about arithmetic
     /// depends on it; it decides the bit pattern that gets written out.
     pub dpd: bool,
+    /// `[gc] mode` — whether a running program collects its dead arrays, and how eagerly.
+    pub gc: Collect,
+}
+
+/// What a program does about arrays nothing can reach any more.
+///
+/// This is a footprint decision as much as a speed one. A program that says `"off"` has
+/// no collector in it at all, which is the rule the whole project runs on: a program pays
+/// for what it uses and not for what somebody else might.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Collect {
+    /// Never. The heap only grows, which is exactly right for a program that makes a few
+    /// arrays and exits, and exactly wrong for one that loops.
+    Off,
+    /// When enough has been handed out to be worth the walk. The ordinary answer.
+    Silent,
+    /// At every opportunity. Slower, and it holds the smallest heap a program can run in.
+    Aggressive,
+}
+
+impl Collect {
+    /// How many bytes may be handed out before a collection, or `None` for never.
+    pub fn threshold(self) -> Option<usize> {
+        match self {
+            Collect::Off => None,
+            // A megabyte is enough that a small program never collects at all and a
+            // looping one collects rarely.
+            Collect::Silent => Some(1 << 20),
+            // Not zero: collecting after an array of nothing would walk the roots for no
+            // reason. One page is small enough to feel immediate.
+            Collect::Aggressive => Some(4096),
+        }
+    }
 }
 
 impl Default for Project {
@@ -37,6 +70,9 @@ impl Default for Project {
             visibility_required: false,
             embed_source: true,
             dpd: false,
+            // Off, because a program that never makes an array has nothing to collect and
+            // should not carry a collector. Saying `"silent"` is what turns it on.
+            gc: Collect::Off,
         }
     }
 }
@@ -83,7 +119,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
         // A table header. Nothing here nests, so the name is taken whole.
         if let Some(name) = trimmed.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
             let name = name.trim();
-            if !matches!(name, "defaults" | "build") {
+            if !matches!(name, "defaults" | "build" | "gc") {
                 errors.push(
                     Diagnostic::new("C0001", format!("there is no `[{name}]` section."))
                         .primary(locate(body, start, trimmed), "written here")
@@ -117,7 +153,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Diagnostic::new("C0003", format!("`{key}` is not under any section."))
                     .primary(locate(body, start, trimmed), "written here")
                     .rule("a setting belongs to the section above it")
-                    .tip("`overflow` and `no-visibility-stated` are `[defaults]`; `embed-source` and `decimal-encoding` are `[build]`.")
+                    .tip("`overflow` and `no-visibility-stated` are `[defaults]`; `embed-source` and `decimal-encoding` are `[build]`; `mode` is `[gc]`.")
                     .fix("put a section header above it."),
             );
             continue;
@@ -144,12 +180,24 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Some("dpd") => project.dpd = true,
                 _ => errors.push(bad_value(key, raw, span, "`\"bid\"` or `\"dpd\"`")),
             },
+            ("gc", "mode") => match unquote(raw) {
+                Some("off") => project.gc = Collect::Off,
+                Some("silent") => project.gc = Collect::Silent,
+                Some("aggressive") => project.gc = Collect::Aggressive,
+                _ => errors.push(bad_value(
+                    key,
+                    raw,
+                    span,
+                    "`\"off\"`, `\"silent\"` or `\"aggressive\"`",
+                )),
+            },
             _ => errors.push(
                 Diagnostic::new("C0004", format!("`[{section}]` has no `{key}` setting."))
                     .primary(locate(body, start, key), "written here")
                     .rule("a project file sets only settings that exist")
                     .tip(match section.as_str() {
                         "defaults" => "`[defaults]` has `overflow` and `no-visibility-stated`.",
+                        "gc" => "`[gc]` has `mode`.",
                         _ => "`[build]` has `embed-source` and `decimal-encoding`.",
                     })
                     .fix("delete it, or correct the spelling."),
@@ -229,6 +277,21 @@ mod tests {
     fn the_decimal_encoding_can_be_chosen() {
         assert!(!clean("[build]\ndecimal-encoding = \"bid\"\n").dpd);
         assert!(clean("[build]\ndecimal-encoding = \"dpd\"\n").dpd);
+    }
+
+    #[test]
+    fn collecting_is_asked_for_and_never_assumed() {
+        assert_eq!(Project::default().gc, Collect::Off, "a program collects only if it says so");
+        assert_eq!(clean("[gc]\nmode = \"off\"\n").gc, Collect::Off);
+        assert_eq!(clean("[gc]\nmode = \"silent\"\n").gc, Collect::Silent);
+        assert_eq!(clean("[gc]\nmode = \"aggressive\"\n").gc, Collect::Aggressive);
+
+        assert_eq!(Collect::Off.threshold(), None, "off means no collector at all");
+        assert!(Collect::Aggressive.threshold() < Collect::Silent.threshold());
+
+        let (_, errors) = read("[gc]\nmode = \"sometimes\"\n");
+        assert_eq!(errors.len(), 1, "a mode that does not exist is refused");
+        assert_eq!(errors[0].code, "C0005");
         // BID by default, because it is what the arithmetic works in anyway.
         assert!(!Project::default().dpd);
         assert_eq!(codes("[build]\ndecimal-encoding = \"packed\"\n"), ["C0005"]);
