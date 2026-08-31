@@ -4,3 +4,6 @@
 
 # Compiled chunks. Built from the sources beside them.
 *.lrc
+
+# Where Tankun writes Luarust. Not part of the language.
+/ts/
