@@ -884,7 +884,17 @@ luarust jit hello.lrc      # the same file, compiled to machine code
 One implementation only ever agrees with itself. `luarust verify` runs a program two ways
 and says whether they match, and `luarust fuzz` writes programs and does it in bulk — a
 million of them at the last count, all compiling, all agreeing, and the fourteen thousand
-that stopped part way stopping the same way both times.
+that stopped part way stopping the same way both times. Built with the JIT, `fuzz` checks
+all three paths on every program rather than two, and says how many of them the JIT took.
+
+The programs it writes use everything the language has, arrays included: written out,
+shaped, filled, indexed, counted, and assigned into, with indices mostly inside the array
+and sometimes deliberately past the end, because a fault is an answer the three paths have
+to agree on too. That last part earns its keep. Teaching the generator to write arrays
+turned up a bug that had nothing to do with arrays: the compiler's constant pool deduped
+with `==`, `-0` and `0` are numerically equal, and so a program that wrote `-0` and later
+wrote `0` got one pool slot holding `-0` — and its `0` quietly became `-0`. The pool now
+matches on representation, and there is a test for every float format.
 
 The JIT takes every program, but it does not compile all of every program. Integers,
 `b32` and `b64` become native instructions, because those are the cases where LLVM's

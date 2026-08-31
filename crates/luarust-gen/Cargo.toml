@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+luarust-core = { path = "../luarust-core" }
 luarust-parse = { path = "../luarust-parse" }
 
 [dev-dependencies]

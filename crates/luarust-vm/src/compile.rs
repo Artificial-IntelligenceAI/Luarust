@@ -161,11 +161,29 @@ impl Compiler {
     }
 
     fn konst(&mut self, value: Value) -> u32 {
-        if let Some(found) = self.chunk.consts.iter().position(|existing| *existing == value) {
+        if let Some(found) = self.chunk.consts.iter().position(|existing| Self::identical(existing, &value))
+        {
             return found as u32;
         }
         self.chunk.consts.push(value);
         (self.chunk.consts.len() - 1) as u32
+    }
+
+    /// Whether two constants are the same *thing*, rather than the same *number*.
+    ///
+    /// The pool cannot dedupe with `==`. A `Value` compares numerically, and `-0` and `0`
+    /// are numerically equal -- so a program that wrote `-0` and then `0` got one slot
+    /// holding `-0`, and its `0` quietly became `-0`. The pool wants sameness of
+    /// representation: the same type, and the same bits.
+    fn identical(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Num { ty: x, bits: m }, Value::Num { ty: y, bits: n }) => x == y && m == n,
+            (Value::Wide { ty: x, bits: m }, Value::Wide { ty: y, bits: n }) => x == y && m == n,
+            (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Str(x), Value::Str(y)) => x == y,
+            (Value::Exact(x), Value::Exact(y)) => x == y,
+            _ => false,
+        }
     }
 
     fn text(&mut self, value: &str) -> u32 {

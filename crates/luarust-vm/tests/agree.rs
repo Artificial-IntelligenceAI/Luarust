@@ -197,3 +197,20 @@ fn every_example_in_the_repository_agrees() {
     }
     assert!(checked >= 4, "expected the examples to be there, found {checked}");
 }
+
+/// The constant pool holds representations, not numbers.
+///
+/// Found by the fuzzer. `-0` and `0` are numerically equal, so a pool that deduped with
+/// `==` gave them one slot -- and whichever was written second silently became the first.
+/// Every float format has a signed zero, so this was every one of them.
+#[test]
+fn a_negative_zero_is_not_the_zero_that_follows_it() {
+    for float in ["b16", "b32", "b64", "b128", "b256"] {
+        let source = format!(
+            "var.local.{float} ['first'] = [|-0|];\n\
+             var.local.{float} ['then'] = [|0|];\n\
+             print['first' \" \" 'then' \\n];\n"
+        );
+        assert_eq!(agreed(&source), "-0 0\n", "{float} lost the sign of its zero");
+    }
+}

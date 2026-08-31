@@ -370,6 +370,8 @@ fn verify(program: &luarust_check::ir::Checked, source: &SourceFile) -> ExitCode
 /// rejected identically by both paths and would prove nothing.
 fn fuzz(count: u64) -> ExitCode {
     let mut ran = 0u64;
+    #[cfg(feature = "jit")]
+    let mut took = 0u64;
     let mut stopped = 0u64;
 
     for seed in 1..=count {
@@ -399,6 +401,32 @@ fn fuzz(count: u64) -> ExitCode {
             (Err(a), Err(b)) => a.fault.code == b.fault.code,
             _ => false,
         };
+        // And the third path, when this build has one. A program the JIT declines is not a
+        // disagreement -- it is the JIT saying so, which is its right.
+        #[cfg(feature = "jit")]
+        if let Ok(jitted) = {
+            let mut jit_out = Vec::new();
+            luarust_jit::run(&chunk, &mut jit_out).map(|outcome| (outcome, jit_out))
+        } {
+            took += 1;
+            let (outcome, jit_out) = jitted;
+            let same_ending = match (&walk, &outcome) {
+                (Ok(()), Ok(())) => true,
+                (Err(a), Err(b)) => a.fault.code == b.fault.code,
+                _ => false,
+            };
+            if walked != jit_out || !same_ending {
+                println!("seed {seed}: the interpreter and the JIT DISAGREE.\n");
+                print!("{}", written.source);
+                println!("\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
+                println!("the JIT printed:\n{}", String::from_utf8_lossy(&jit_out));
+                println!("\ninterpreter: {}", ending(&walk));
+                println!("the JIT:     {}", ending(&outcome));
+                println!("\n{}", chunk.disassemble());
+                return ExitCode::FAILURE;
+            }
+        }
+
         if walked != vm_out || !same_ending {
             println!("seed {seed}: the two paths DISAGREE.\n");
             print!("{}", written.source);
@@ -416,6 +444,12 @@ fn fuzz(count: u64) -> ExitCode {
         }
     }
 
+    #[cfg(feature = "jit")]
+    println!(
+        "{ran} programs, all compiled, all agreed. {stopped} of them stopped part way, \
+         and stopped the same way every time. The JIT took {took} of them."
+    );
+    #[cfg(not(feature = "jit"))]
     println!(
         "{ran} programs, all compiled, all agreed. {stopped} of them stopped part way, \
          and stopped the same way both times."

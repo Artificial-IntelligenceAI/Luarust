@@ -96,6 +96,9 @@ struct Known {
     mutable: bool,
     /// How deep the block was that declared it, so a loop's variables can be forgotten.
     depth: usize,
+    /// How long a growable array was made, which its type does not say. A shaped one's
+    /// length is in its type, and nothing else has one.
+    length: Option<u32>,
 }
 
 /// A function the program has already written.
@@ -166,6 +169,7 @@ impl Writer {
             7 if self.depth < 2 => self.if_stmt(),
             8 if !self.funcs.is_empty() => self.call_stmt(),
             9 if self.depth < 2 => self.while_loop(),
+            _ if self.rng.below(8) == 0 => self.element_assignment(),
             _ if self.loops > 0 && self.rng.below(6) == 0 => self.break_stmt(),
             _ => self.print(),
         }
@@ -228,7 +232,7 @@ impl Writer {
         let outer_inside = self.inside.replace(returns);
         let outer_loops = std::mem::take(&mut self.loops);
         for (n, ty) in params.iter().enumerate() {
-            self.scope.push(Known { name: format!("p{n}"), ty: *ty, mutable: false, depth: 1 });
+            self.scope.push(Known { name: format!("p{n}"), ty: *ty, mutable: false, depth: 1, length: None });
         }
 
         let statements = self.rng.below(3);
@@ -325,13 +329,117 @@ impl Writer {
     }
 
     fn declaration(&mut self) {
+        // One declaration in five is an array, which is often enough to be everywhere and
+        // seldom enough that most programs are still about the scalars.
+        if self.rng.below(5) == 0 {
+            self.array_declaration();
+            return;
+        }
         let ty = DECLARED[self.rng.below(DECLARED.len() as u64) as usize];
         let mutable = self.rng.below(2) == 0;
         let name = self.fresh_name();
         let value = self.value_of(ty);
-        let chain = if mutable { format!("local.mut.{}", ty.word()) } else { format!("local.{}", ty.word()) };
+        let chain = if mutable { format!("local.mut.{}", ty.written()) } else { format!("local.{}", ty.written()) };
         self.line(&format!("var.{chain} ['{name}'] = [{value}];"));
-        self.scope.push(Known { name, ty, mutable, depth: self.depth });
+        self.scope.push(Known { name, ty, mutable, depth: self.depth, length: None });
+    }
+
+    /// An array: fixed, shaped, or growable, written out or filled.
+    fn array_declaration(&mut self) {
+        // Half the time from the whole tower, half from the handful of types the rest of
+        // a program is most likely to want, so that indexing actually finds a home.
+        let element = if self.rng.below(2) == 0 {
+            self.pick_type()
+        } else {
+            const COMMON: [Ty; 6] = [Ty::U8, Ty::U32, Ty::I32, Ty::I64, Ty::B32, Ty::B64];
+            COMMON[self.rng.below(COMMON.len() as u64) as usize]
+        };
+        let name = self.fresh_name();
+        let mutable = self.rng.below(2) == 0;
+
+        // A small one. A generated program that makes a thousand-element array is a
+        // fuzzer spending its time on memcpy rather than on disagreement.
+        let mut grown = None;
+        let (chain, ty, value) = match self.rng.below(3) {
+            0 => {
+                let len = 1 + self.rng.below(4) as u32;
+                let items: Vec<String> =
+                    (0..len).map(|_| format!("|{}|", self.literal(element))).collect();
+                (
+                    format!("array.{len}.{}", element.written()),
+                    luarust_core::ty::fixed(element, &[len]),
+                    format!("[{}]", items.join(", ")),
+                )
+            }
+            1 => {
+                let (rows, cols) = (1 + self.rng.below(3) as u32, 1 + self.rng.below(3) as u32);
+                let items: Vec<String> =
+                    (0..rows * cols).map(|_| format!("|{}|", self.literal(element))).collect();
+                (
+                    format!("array.{rows}x{cols}.{}", element.written()),
+                    luarust_core::ty::fixed(element, &[rows, cols]),
+                    format!("[{}]", items.join(", ")),
+                )
+            }
+            _ => {
+                let len = 1 + self.rng.below(4) as u32;
+                grown = Some(len);
+                let fill = self.literal(element);
+                (
+                    format!("array.{}", element.written()),
+                    luarust_core::ty::growable(element),
+                    format!("filled[|{len}|, |{fill}|]"),
+                )
+            }
+        };
+
+        let Some(ty) = ty else { return };
+        let chain = if mutable { format!("local.mut.{chain}") } else { format!("local.{chain}") };
+        self.line(&format!("var.{chain} ['{name}'] = [{value}];"));
+        self.scope.push(Known { name, ty, mutable, depth: self.depth, length: grown });
+    }
+
+    /// An array in scope holding this, with how it is indexed.
+    fn array_of(&mut self, element: Ty) -> Option<(Known, String)> {
+        let usable: Vec<Known> = self
+            .scope
+            .iter()
+            .filter(|known| known.ty.array().is_some_and(|of| of.element == element))
+            .cloned()
+            .collect();
+        if usable.is_empty() {
+            return None;
+        }
+        let chosen = usable[self.rng.below(usable.len() as u64) as usize].clone();
+        let at = self.indices_for(&chosen);
+        Some((chosen, at))
+    }
+
+    /// The index list for this array and no other: one index per dimension it has.
+    ///
+    /// It has to be built from the array it will be written next to. Taking the shape of
+    /// whichever array came to hand gives a 2-D array's two indices to a 1-D one, and the
+    /// checker is quite right to refuse it.
+    fn indices_for(&mut self, array: &Known) -> String {
+        let of = array.ty.array().expect("only arrays are indexed");
+        // A shaped one's length is in its type; a growable one's is whatever it was made,
+        // which only the declaration knew.
+        let dims: Vec<u32> =
+            if of.dims().is_empty() { vec![array.length.unwrap_or(0)] } else { of.dims().to_vec() };
+
+        // Mostly in range, sometimes not: an index past the end is a fault, and every
+        // path has to agree about it just as much as about an answer.
+        let written: Vec<String> = dims
+            .iter()
+            .map(|size| {
+                if *size == 0 || self.rng.below(8) == 0 {
+                    format!("|{}|", self.rng.below(4))
+                } else {
+                    format!("|{}|", 1 + self.rng.below(u64::from(*size)))
+                }
+            })
+            .collect();
+        format!("[{}]", written.join(", "))
     }
 
     fn assignment(&mut self) {
@@ -373,7 +481,7 @@ impl Writer {
 
         self.depth += 1;
         self.loops += 1;
-        let counter = Known { name: name.clone(), ty, mutable: false, depth: self.depth };
+        let counter = Known { name: name.clone(), ty, mutable: false, depth: self.depth, length: None };
         self.scope.push(counter.clone());
 
         let body = 1 + self.rng.below(3);
@@ -404,7 +512,7 @@ impl Writer {
 
         self.depth += 1;
         self.loops += 1;
-        let counter = Known { name: name.clone(), ty: Ty::U8, mutable: false, depth: self.depth };
+        let counter = Known { name: name.clone(), ty: Ty::U8, mutable: false, depth: self.depth, length: None };
         self.scope.push(counter.clone());
 
         let body = self.rng.below(3);
@@ -436,6 +544,22 @@ impl Writer {
                 items.push_str(&format!("\"{}\" ", self.rng.below(1000)));
             } else {
                 let known = self.scope[self.rng.below(self.scope.len() as u64) as usize].clone();
+                // A whole array prints as itself, but an element and a length are worth
+                // printing too, and this is where either is cheapest to reach.
+                if known.ty.array().is_some() {
+                    match self.rng.below(3) {
+                        0 => {
+                            items.push_str(&format!("count['{}'] ", known.name));
+                            continue;
+                        }
+                        1 => {
+                            let at = self.indices_for(&known);
+                            items.push_str(&format!("'{}'{at} ", known.name));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 items.push_str(&format!("'{}' ", known.name));
             }
         }
@@ -453,6 +577,31 @@ impl Writer {
         // are, so `math { 1 < 2 }` has no type in reach and does not compile -- which is
         // the language being consistent, and is also why this cannot just write two
         // literals and hope.
+        // An array's value is a whole array, written out or filled.
+        if let Some(of) = ty.array() {
+            let element = of.element;
+            return match of.length() {
+                Some(len) => {
+                    let items: Vec<String> =
+                        (0..len).map(|_| format!("|{}|", self.literal(element))).collect();
+                    format!("[{}]", items.join(", "))
+                }
+                None => {
+                    let len = self.rng.below(5);
+                    format!("filled[|{len}|, |{}|]", self.literal(element))
+                }
+            };
+        }
+
+        // An element read straight out, with no math block around it. Most values are a
+        // bare literal, so waiting for one to be built inside `math { }` leaves indexing
+        // far rarer than the risk in it deserves.
+        if self.rng.below(3) == 0
+            && let Some((array, at)) = self.array_of(ty)
+        {
+            return format!("'{}'{at}", array.name);
+        }
+
         // A call is a value like any other, wherever one of its type is wanted.
         if self.rng.below(4) == 0
             && let Some(call) = self.call_of(ty)
@@ -547,6 +696,22 @@ impl Writer {
     }
 
     fn atom(&mut self, ty: Ty) -> String {
+        // An element of an array, where one is in reach. Taken most of the time it is
+        // offered rather than now and then: what makes this rare is having an array of
+        // the very type wanted, not the die, and rolling against it again buries the
+        // indexing the fuzzer is here for.
+        if self.rng.below(3) != 0
+            && let Some((array, at)) = self.array_of(ty)
+        {
+            return format!("'{}'{at}", array.name);
+        }
+        // How many an array holds, which answers in whatever wants it.
+        if ty.is_integer()
+            && self.rng.below(6) == 0
+            && let Some(array) = self.any_array()
+        {
+            return format!("count['{}']", array.name);
+        }
         match self.pick_of(ty) {
             Some(known) if self.rng.below(2) == 0 => format!("'{}'", known.name),
             // A literal that says what it is, which is the only kind that works where
@@ -632,6 +797,35 @@ impl Writer {
             return None;
         }
         Some(usable[self.rng.below(usable.len() as u64) as usize].clone())
+    }
+
+    /// Any array at all, for the things that do not mind what is in one.
+    fn any_array(&mut self) -> Option<Known> {
+        let usable: Vec<Known> =
+            self.scope.iter().filter(|known| known.ty.array().is_some()).cloned().collect();
+        if usable.is_empty() {
+            return None;
+        }
+        Some(usable[self.rng.below(usable.len() as u64) as usize].clone())
+    }
+
+    /// `set ['xs'[…]] = […];` — changing one element.
+    fn element_assignment(&mut self) {
+        let changeable: Vec<Known> = self
+            .scope
+            .iter()
+            .filter(|known| known.mutable && known.ty.array().is_some())
+            .cloned()
+            .collect();
+        if changeable.is_empty() {
+            self.print();
+            return;
+        }
+        let target = changeable[self.rng.below(changeable.len() as u64) as usize].clone();
+        let element = target.ty.array().expect("just filtered for one").element;
+        let at = self.indices_for(&target);
+        let value = self.value_of(element);
+        self.line(&format!("set ['{}'{at}] = [{value}];", target.name));
     }
 
     fn pick_changeable(&mut self) -> Option<Known> {
