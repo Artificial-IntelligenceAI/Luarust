@@ -653,6 +653,7 @@ A Luarust source file is `.lr`. Settings for a whole project live beside them in
 [defaults]
 no-visibility-stated = "error"
 overflow = "trap"
+float-printing = "exact"
 
 [build]
 embed-source = false
@@ -752,7 +753,23 @@ Every binary float has a finite one: it is `sig × 2^exp`, and a negative expone
 `sig × 5^k / 10^k`, so the point simply goes `k` places along an integer.
 
 Most languages print the shortest digits that would read back as the same number, which
-shows `0.1` and lets you believe it. A language that would rather not guess should not.
+shows `0.1` and lets you believe it. A language that would rather not guess should not —
+so that is the default, and the other way is a setting, because both are true and they
+only disagree about how much to say:
+
+```toml
+[defaults]
+float-printing = "shortest"
+```
+
+| | `"exact"` | `"shortest"` |
+| --- | --- | --- |
+| `b64 \|0.1\|` | `0.1000000000000000055511151231257827021181583404541015625` | `0.1` |
+| `b64 \|0.1\| + b64 \|0.2\|` | `0.3000000000000000444089209850062616169452667236328125` | `0.30000000000000004` |
+| `b64 \|0.25\|` | `0.25` | `0.25` |
+| `b128 \|1\| div b128 \|3\|` | 113 digits | 34 |
+
+Neither ever shows a `b128` at a `b64`'s width, which was the bug both of them fixed.
 
 | | prints |
 | --- | --- |

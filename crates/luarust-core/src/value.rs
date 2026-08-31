@@ -26,6 +26,34 @@ use crate::{BinOp, CmpOp, Ty};
 /// took two thousand without noticing. Every path in a given build still shares this one
 /// number, which is the property that matters; what it is depends on how much stack a
 /// frame of that build costs.
+/// How much of a binary float a program writes out.
+///
+/// Both answers are honest and they disagree about `b64 |0.1|`, which is why it is a
+/// setting rather than a decision made here. `[defaults] float-printing` in the project
+/// file chooses; this is where the choice is kept while a program runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Floats {
+    /// The value that is held, whole: `0.1000000000000000055511151231257827021181583404541015625`.
+    #[default]
+    Exact,
+    /// The fewest digits that name this number and no other, at its own format: `0.1`.
+    Shortest,
+}
+
+thread_local! {
+    static FLOATS: std::cell::Cell<Floats> = const { std::cell::Cell::new(Floats::Exact) };
+}
+
+/// Choose how floats are written out, for the rest of this program's run.
+pub fn set_floats(how: Floats) {
+    FLOATS.with(|it| it.set(how));
+}
+
+/// How floats are being written out.
+pub fn floats() -> Floats {
+    FLOATS.with(std::cell::Cell::get)
+}
+
 pub const DEPTH_LIMIT: usize = if cfg!(debug_assertions) { 100 } else { 2_000 };
 
 /// The working width every float format fits in. `b256` needs the most.
@@ -846,7 +874,11 @@ impl std::fmt::Display for Value {
                 let ty = self.ty();
                 let fmt_of = format_of(ty).expect("a float type has a format");
                 let bits = self.bits().expect("a float has bits");
-                match binary::text::to_text(fmt_of, bits) {
+                let written = match floats() {
+                    Floats::Exact => binary::text::to_text(fmt_of, bits),
+                    Floats::Shortest => binary::text::to_shortest(fmt_of, bits),
+                };
+                match written {
                     Some(written) => write!(f, "{written}"),
                     // Not a number and not a quantity: those are named, not written out.
                     None => {

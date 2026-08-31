@@ -171,6 +171,10 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
     // off by default, so a program that never said otherwise never collects and never
     // pays for a collector.
     luarust_core::heap::set_threshold(project.gc.threshold());
+    luarust_core::value::set_floats(match project.floats {
+        luarust_conf::Floats::Exact => luarust_core::value::Floats::Exact,
+        luarust_conf::Floats::Shortest => luarust_core::value::Floats::Shortest,
+    });
 
     if !errors.is_empty() {
         eprint!("{}", luarust_diag::report(&source, &errors));

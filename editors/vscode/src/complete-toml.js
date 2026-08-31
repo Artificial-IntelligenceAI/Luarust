@@ -18,6 +18,13 @@ const SETTINGS = {
           ['"trap"', "it stops the program and says so"],
         ],
       },
+      "float-printing": {
+        what: "how much of a binary float a program writes out",
+        values: [
+          ['"exact"', "the value it holds, whole -- `0.1` is not one tenth and says so"],
+          ['"shortest"', "the fewest digits that name it and no other, at its own format"],
+        ],
+      },
       "no-visibility-stated": {
         what: "what a declaration means when it says no visibility",
         values: [

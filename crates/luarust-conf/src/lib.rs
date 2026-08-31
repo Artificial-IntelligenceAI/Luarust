@@ -27,6 +27,29 @@ pub struct Project {
     pub dpd: bool,
     /// `[gc] mode` — whether a running program collects its dead arrays, and how eagerly.
     pub gc: Collect,
+    /// `[defaults] float-printing` — how much of a binary float a program writes out.
+    pub floats: Floats,
+}
+
+/// How much of a binary float a program writes out.
+///
+/// `0.1` is not representable in binary, so a `b64` holds the nearest value it has. Both
+/// answers below are true about that value and they disagree about what to say:
+///
+/// ```text
+///   exact      0.1000000000000000055511151231257827021181583404541015625
+///   shortest   0.1
+/// ```
+///
+/// Exact hides nothing, which is the same argument that put `er` in the language. Shortest
+/// is what most languages print and is far easier to read. Neither is wrong, so it is a
+/// setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Floats {
+    /// The value that is held, whole.
+    Exact,
+    /// The fewest digits that name this number and no other, at its own format.
+    Shortest,
 }
 
 /// What a program does about arrays nothing can reach any more.
@@ -73,6 +96,9 @@ impl Default for Project {
             // Off, because a program that never makes an array has nothing to collect and
             // should not carry a collector. Saying `"silent"` is what turns it on.
             gc: Collect::Off,
+            // Exact, because a program that would rather not guess should not print `0.1`
+            // for a number that is not one tenth.
+            floats: Floats::Exact,
         }
     }
 }
@@ -180,6 +206,11 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Some("dpd") => project.dpd = true,
                 _ => errors.push(bad_value(key, raw, span, "`\"bid\"` or `\"dpd\"`")),
             },
+            ("defaults", "float-printing") => match unquote(raw) {
+                Some("exact") => project.floats = Floats::Exact,
+                Some("shortest") => project.floats = Floats::Shortest,
+                _ => errors.push(bad_value(key, raw, span, "`\"exact\"` or `\"shortest\"`")),
+            },
             ("gc", "mode") => match unquote(raw) {
                 Some("off") => project.gc = Collect::Off,
                 Some("silent") => project.gc = Collect::Silent,
@@ -196,7 +227,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                     .primary(locate(body, start, key), "written here")
                     .rule("a project file sets only settings that exist")
                     .tip(match section.as_str() {
-                        "defaults" => "`[defaults]` has `overflow` and `no-visibility-stated`.",
+                        "defaults" => "`[defaults]` has `overflow`, `no-visibility-stated` and `float-printing`.",
                         "gc" => "`[gc]` has `mode`.",
                         _ => "`[build]` has `embed-source` and `decimal-encoding`.",
                     })
@@ -277,6 +308,17 @@ mod tests {
     fn the_decimal_encoding_can_be_chosen() {
         assert!(!clean("[build]\ndecimal-encoding = \"bid\"\n").dpd);
         assert!(clean("[build]\ndecimal-encoding = \"dpd\"\n").dpd);
+    }
+
+    #[test]
+    fn how_much_of_a_float_to_print_is_a_choice() {
+        assert_eq!(Project::default().floats, Floats::Exact, "exact unless asked otherwise");
+        assert_eq!(clean("[defaults]\nfloat-printing = \"exact\"\n").floats, Floats::Exact);
+        assert_eq!(clean("[defaults]\nfloat-printing = \"shortest\"\n").floats, Floats::Shortest);
+
+        let (_, errors) = read("[defaults]\nfloat-printing = \"some\"\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "C0005");
     }
 
     #[test]

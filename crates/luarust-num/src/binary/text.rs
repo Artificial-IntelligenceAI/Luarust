@@ -30,7 +30,7 @@
 //! put `er` in the language and made the decimal formats print their digits out: a value
 //! is shown as what it is, not as the text somebody typed to make it.
 
-use super::{Class, Format, unpack};
+use super::{Class, Format, Round, literal, unpack};
 use crate::big::Big;
 use crate::uint::Uint;
 
@@ -97,6 +97,74 @@ fn place(negative: bool, digits: &str, after_point: i32) -> String {
     }
     let (whole, fraction) = digits.split_at(digits.len() - after_point);
     format!("{sign}{whole}.{fraction}")
+}
+
+/// Round a run of digits to `keep` of them, carrying where it must.
+///
+/// Returns the kept digits and how far the point moved, which is one place when a carry
+/// runs off the end -- `999` to two digits is `10`, and the value is ten times the digits.
+fn shorten(digits: &str, keep: usize) -> (String, i32) {
+    if keep >= digits.len() {
+        return (digits.to_string(), 0);
+    }
+    let bytes = digits.as_bytes();
+    let mut kept: Vec<u8> = bytes[..keep].to_vec();
+
+    if bytes[keep] >= b'5' {
+        let mut at = keep;
+        loop {
+            if at == 0 {
+                kept.insert(0, b'1');
+                kept.pop();
+                return (String::from_utf8(kept).expect("digits"), 1);
+            }
+            at -= 1;
+            if kept[at] == b'9' {
+                kept[at] = b'0';
+            } else {
+                kept[at] += 1;
+                break;
+            }
+        }
+    }
+    (String::from_utf8(kept).expect("digits"), 0)
+}
+
+/// A finite float as the shortest decimal that reads back as itself.
+///
+/// The other way of writing one: the fewest digits that name this number and no other at
+/// this format. `b64 |0.1|` is `0.1` again, and a `b128` still shows its own thirty-four
+/// rather than a `b64`'s seventeen -- what it does not do is show that `0.1` is not one
+/// tenth, which is the whole of the difference between the two.
+///
+/// Finding it is a loop: round the exact digits to one significant digit, read it back,
+/// and if it is not the same number try two. Reading back uses the same correctly-rounded
+/// parser a program's own literals go through, so "reads back" means exactly that.
+pub fn to_shortest<const W: usize>(fmt: Format, bits: Uint<W>) -> Option<String> {
+    let taken = unpack(fmt, bits);
+    match taken.class {
+        Class::Nan | Class::Infinite => return None,
+        Class::Zero => return Some(if taken.sign { "-0".to_string() } else { "0".to_string() }),
+        _ => {}
+    }
+
+    let (digits, after_point) = exact(taken.sig, taken.exp);
+    let trimmed = digits.trim_start_matches('0');
+    let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+    let lost = digits.len() - trimmed.len();
+
+    // The exact form always reads back, so this ends; it stops at the first width that
+    // does, which is the shortest.
+    for keep in 1..=trimmed.len() {
+        let (shortened, carried) = shorten(trimmed, keep);
+        let dropped = trimmed.len() - keep;
+        let point = after_point as i32 - lost as i32 - dropped as i32 + carried;
+        let written = place(taken.sign, &shortened, point);
+        if literal::from_decimal::<W>(fmt, Round::TiesToEven, &written) == Ok(bits) {
+            return Some(written);
+        }
+    }
+    Some(place(taken.sign, &digits, after_point as i32))
 }
 
 /// A finite float, written out exactly.
@@ -179,6 +247,34 @@ mod tests {
                 assert_eq!(back, Ok(bits), "{} wrote {text} as {written}", fmt.name);
             }
         }
+    }
+
+    /// Both ways of writing a float name the same number.
+    ///
+    /// Which is the point of offering both: they disagree about how much to say, never
+    /// about what is true. Whatever either writes reads back as the number it came from.
+    #[test]
+    fn exact_and_shortest_are_the_same_number() {
+        for fmt in [Format::B16, Format::B32, Format::B64, Format::B128] {
+            for text in ["0.1", "1", "0.25", "3", "-7.25", "12345.6789"] {
+                let bits = literal::from_decimal::<8>(fmt, Round::TiesToEven, text).expect("read");
+                let long = to_text(fmt, bits).expect("finite");
+                let short = to_shortest(fmt, bits).expect("finite");
+                assert!(short.len() <= long.len(), "{short} is not shorter than {long}");
+                for written in [&long, &short] {
+                    assert_eq!(
+                        literal::from_decimal::<8>(fmt, Round::TiesToEven, written),
+                        Ok(bits),
+                        "{} wrote {text} as {written}",
+                        fmt.name
+                    );
+                }
+            }
+        }
+        // And the difference they exist for.
+        let tenth = literal::from_decimal::<8>(Format::B64, Round::TiesToEven, "0.1").expect("r");
+        assert_eq!(to_shortest(Format::B64, tenth).unwrap(), "0.1");
+        assert!(to_text(Format::B64, tenth).unwrap().len() > 50, "the exact one is long");
     }
 
     /// The one place printing outruns reading, recorded rather than hidden.
