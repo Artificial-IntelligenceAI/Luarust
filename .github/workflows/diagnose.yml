@@ -1,14 +1,14 @@
 # Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
 #
-# Round 1 (in this file's history) killed the divide-latency hypothesis: C with a real
-# idiv per iteration ran as fast as C with the strength-reduced constant, on the same
-# runner where the interpreters lose 2.6-5x per iteration against the M5 -- and the
-# add-only loop, which divides nothing, already carries most of the penalty.
+# Round 1 killed the divide-latency hypothesis. Round 2's same-op-count control showed
+# the mod op costs no more than a subtract, and its profiles found the time: 16-byte SSE
+# stores of Value and Result structs to the stack, with int_op's jump-table dispatch
+# second. The interpreters move structs through memory on the dependent chain; Apple
+# silicon forwards store-to-load at nearly no cost, Zen 4 charges every hop.
 #
-# Round 2 asks where the time actually goes: perf record on a task-clock software event,
-# which works where the runner's PMU does not, over the add and mod loops in both
-# interpreters. Plus a same-op-count subtract control, so op count and op kind stop
-# being one variable.
+# Round 3 measures the first fix: HEAD boxes the Fault inside Stopped (Result<Value,
+# Stopped> falls 96 -> 32 bytes), HEAD^ does not. Both are built and timed in the same
+# sitting, since the runner's numbers move by a third between sittings.
 name: diagnose
 
 on:
@@ -18,19 +18,27 @@ on:
 
 jobs:
   diagnose:
-    name: where x86-64 spends it
+    name: boxed against unboxed, on x86-64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
 
       - name: Machine
         run: |
           uname -m; nproc
           grep -m1 "model name" /proc/cpuinfo || true
-          lscpu | grep -E "MHz|BogoMIPS" || true
 
-      - name: Build Luarust
-        run: cargo build --release -p luarust-cli
+      - name: Build both
+        run: |
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-boxed
+          git checkout HEAD^ -- crates/
+          cargo build --release -p luarust-cli
+          cp target/release/luarust luarust-unboxed
+          git checkout HEAD -- crates/
+          cmp -s luarust-boxed luarust-unboxed && echo "::error::the two builds are identical" || true
 
       - name: Programs
         run: |
@@ -49,62 +57,38 @@ jobs:
           }
           print['sum'];
           EOF
-          cat > add2loop.lr <<EOF
-          var.local.mut.i64 ['sum'] = [|0|];
-          loop.temp.range.i64 ['i'] = [|1|, |$N|] {
-              set ['sum'] = [math { ('sum' + 'i') - 1000000007 }];
-          }
-          print['sum'];
-          EOF
-          cat > bench_divmod.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          int main(int argc, char **argv) {
-              long n = atol(argv[1]), m = atol(argv[2]), sum = 0;
-              for (long i = 1; i <= n; i++) sum = (sum + i) % m;
-              printf("%ld", sum);
-              return 0;
-          }
-          EOF
-          sed -i 's/^          //' bench_divmod.c
-          cc -O2 -o bench_divmod bench_divmod.c
-          echo "--- idiv really is in the C control's loop:"
-          objdump -d bench_divmod | grep -c idiv
 
-      - name: Times
+      - name: Times, interleaved
         run: |
           set +e
-          bench() {
-            local name="$1"; shift
-            local best=99999999 out=""
-            for _ in 1 2 3; do
-              local t0=$(date +%s%N)
-              out=$("$@" 2>&1 | tr -d '\n')
-              local t1=$(date +%s%N)
-              local ms=$(( (t1 - t0) / 1000000 ))
-              [ "$ms" -lt "$best" ] && best=$ms
+          declare -A best last_out
+          for round in 1 2 3; do
+            for v in unboxed boxed; do
+              for prog in modloop addloop; do
+                for eng in run interp; do
+                  t0=$(date +%s%N)
+                  out=$(./luarust-$v $eng $prog.lr | tr -d '\n')
+                  t1=$(date +%s%N)
+                  ms=$(( (t1 - t0) / 1000000 ))
+                  key="$v $eng $prog"
+                  cur=${best[$key]:-99999999}
+                  [ "$ms" -lt "$cur" ] && best[$key]=$ms
+                  last_out[$key]=$out
+                done
+              done
             done
-            printf "%-24s %7s ms   %s\n" "$name" "$best" "$out"
-          }
-          LR=./target/release/luarust
-          bench "C argv mod (idiv)"  ./bench_divmod 100000000 1000000007
-          bench "VM mod"             $LR run modloop.lr
-          bench "VM add2 (sub)"      $LR run add2loop.lr
-          bench "VM add"             $LR run addloop.lr
-          bench "interp mod"         $LR interp modloop.lr
-          bench "interp add2 (sub)"  $LR interp add2loop.lr
-          bench "interp add"         $LR interp addloop.lr
+          done
+          for key in "${!best[@]}"; do
+            printf "%-28s %7s ms   %s\n" "$key" "${best[$key]}" "${last_out[$key]}"
+          done | sort
 
-      - name: Profiles
+      - name: Profile the boxed build
         run: |
           set +e
           sudo apt-get install -y -qq linux-tools-common linux-tools-generic >/dev/null 2>&1
           PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | head -1)
           [ -z "$PERF" ] && PERF=perf
-          $PERF --version
           sudo sysctl -w kernel.perf_event_paranoid=1 >/dev/null 2>&1
-          sudo sysctl -w kernel.kptr_restrict=0 >/dev/null 2>&1
-          LR=./target/release/luarust
           mkdir -p prof
           profile() {
             local tag="$1"; shift
@@ -112,8 +96,6 @@ jobs:
             $PERF record -q -o "$tag.data" -F 997 -e task-clock "$@" >/dev/null 2>&1
             $PERF report -i "$tag.data" --stdio --percent-limit 1 2>/dev/null \
               | grep -v "^#" | grep -v "^$" | head -15 | tee "prof/$tag.report"
-            # The full instruction-level story goes to the artifact, where nothing
-            # truncates it. The log only carries the per-symbol summary above.
             $PERF report -i "$tag.data" --stdio --percent-limit 5 2>/dev/null \
               | awk '$1 ~ /%/ { $1=""; $2=""; $3=""; $4=""; print }' \
               | while read -r sym; do
@@ -121,14 +103,13 @@ jobs:
                   $PERF annotate -i "$tag.data" --stdio --percent-limit 0.2 --symbol="$sym" >> "prof/$tag.annotate" 2>/dev/null
                 done
           }
-          profile vm-add     $LR run addloop.lr
-          profile vm-mod     $LR run modloop.lr
-          profile interp-add $LR interp addloop.lr
-          profile interp-mod $LR interp modloop.lr
+          profile boxed-vm-add     ./luarust-boxed run addloop.lr
+          profile boxed-vm-mod     ./luarust-boxed run modloop.lr
+          profile boxed-interp-mod ./luarust-boxed interp modloop.lr
           exit 0
 
       - name: Keep the annotated profiles
         uses: actions/upload-artifact@v4
         with:
-          name: profiles
+          name: profiles-boxed
           path: prof/
