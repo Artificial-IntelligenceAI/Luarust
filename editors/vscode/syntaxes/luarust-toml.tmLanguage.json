@@ -28,7 +28,7 @@
       "name": "comment.line.number-sign.luarust-toml"
     },
     "section": {
-      "match": "^\\s*\\[\\s*(defaults|build|gc)\\s*\\]",
+      "match": "^\\s*\\[\\s*(defaults|run|build|gc)\\s*\\]",
       "captures": {
         "0": {
           "name": "entity.name.section.luarust-toml"
@@ -44,7 +44,7 @@
       }
     },
     "value": {
-      "match": "\"(exact|shortest|wrap|trap|restricted|error|bid|dpd|off|silent|aggressive)\"",
+      "match": "\"(vm|whole|exact|shortest|wrap|trap|restricted|error|bid|dpd|off|silent|aggressive)\"",
       "name": "constant.language.luarust-toml"
     },
     "boolean": {

@@ -29,6 +29,22 @@ pub struct Project {
     pub gc: Collect,
     /// `[defaults] float-printing` — how much of a binary float a program writes out.
     pub floats: Floats,
+    /// `[run] mode` — which engine runs the chunk.
+    pub engine: Engine,
+}
+
+/// Which engine runs a chunk.
+///
+/// A project says how it wants its programs run, and the chunk carries the answer, so a
+/// machine with only `luarust-run` on it does what the project asked. A build with no JIT
+/// in it runs the VM whatever the chunk says -- the setting is a preference, and a
+/// preference that cannot be met is not an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// The bytecode, interpreted.
+    Vm,
+    /// All of it compiled through LLVM before anything starts.
+    Whole,
 }
 
 /// How much of a binary float a program writes out.
@@ -99,6 +115,9 @@ impl Default for Project {
             // Exact, because a program that would rather not guess should not print `0.1`
             // for a number that is not one tenth.
             floats: Floats::Exact,
+            // The VM, because it needs nothing and starts at once. Asking for `"whole"`
+            // is asking for LLVM, and that should be said rather than assumed.
+            engine: Engine::Vm,
         }
     }
 }
@@ -145,7 +164,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
         // A table header. Nothing here nests, so the name is taken whole.
         if let Some(name) = trimmed.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
             let name = name.trim();
-            if !matches!(name, "defaults" | "build" | "gc") {
+            if !matches!(name, "defaults" | "build" | "gc" | "run") {
                 errors.push(
                     Diagnostic::new("C0001", format!("there is no `[{name}]` section."))
                         .primary(locate(body, start, trimmed), "written here")
@@ -211,6 +230,11 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Some("shortest") => project.floats = Floats::Shortest,
                 _ => errors.push(bad_value(key, raw, span, "`\"exact\"` or `\"shortest\"`")),
             },
+            ("run", "mode") => match unquote(raw) {
+                Some("vm") => project.engine = Engine::Vm,
+                Some("whole") => project.engine = Engine::Whole,
+                _ => errors.push(bad_value(key, raw, span, "`\"vm\"` or `\"whole\"`")),
+            },
             ("gc", "mode") => match unquote(raw) {
                 Some("off") => project.gc = Collect::Off,
                 Some("silent") => project.gc = Collect::Silent,
@@ -229,6 +253,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                     .tip(match section.as_str() {
                         "defaults" => "`[defaults]` has `overflow`, `no-visibility-stated` and `float-printing`.",
                         "gc" => "`[gc]` has `mode`.",
+                        "run" => "`[run]` has `mode`.",
                         _ => "`[build]` has `embed-source` and `decimal-encoding`.",
                     })
                     .fix("delete it, or correct the spelling."),
@@ -308,6 +333,19 @@ mod tests {
     fn the_decimal_encoding_can_be_chosen() {
         assert!(!clean("[build]\ndecimal-encoding = \"bid\"\n").dpd);
         assert!(clean("[build]\ndecimal-encoding = \"dpd\"\n").dpd);
+    }
+
+    #[test]
+    fn which_engine_runs_it_is_the_projects_call() {
+        assert_eq!(Project::default().engine, Engine::Vm, "the VM unless asked otherwise");
+        assert_eq!(clean("[run]\nmode = \"vm\"\n").engine, Engine::Vm);
+        assert_eq!(clean("[run]\nmode = \"whole\"\n").engine, Engine::Whole);
+
+        // `hot` is the next engine and does not exist. Naming it in a project file should
+        // say so, not quietly do something else.
+        let (_, errors) = read("[run]\nmode = \"hot\"\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "C0005");
     }
 
     #[test]

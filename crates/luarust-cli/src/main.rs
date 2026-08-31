@@ -169,6 +169,10 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
                     luarust_conf::Floats::Exact => luarust_core::value::Floats::Exact,
                     luarust_conf::Floats::Shortest => luarust_core::value::Floats::Shortest,
                 },
+                engine: match project.engine {
+                    luarust_conf::Engine::Vm => luarust_core::value::Engine::Vm,
+                    luarust_conf::Engine::Whole => luarust_core::value::Engine::Whole,
+                },
             };
             let (program, problems) = luarust_check::check_with(&parsed.program, start);
             errors.extend(problems);
@@ -215,7 +219,7 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         Then::Run => {
             let chunk = luarust_vm::compile(&program);
             let mut out = std::io::stdout().lock();
-            finish(luarust_vm::run(&chunk, &mut out), &mut out, &source)
+            finish(run_as_asked(&chunk, &mut out), &mut out, &source)
         }
 
         Then::Interpret => {
@@ -281,7 +285,7 @@ fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
         Then::Run => {
             let source = loaded.source.file(loaded.path.clone());
             let mut out = std::io::stdout().lock();
-            finish(luarust_vm::run(&loaded.chunk, &mut out), &mut out, &source)
+            finish(run_as_asked(&loaded.chunk, &mut out), &mut out, &source)
         }
         // The JIT reads bytecode now, so a chunk off disk is exactly what it wants. The
         // same file the VM runs, compiled to machine code instead of interpreted.
@@ -322,6 +326,27 @@ fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Run a chunk the way its project asked to have it run.
+///
+/// `[run] mode` is a preference, not an instruction. A build with no JIT in it runs the VM
+/// whatever the chunk says, and so does a program the JIT declines — there is no sense in
+/// refusing to run something because the fastest way of running it is unavailable.
+fn run_as_asked(
+    chunk: &luarust_vm::Chunk,
+    out: &mut impl std::io::Write,
+) -> Result<(), luarust_check::value::Stopped> {
+    #[cfg(feature = "jit")]
+    if chunk.engine == luarust_core::value::Engine::Whole {
+        match luarust_jit::run(chunk, out) {
+            Ok(outcome) => return outcome,
+            Err(declined) => {
+                eprintln!("the JIT declined this program: {}. Running it on the VM.", declined.because);
+            }
+        }
+    }
+    luarust_vm::run(chunk, out)
 }
 
 /// Find and read the `Luarust.toml` for a file, if its project has one.

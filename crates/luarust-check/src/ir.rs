@@ -5,7 +5,7 @@
 //! an interpreter, a bytecode compiler and a JIT can each take this and none of them has
 //! to work out the same things again, or risk working them out differently.
 
-use crate::value::{Floats, Overflow, Value};
+use crate::value::{Engine, Floats, Overflow, Value};
 use luarust_core::heap::Collect;
 use luarust_diag::Span;
 use luarust_parse::ast::{BinOp, CmpOp, LogicOp, Ty};
@@ -26,6 +26,8 @@ pub struct Checked {
     /// keeps its own answers wherever it is run.
     pub collect: Collect,
     pub floats: Floats,
+    /// Which engine the project asked to run this with.
+    pub engine: Engine,
 }
 
 /// One function, with its own slots. The first `params` of them are its parameters, in

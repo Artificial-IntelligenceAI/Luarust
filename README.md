@@ -436,6 +436,9 @@ asked for**:
 ```toml
 [gc]
 mode = "silent"
+
+[run]
+mode = "whole"
 ```
 
 `"off"` never collects, `"silent"` collects when a megabyte has been handed out since the
@@ -728,12 +731,29 @@ wherever it is run, on a machine that has never seen the `Luarust.toml` it was b
 under.
 
 The JIT is a different case, and not a fourth thing left out of the runtime because it is
-only for development. **How a shipped program runs is a choice, and there are three of
-them.** The same `.lrc` runs on the VM, or through the JIT, or — eventually — as native
-code compiled ahead of time. A program that starts, does a little and exits wants the VM,
-where nothing is spent compiling. A program that runs for hours wants the JIT, where 25 ms
-of LLVM buys four times the speed for the rest of the day. Neither is the development
-answer and the other the real one.
+only for development. **How a shipped program runs is the project's choice**, written in
+its project file and carried in the chunk:
+
+```toml
+[run]
+mode = "vm"      # the bytecode, interpreted; nothing is compiled
+mode = "whole"   # all of it through LLVM before it starts
+```
+
+A program that starts, does a little and exits wants `"vm"`, where nothing is spent
+compiling. A program that runs for hours wants `"whole"`, where 25 ms of LLVM buys several
+times the speed for the rest of the day. Neither is the development answer and the other
+the real one. On a twenty-million-iteration loop, the same command and the same file:
+
+```
+mode = "vm"      2324 ms
+mode = "whole"    260 ms
+```
+
+It is a **preference, not an instruction**. `luarust-run` has no JIT linked into it and is
+not meant to, so a chunk asking for `"whole"` runs on the VM there and says nothing about
+it — refusing to run a program because the fastest way of running it is unavailable would
+help nobody. The same happens when the JIT declines a program.
 
 What the sizes above argue is narrower, and it is the same rule as everywhere else: a
 program that will not use the JIT should not be carrying it. LLVM is fifty times the size

@@ -42,6 +42,9 @@ fn main() -> ExitCode {
     };
 
     let mut out = std::io::stdout().lock();
+    // Whatever `[run] mode` the chunk carries, this runs the VM: there is no JIT linked
+    // into the runtime and there is not meant to be. A program asking for `"whole"` gets
+    // the answer it asked for, more slowly, which is the whole of what a preference means.
     let outcome = luarust_vm::run(&loaded.chunk, &mut out);
     let _ = out.flush();
 

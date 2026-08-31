@@ -6,7 +6,7 @@
 //! allocated before compilation starts.
 
 use luarust_core::heap::Collect;
-use luarust_core::value::{Floats, Overflow, Value};
+use luarust_core::value::{Engine, Floats, Overflow, Value};
 use luarust_diag::Span;
 use luarust_core::{BinOp, CmpOp, Ty};
 
@@ -86,6 +86,9 @@ pub struct Chunk {
     /// are decisions the project made, and `luarust-run` has no project file to read.
     pub collect: Collect,
     pub floats: Floats,
+    /// Which engine the project asked for. A build that has not got it runs the VM
+    /// instead: a preference that cannot be met is not an error.
+    pub engine: Engine,
     /// Every function, each with its own code and its own register file. The constants
     /// and the texts are shared, because they are the same values wherever they appear.
     pub funcs: Vec<Routine>,

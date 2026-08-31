@@ -26,6 +26,37 @@ use crate::{BinOp, CmpOp, Ty};
 /// took two thousand without noticing. Every path in a given build still shares this one
 /// number, which is the property that matters; what it is depends on how much stack a
 /// frame of that build costs.
+/// How a program runs, once it is a chunk.
+///
+/// Not *what* is produced -- that is `[build] output`, and a native binary consults none
+/// of this. These are the ways of running the same `.lrc`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Engine {
+    /// The bytecode, interpreted. Nothing is compiled, so nothing is spent compiling.
+    #[default]
+    Vm,
+    /// All of it compiled through LLVM before anything starts. Full speed from the first
+    /// iteration, and it pays to compile routines that never run.
+    Whole,
+}
+
+impl Engine {
+    pub fn tag(self) -> u32 {
+        match self {
+            Engine::Vm => 0,
+            Engine::Whole => 1,
+        }
+    }
+
+    pub fn from_tag(tag: u32) -> Option<Engine> {
+        Some(match tag {
+            0 => Engine::Vm,
+            1 => Engine::Whole,
+            _ => return None,
+        })
+    }
+}
+
 /// How much of a binary float a program writes out.
 ///
 /// Both answers are honest and they disagree about `b64 |0.1|`, which is why it is a

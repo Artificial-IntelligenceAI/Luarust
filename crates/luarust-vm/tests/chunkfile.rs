@@ -233,8 +233,22 @@ fn a_chunk_can_be_written_without_its_source_and_still_know_the_line() {
 fn a_line_table_that_could_not_have_come_from_a_file_is_refused() {
     let chunk = compiled(COUNTING);
     let mut bytes = serialize::write_with(&chunk, "t.lr", COUNTING, false, false);
+
+    // Where the line table begins: the magic, then a word each for the version, overflow,
+    // collecting, float printing and the engine, then the register count, then the path,
+    // then the flag saying there is no source and the count of lines.
+    let table = 8 + (4 * 6) + (4 + "t.lr".len()) + 4 + 4;
+
+    // Checked rather than trusted. This is a byte offset into a format that grows a field
+    // now and then, and a test that pokes the wrong four bytes still passes for the wrong
+    // reason -- which is exactly what happened when `[run] mode` was added.
+    assert_eq!(
+        u32::from_le_bytes(bytes[table..table + 4].try_into().expect("four bytes")),
+        0,
+        "the first line begins at nought, so this is not the line table any more"
+    );
+
     // The first line has to begin at nought. Say it began somewhere else.
-    let table = 8 + 4 + 4 + 4 + (4 + "t.lr".len()) + 4 + 4;
     bytes[table..table + 4].copy_from_slice(&7u32.to_le_bytes());
     assert!(serialize::read(&bytes).is_err(), "a bogus line table must be refused");
 }

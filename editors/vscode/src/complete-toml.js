@@ -53,6 +53,18 @@ const SETTINGS = {
       },
     },
   },
+  run: {
+    what: "how a chunk is run, once it is one",
+    keys: {
+      mode: {
+        what: "which engine runs it",
+        values: [
+          ['"vm"', "the bytecode, interpreted -- nothing is compiled and nothing is spent compiling"],
+          ['"whole"', "all of it through LLVM before it starts -- full speed from the first iteration"],
+        ],
+      },
+    },
+  },
   gc: {
     what: "whether a running program collects the arrays nothing can reach",
     keys: {

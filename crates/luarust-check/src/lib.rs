@@ -16,7 +16,7 @@ pub mod ir;
 // needs the checker only before it does. It is still named from here.
 pub use luarust_core::value;
 
-use crate::value::Floats;
+use crate::value::{Engine, Floats};
 use ir::Checked;
 use luarust_core::heap::Collect;
 use luarust_diag::{Diagnostic, Span};
@@ -46,6 +46,7 @@ pub struct Start {
     pub visibility_required: bool,
     pub collect: Collect,
     pub floats: Floats,
+    pub engine: Engine,
 }
 
 impl Default for Start {
@@ -55,6 +56,7 @@ impl Default for Start {
             visibility_required: false,
             collect: Collect::Off,
             floats: Floats::Exact,
+            engine: Engine::Vm,
         }
     }
 }
@@ -75,6 +77,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         overflow: start.overflow,
         collect: start.collect,
         floats: start.floats,
+        engine: start.engine,
         visibility_required: start.visibility_required,
         signatures: HashMap::new(),
         funcs: Vec::new(),
@@ -106,6 +109,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         overflow: checker.overflow,
         collect: checker.collect,
         floats: checker.floats,
+        engine: checker.engine,
     };
     (checked, checker.errors)
 }
@@ -116,6 +120,7 @@ struct Checker {
     overflow: Overflow,
     collect: Collect,
     floats: Floats,
+    engine: Engine,
     visibility_required: bool,
     /// Every function's name, and where it sits in `funcs`.
     signatures: HashMap<String, Signature>,
