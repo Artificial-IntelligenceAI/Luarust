@@ -3,7 +3,7 @@ Project under development, stable use not recommended, stability is **not a guar
 
 **Luarust** is a **Lua ripoff** focused on performance, device support, explicit syntax, and very helpful error messages (unlike fucking `C`, joking 😂).
 
-Luarust's method is focused on compile once, run anywhere (Like Java's), boosting its performance via JIT compilation, with **LLVM** doing the code generation. The final product only contains what is needed (unlike fucking `Go`, joking, again 😂)
+Luarust's method is focused on compile once, run anywhere (Like Java's), and then letting the project pick how that one file runs. Two ways exist today — the **bytecode VM**, which compiles nothing and starts at once, and the **whole-chunk JIT**, which puts every routine through **LLVM** before anything starts, so it is at full speed on the first iteration. Two more are planned: a **hot JIT** that compiles only what runs often, the way Java's does, and **native** output compiled ahead of time, which needs no LLVM on the machine that runs it at all. **LLVM** does the code generation for all three of the compiled ones. There is also a **tree-walking interpreter**, which is not a way of shipping anything — it is the reference the other paths are checked against, and all of them must agree bit for bit. The final product only contains what is needed (unlike fucking `Go`, joking, again 😂)
 
 So, to put it simply. Luarust is a computer language that has **very helpful error messages**, and **could run basically anywhere**, **without sacrificing much performance**.
 
