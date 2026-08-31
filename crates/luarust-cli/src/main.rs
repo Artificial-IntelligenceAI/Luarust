@@ -55,6 +55,20 @@ fn main() -> ExitCode {
         #[cfg(feature = "jit")]
         Some("ir") => Then::Ir,
         Some("check") => Then::Nothing,
+
+        // A build without the JIT still knows the word, so that asking for something it
+        // was built without is answered rather than met with the usage text. Printing the
+        // usage says "you typed something wrong", and the typing was fine.
+        #[cfg(not(feature = "jit"))]
+        Some(asked @ ("jit" | "ir")) => {
+            eprintln!(
+                "this build has no JIT, so it cannot `{asked}`. It was built without the \
+                 `jit` feature:\n\n    \
+                 cargo build --release -p luarust-cli --features jit\n\n\
+                 which needs LLVM 21. `luarust run` works either way."
+            );
+            return ExitCode::from(2);
+        }
         Some("fuzz") => {
             let count = path
                 .as_ref()

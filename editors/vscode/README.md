@@ -99,7 +99,17 @@ Symlink it into VS Code's extensions folder and restart:
 ln -s "$PWD/editors/vscode" ~/.vscode/extensions/luarust
 ```
 
-Then set `luarust.path` to the built binary, since it is unlikely to be on `PATH`:
+Build it **with the JIT** if you want the JIT command to work, since the feature is what
+puts the subcommand in:
+
+```bash
+LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 \
+  cargo build --release -p luarust-cli --features jit
+```
+
+A build without it says so when asked, rather than printing its usage as though you had
+mistyped something. Then set `luarust.path` to the binary, since it is unlikely to be on
+`PATH`:
 
 ```json
 { "luarust.path": "/Users/ts/Luarust/target/release/luarust" }
