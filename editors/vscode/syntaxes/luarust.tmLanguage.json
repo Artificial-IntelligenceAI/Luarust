@@ -1,0 +1,149 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Luarust",
+  "scopeName": "source.luarust",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#text"
+    },
+    {
+      "include": "#literal"
+    },
+    {
+      "include": "#name"
+    },
+    {
+      "include": "#escape"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#control"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "#chain"
+    },
+    {
+      "include": "#operator-word"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#setting"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "--.*$",
+      "name": "comment.line.double-dash.luarust"
+    },
+    "text": {
+      "name": "string.quoted.double.luarust",
+      "begin": "\"",
+      "end": "\"|$",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.luarust"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.luarust"
+        }
+      }
+    },
+    "literal": {
+      "patterns": [
+        {
+          "name": "constant.other.literal.luarust",
+          "begin": "\\|",
+          "end": "\\||$",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.literal.luarust"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.literal.luarust"
+            }
+          }
+        },
+        {
+          "name": "constant.other.literal.luarust",
+          "begin": "`",
+          "end": "`|$"
+        }
+      ]
+    },
+    "name": {
+      "name": "variable.other.luarust",
+      "begin": "'",
+      "end": "'|$",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.variable.luarust"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.variable.luarust"
+        }
+      }
+    },
+    "escape": {
+      "match": "\\\\[a-zA-Z0-9]+",
+      "name": "constant.character.escape.luarust"
+    },
+    "type": {
+      "match": "\\b(nothing|b128|b256|d128|ui16|ui32|ui64|bool|b16|b32|b64|d32|d64|i16|i32|i64|ui8|str|er|i8)\\b",
+      "name": "support.type.luarust"
+    },
+    "control": {
+      "match": "\\b(handback|else-if|reached|return|while|range|break|else|loop|temp|perm|when|if)\\b",
+      "name": "keyword.control.luarust"
+    },
+    "declaration": {
+      "match": "\\b(defaults|print|math|var|set|fn)\\b",
+      "name": "keyword.other.luarust"
+    },
+    "chain": {
+      "match": "\\b(restricted|global|public|filled|local|array|count|mut)\\b",
+      "name": "storage.modifier.luarust"
+    },
+    "operator-word": {
+      "match": "\\b(bigger|total|time|and|not|div|mod|pow|now|or|xx|as)\\b",
+      "name": "keyword.operator.word.luarust"
+    },
+    "constant": {
+      "match": "\\b(false|true)\\b",
+      "name": "constant.language.luarust"
+    },
+    "setting": {
+      "match": "\\b(no-visibility-stated|overflow|error|trap|wrap)\\b",
+      "name": "support.constant.luarust"
+    },
+    "number": {
+      "match": "\\b\\d[\\d_]*(\\.\\d+)?\\b",
+      "name": "constant.numeric.luarust"
+    },
+    "operator": {
+      "match": "(</=|>/=|<=|>=|!=|\u2264|\u2265|\u2260|\\*\\*|[+\\-*/%<>=]|\u00f7)",
+      "name": "keyword.operator.luarust"
+    }
+  }
+}

@@ -96,6 +96,24 @@ jobs:
           rustup component add clippy
           cargo clippy -p luarust-jit --all-targets -- -D warnings
 
+  editor:
+    name: editor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The grammar is a copy of what the compiler already decides, and a copy left alone
+      # goes stale quietly. This is what stops that.
+      - name: The grammar knows every word the compiler does
+        run: python3 editors/vscode/check-grammar.py
+      - name: The extension is valid JSON and valid JavaScript
+        run: |
+          for f in editors/vscode/package.json \
+                   editors/vscode/language-configuration.json \
+                   editors/vscode/syntaxes/luarust.tmLanguage.json; do
+            python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$f"
+          done
+          node --check editors/vscode/src/extension.js
+
   lint:
     name: clippy
     runs-on: ubuntu-latest

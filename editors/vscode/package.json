@@ -1,0 +1,50 @@
+{
+  "name": "luarust",
+  "displayName": "Luarust",
+  "description": "Syntax highlighting and live checking for Luarust.",
+  "version": "0.0.1",
+  "publisher": "tankun-sriket",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "luarust",
+        "aliases": ["Luarust", "luarust"],
+        "extensions": [".lr"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "luarust",
+        "scopeName": "source.luarust",
+        "path": "./syntaxes/luarust.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Luarust",
+      "properties": {
+        "luarust.path": {
+          "type": "string",
+          "default": "luarust",
+          "description": "The `luarust` command. An absolute path if it is not on PATH."
+        },
+        "luarust.checkOn": {
+          "type": "string",
+          "enum": ["save", "type", "never"],
+          "default": "save",
+          "description": "When to run `luarust check`. `type` checks a moment after you stop typing."
+        }
+      }
+    },
+    "commands": [
+      { "command": "luarust.check", "title": "Luarust: Check this file" },
+      { "command": "luarust.run", "title": "Luarust: Run this file" },
+      { "command": "luarust.jit", "title": "Luarust: Run this file through the JIT" },
+      { "command": "luarust.dis", "title": "Luarust: Show the bytecode" }
+    ]
+  }
+}
