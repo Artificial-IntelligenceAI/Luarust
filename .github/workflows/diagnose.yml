@@ -1,9 +1,9 @@
 # Manual only, and temporary: the x86-64 interpreter investigation on fable/perf.
 #
-# Round 7: probe v2. Round 5 acquitted width-matched store-to-load hops; the VM's
-# hottest instruction is a WIDE store read back narrow. The M5 charges ~0.6 ns/iter
-# extra for that shape (narrow 160 ms, wide 224 at N=1e8). Whatever this runner
-# charges beyond its own narrow column is the last mechanism still standing.
+# Round 7, second attempt: the first died on an unguarded grep -c that found zero SSE
+# stores -- gcc had split the struct copy into two 8-byte moves, so the wide loop was
+# not wide. memcpy forces the single 16-byte store, and the count is printed rather
+# than trusted. M5 with the same source: narrow ~189 ms, wide ~228 at N=1e8.
 name: diagnose
 
 on:
@@ -22,6 +22,7 @@ jobs:
           grep -m1 "model name" /proc/cpuinfo || true
       - name: Probe
         run: |
+          set +e
           cat > forward2.c <<'CEOF'
           // Probe v2: the exact store shape the VM emits, against the friendly one.
           //
@@ -34,6 +35,7 @@ jobs:
           // column shows it; the VM's hottest instruction is exactly that wide store.
           #include <stdio.h>
           #include <stdlib.h>
+          #include <string.h>
           #include <time.h>
 
           struct V { unsigned char disc; unsigned short ty; unsigned long bits; };
@@ -66,11 +68,11 @@ jobs:
               sum = 0;
               for (long i = 1; i <= n; i++) {
                   struct V t = { 1, 3, sum + i };
-                  regs[2] = t;
+                  __builtin_memcpy(&regs[2], &t, 16);
                   __asm__ volatile("" ::: "memory");
                   unsigned char d = regs[2].disc;
                   struct V u = { d, 3, regs[2].bits };
-                  regs[0] = u;
+                  __builtin_memcpy(&regs[0], &u, 16);
                   __asm__ volatile("" ::: "memory");
                   sum = regs[0].bits;
               }
@@ -82,6 +84,7 @@ jobs:
           CEOF
           sed -i 's/^          //' forward2.c
           cc -O2 -o forward2 forward2.c
-          echo "--- 16-byte stores in the wide loop, says objdump:"
+          echo "--- 16-byte vector stores present, says objdump:"
           objdump -d forward2 | grep -cE "movups|movaps|movdqu"
           for _ in 1 2 3; do ./forward2 100000000; echo; done
+          exit 0
