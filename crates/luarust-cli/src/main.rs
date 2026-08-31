@@ -188,19 +188,19 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         // back to the VM rather than failing.
         #[cfg(feature = "jit")]
         Then::Jit => {
+            let chunk = luarust_vm::compile(&program);
             let mut out = std::io::stdout().lock();
-            match luarust_jit::run(&program, &mut out) {
+            match luarust_jit::run(&chunk, &mut out) {
                 Ok(outcome) => finish(outcome, &mut out, &source),
                 Err(declined) => {
                     eprintln!("the JIT declined this program: {}. Running it on the VM.", declined.because);
-                    let chunk = luarust_vm::compile(&program);
                     finish(luarust_vm::run(&chunk, &mut out), &mut out, &source)
                 }
             }
         }
 
         #[cfg(feature = "jit")]
-        Then::Ir => match luarust_jit::emit_ir(&program) {
+        Then::Ir => match luarust_jit::emit_ir(&luarust_vm::compile(&program)) {
             Ok(ir) => {
                 print!("{ir}");
                 ExitCode::SUCCESS
@@ -242,9 +242,39 @@ fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
             let mut out = std::io::stdout().lock();
             finish(luarust_vm::run(&loaded.chunk, &mut out), &mut out, &source)
         }
+        // The JIT reads bytecode now, so a chunk off disk is exactly what it wants. The
+        // same file the VM runs, compiled to machine code instead of interpreted.
+        #[cfg(feature = "jit")]
+        Then::Jit => {
+            let source = loaded.source.file(loaded.path.clone());
+            let mut out = std::io::stdout().lock();
+            match luarust_jit::run(&loaded.chunk, &mut out) {
+                Ok(outcome) => finish(outcome, &mut out, &source),
+                Err(declined) => {
+                    eprintln!(
+                        "the JIT declined this chunk: {}. Running it on the VM.",
+                        declined.because
+                    );
+                    finish(luarust_vm::run(&loaded.chunk, &mut out), &mut out, &source)
+                }
+            }
+        }
+
+        #[cfg(feature = "jit")]
+        Then::Ir => match luarust_jit::emit_ir(&loaded.chunk) {
+            Ok(ir) => {
+                print!("{ir}");
+                ExitCode::SUCCESS
+            }
+            Err(declined) => {
+                eprintln!("the JIT declined this chunk: {}", declined.because);
+                ExitCode::FAILURE
+            }
+        },
+
         _ => {
             eprintln!(
-                "{} is a chunk, so it can only be `run`, `dis`, or `check`. \
+                "{} is a chunk, so it can only be `run`, `jit`, `dis`, `ir` or `check`. \
                  The other commands need the source.",
                 path.display()
             );

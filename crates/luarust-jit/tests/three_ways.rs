@@ -23,8 +23,9 @@ fn three_ways(source: &str) -> Ran {
 
     let mut walked = Vec::new();
     let walk = luarust_interp::run(&program, &mut walked);
+    let chunk = luarust_vm::compile(&program);
     let mut ran = Vec::new();
-    let vm = luarust_vm::run(&luarust_vm::compile(&program), &mut ran);
+    let vm = luarust_vm::run(&chunk, &mut ran);
     assert_eq!(
         String::from_utf8_lossy(&walked),
         String::from_utf8_lossy(&ran),
@@ -36,8 +37,10 @@ fn three_ways(source: &str) -> Ran {
         "the interpreter and the VM already end differently"
     );
 
+    // The JIT is given the same chunk the VM just ran, not the tree it came from. That
+    // is the whole point of it reading bytecode: one artefact, three ways to run it.
     let mut compiled = Vec::new();
-    match luarust_jit::run(&program, &mut compiled) {
+    match luarust_jit::run(&chunk, &mut compiled) {
         Err(declined) => Ran::Declined(declined.because),
         Ok(jit) => {
             assert_eq!(
@@ -183,7 +186,9 @@ fn the_clock_is_read_as_the_type_it_was_asked_for() {
         assert!(errors.is_empty(), "{errors:#?}");
 
         let mut out = Vec::new();
-        luarust_jit::run(&program, &mut out).expect("the JIT took it").expect("it ran");
+        luarust_jit::run(&luarust_vm::compile(&program), &mut out)
+            .expect("the JIT took it")
+            .expect("it ran");
         let text = String::from_utf8(out).expect("output is text");
         let seconds: f64 = text.parse().unwrap_or_else(|_| panic!("{ty} gave `{text}`"));
         assert!((0.0..60.0).contains(&seconds), "{ty} said {seconds} seconds");

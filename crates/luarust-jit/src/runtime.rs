@@ -80,15 +80,25 @@ pub extern "C" fn cell_stage(index: u64) {
     PENDING.with(|queue| queue.borrow_mut().push(value));
 }
 
-/// Enter a function: a fresh frame, with the staged arguments already in its first cells.
+/// Enter a function: a fresh frame, with the staged arguments still waiting.
+///
+/// They wait rather than being placed, because where they belong is a matter for the
+/// callee: a celled parameter lives in the cell of whichever register it was given, and
+/// the caller has no way to know which that is.
 pub extern "C" fn cells_enter(routine: u64) {
-    let mut frame = TEMPLATES.with(|table| table.borrow()[routine as usize].clone());
-    PENDING.with(|queue| {
-        for (at, value) in queue.borrow_mut().drain(..).enumerate() {
-            frame[at] = value;
-        }
-    });
+    let frame = TEMPLATES.with(|table| table.borrow()[routine as usize].clone());
     FRAMES.with(|frames| frames.borrow_mut().push(frame));
+}
+
+/// Take the next staged argument into a cell of the frame just entered.
+pub extern "C" fn cell_unstage(dst: u64) {
+    let value = PENDING.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        if queue.is_empty() { None } else { Some(queue.remove(0)) }
+    });
+    if let Some(value) = value {
+        put(dst, value);
+    }
 }
 
 /// Leave a function, keeping one cell's value for whoever asked.

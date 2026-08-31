@@ -768,7 +768,8 @@ including [`fizzbuzz.lr`](examples/fizzbuzz.lr), which is really a test of `if`.
 ### Compile once, run anywhere
 
 `luarust build` writes a **`.lrc` chunk**: the whole program, in one file, with no source
-and no compiler needed to run it.
+and no compiler needed to run it — and, since the JIT reads bytecode, no source needed to
+compile it to machine code either.
 
 ```bash
 luarust build hello.lr      # hello.lrc — 514 bytes
@@ -800,10 +801,27 @@ and requires that each one either loads or explains itself.
 
 ### Three ways to run one
 
-There are **three ways to run a program**, and that is deliberate. `jit` compiles to
-machine code with LLVM, in memory; `run` compiles to bytecode; `interp` walks the checked
-tree directly, doing no compilation at all. The tree-walker is slow and is staying: it is
-the reference the other two answer to.
+There are **three ways to run a program**, and that is deliberate:
+
+```
+source ──lex, parse, check──▶ checked tree ──┬──▶ interp, walking it
+                                             └──▶ bytecode ──┬──▶ VM, interpreting it
+                                                             └──▶ LLVM ──▶ native
+```
+
+`interp` walks the checked tree directly, doing no compilation at all. It is slow and it
+is staying: it is the reference the other two answer to. `run` compiles to bytecode and
+interprets that. `jit` compiles the **same bytecode** to machine code with LLVM.
+
+That last point is the one that matters. The JIT reads a chunk, so `.lrc` is not a file
+that only the VM can run — it is the one artefact, and how fast it goes is a choice made
+where it runs rather than where it was built:
+
+```bash
+luarust build hello.lr     # hello.lrc
+luarust run hello.lrc      # the VM
+luarust jit hello.lrc      # the same file, compiled to machine code
+```
 
 One implementation only ever agrees with itself. `luarust verify` runs a program two ways
 and says whether they match, and `luarust fuzz` writes programs and does it in bulk — a

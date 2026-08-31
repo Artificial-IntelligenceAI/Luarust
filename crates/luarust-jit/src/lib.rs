@@ -25,10 +25,10 @@ use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Module;
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
-use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Fault, Overflow, Stopped, Value};
+use luarust_vm::chunk::{Chunk, Op, Routine};
 use luarust_diag::Span;
-use luarust_parse::ast::{BinOp, CmpOp, LogicOp, Ty};
+use luarust_parse::ast::{BinOp, CmpOp, Ty};
 
 use std::io::Write;
 
@@ -48,7 +48,7 @@ pub struct Declined {
 /// function that called itself would overwrite the cells its caller was still using. The
 /// fix is a stack of cells rather than a fixed row of them; until then a program with
 /// functions in it goes to the VM, which has no such problem.
-pub fn accepts(_program: &Checked) -> Result<(), Declined> {
+pub fn accepts(_chunk: &Chunk) -> Result<(), Declined> {
     Ok(())
 }
 
@@ -68,8 +68,8 @@ fn celled(ty: Ty) -> bool {
 }
 
 /// Compile a program and run it, or hand it back.
-pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
-    accepts(program)?;
+pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
+    accepts(chunk)?;
 
     let context = Context::create();
     let module = context.create_module("luarust");
@@ -77,8 +77,8 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
 
-    let mut emitter = Emitter::new(&context, &module, &engine, program);
-    emitter.emit(program, &module);
+    let mut emitter = Emitter::new(&context, &module, &engine, chunk);
+    emitter.emit(chunk, &module);
     let spans = std::mem::take(&mut emitter.spans);
 
     let compiled = unsafe {
@@ -96,15 +96,15 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Result<Result<(), Stopped
 }
 
 /// The LLVM IR, for looking at.
-pub fn emit_ir(program: &Checked) -> Result<String, Declined> {
-    accepts(program)?;
+pub fn emit_ir(chunk: &Chunk) -> Result<String, Declined> {
+    accepts(chunk)?;
     let context = Context::create();
     let module = context.create_module("luarust");
     let engine = module
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
-    let mut emitter = Emitter::new(&context, &module, &engine, program);
-    emitter.emit(program, &module);
+    let mut emitter = Emitter::new(&context, &module, &engine, chunk);
+    emitter.emit(chunk, &module);
     Ok(module.print_to_string().to_string())
 }
 
@@ -175,29 +175,6 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
     Err(Stopped { fault, span })
 }
 
-/// Where a value ended up: in a register, or in a cell on the Rust side.
-#[derive(Clone, Copy)]
-enum Emitted<'ctx> {
-    Native(BasicValueEnum<'ctx>),
-    /// The cell's number, which is known while compiling and so costs nothing to carry.
-    Cell(u64),
-}
-
-impl<'ctx> Emitted<'ctx> {
-    fn native(self) -> BasicValueEnum<'ctx> {
-        match self {
-            Emitted::Native(value) => value,
-            Emitted::Cell(_) => unreachable!("a celled value was used as a register one"),
-        }
-    }
-
-    fn cell(self) -> u64 {
-        match self {
-            Emitted::Cell(index) => index,
-            Emitted::Native(_) => unreachable!("a register value was used as a celled one"),
-        }
-    }
-}
 
 struct Emitter<'ctx> {
     context: &'ctx Context,
@@ -208,9 +185,11 @@ struct Emitter<'ctx> {
     /// call may name one that has not been emitted yet -- which is what lets two of them
     /// call each other.
     funcs: Vec<FunctionValue<'ctx>>,
-    /// One `alloca` per variable, in the order the checker numbered them. Celled
-    /// variables never touch theirs.
-    slots: Vec<PointerValue<'ctx>>,
+    /// One `alloca` per register. A celled value lives in the frame cell of the same
+    /// number instead, which is why nothing here has to be allocated or looked up.
+    regs: Vec<PointerValue<'ctx>>,
+    /// Where each jump target lands, for the routine being emitted.
+    landings: std::collections::BTreeMap<usize, inkwell::basic_block::BasicBlock<'ctx>>,
     /// Where the fallback leaves its answer. Made once, in the entry block: an `alloca`
     /// anywhere else is stack allocated on every pass of whatever loop it is inside, which
     /// a ten-million-iteration program notices immediately by running out of stack.
@@ -227,14 +206,9 @@ struct Emitter<'ctx> {
     templates: Vec<Vec<Value>>,
     /// The top level's frame.
     main_frame: Vec<Value>,
-    /// Which cell each celled variable lives in, within the frame being emitted.
-    slot_cells: std::collections::HashMap<usize, u64>,
     /// Where each fault can happen, so a code can be turned back into a place.
     spans: Vec<Span>,
     overflow: Overflow,
-    /// Where each loop being emitted ends, innermost last, so a `break` knows where to
-    /// branch to.
-    loop_ends: Vec<inkwell::basic_block::BasicBlock<'ctx>>,
     helpers: Helpers<'ctx>,
 }
 
@@ -255,6 +229,7 @@ struct Helpers<'ctx> {
     cells_leave: FunctionValue<'ctx>,
     cells_leave_with: FunctionValue<'ctx>,
     cell_take_answer: FunctionValue<'ctx>,
+    cell_unstage: FunctionValue<'ctx>,
     call_depth: FunctionValue<'ctx>,
 }
 
@@ -263,7 +238,7 @@ impl<'ctx> Emitter<'ctx> {
         context: &'ctx Context,
         module: &Module<'ctx>,
         engine: &ExecutionEngine<'ctx>,
-        program: &Checked,
+        chunk: &Chunk,
     ) -> Self {
         let i64_t = context.i64_type();
         let i32_t = context.i32_type();
@@ -361,6 +336,13 @@ impl<'ctx> Emitter<'ctx> {
         engine
             .add_global_mapping(&cells_leave_with, runtime::cells_leave_with as *const () as usize);
 
+        let cell_unstage = module.add_function(
+            "luarust_cell_unstage",
+            void_t.fn_type(&[i64_t.into()], false),
+            None,
+        );
+        engine.add_global_mapping(&cell_unstage, runtime::cell_unstage as *const () as usize);
+
         let cell_take_answer = module.add_function(
             "luarust_cell_take_answer",
             void_t.fn_type(&[i64_t.into()], false),
@@ -382,14 +364,14 @@ impl<'ctx> Emitter<'ctx> {
         let builder = context.create_builder();
         builder.position_at_end(entry);
 
-        // Every variable gets its own stack slot. LLVM will keep the ones that deserve it
-        // in registers.
-        let mut slots = Vec::new();
-        for index in 0..program.slots {
+        // Every VM register gets its own stack slot. LLVM keeps the ones that deserve it
+        // in real registers, which is the pass this arrangement exists to feed.
+        let mut regs = Vec::new();
+        for index in 0..chunk.registers {
             let alloca = builder
-                .build_alloca(context.i64_type(), &format!("slot{index}"))
-                .expect("a stack slot");
-            slots.push(alloca);
+                .build_alloca(context.i64_type(), &format!("r{index}"))
+                .expect("a register");
+            regs.push(alloca);
         }
 
         let out_slot = builder.build_alloca(context.i64_type(), "fallback.out").expect("a slot");
@@ -399,18 +381,17 @@ impl<'ctx> Emitter<'ctx> {
             context,
             builder,
             main,
-            slots,
+            regs,
+            landings: std::collections::BTreeMap::new(),
             out_slot,
             answer_slot,
             spans: Vec::new(),
-            overflow: program.overflow,
-            loop_ends: Vec::new(),
+            overflow: chunk.overflow,
             funcs: Vec::new(),
             constants: Vec::new(),
             frame: Vec::new(),
             templates: Vec::new(),
             main_frame: Vec::new(),
-            slot_cells: std::collections::HashMap::new(),
             helpers: Helpers {
                 print_text,
                 print_value,
@@ -428,224 +409,419 @@ impl<'ctx> Emitter<'ctx> {
                 cells_leave,
                 cells_leave_with,
                 cell_take_answer,
+                cell_unstage,
                 call_depth,
             },
         }
     }
 
-    fn emit(&mut self, program: &Checked, module: &Module<'ctx>) {
-        // Declared first, all of them, so a call may name a function whose body has not
-        // been written yet -- which is what two functions calling each other needs.
+    /// Every routine, declared and then filled in.
+    ///
+    /// This walks *instructions*, not a tree. What arrives is a chunk: registers, jumps
+    /// and a flat list of operations, each already saying what type it works on. Reading
+    /// that rather than the checked tree is what lets a `.lrc` file be compiled — the
+    /// same file the VM runs, and the same file anybody can be handed.
+    fn emit(&mut self, chunk: &Chunk, module: &Module<'ctx>) {
         let i64_t = self.context.i64_type();
-        for (index, func) in program.funcs.iter().enumerate() {
-            // A celled parameter travels through the runtime rather than as an argument,
-            // so it takes no place in the signature. Every other one is a machine word.
+        let ptr_t = self.context.ptr_type(Default::default());
+
+        // Declared before any is emitted, so a call may name one not written yet.
+        for (index, routine) in chunk.funcs.iter().enumerate() {
             let mut params: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
-            // A function answering a value the machine can hold writes it through a
-            // pointer the *caller* owns, since the callee's own stack is gone by then.
-            if func.returns.is_some_and(|ty| !celled(ty)) {
-                params.push(self.context.ptr_type(Default::default()).into());
+            if routine.returns.is_some_and(|ty| !celled(ty)) {
+                params.push(ptr_t.into());
             }
-            for ty in &func.params {
+            for ty in &routine.params {
                 if !celled(*ty) {
-                    // As bits, whatever the type. One shape of parameter, and the callee
-                    // turns it back into whatever it was.
                     params.push(i64_t.into());
                 }
             }
-            // Every function answers an `i64`: the fault code, or zero. A value it
-            // answers comes back beside it, through the out slot or through a cell.
-            let signature = i64_t.fn_type(&params, false);
-            let declared = module.add_function(&format!("luarust_fn{index}"), signature, None);
+            let declared = module.add_function(
+                &format!("luarust_fn{index}"),
+                i64_t.fn_type(&params, false),
+                None,
+            );
             self.funcs.push(declared);
         }
 
-        for (index, func) in program.funcs.iter().enumerate() {
-            self.emit_function(index, func);
+        for (index, routine) in chunk.funcs.iter().enumerate() {
+            self.emit_routine(chunk, index, routine);
         }
 
-        // Back to the top level, whose frame is the one the program starts in. Taken
-        // after its body is emitted, not before -- that is where its cells come from.
-        self.builder.position_at_end(
-            self.main.get_last_basic_block().expect("main has its entry block"),
-        );
-        self.block(&program.stmts);
+        // The top level, whose frame is the one the program starts in.
         self.builder
-            .build_return(Some(&self.context.i64_type().const_int(0, false)))
-            .expect("a return");
+            .position_at_end(self.main.get_last_basic_block().expect("main has its entry"));
+        self.frame = vec![Value::Bool(false); chunk.registers];
+        self.walk(chunk, &chunk.code, &chunk.spans, false);
         self.main_frame = std::mem::take(&mut self.frame);
     }
 
-    /// One Luarust function as one LLVM function, with its own slots and its own frame.
-    fn emit_function(&mut self, index: usize, func: &luarust_check::ir::Function) {
+    /// One function: its own registers, its own frame of cells, its own blocks.
+    fn emit_routine(&mut self, chunk: &Chunk, index: usize, routine: &Routine) {
         let outer_main = self.main;
-        let outer_slots = std::mem::take(&mut self.slots);
+        let outer_regs = std::mem::take(&mut self.regs);
         let outer_out = self.out_slot;
+        let outer_answer = self.answer_slot;
         let outer_frame = std::mem::take(&mut self.frame);
-        let outer_cells = std::mem::take(&mut self.slot_cells);
 
         let function = self.funcs[index];
         self.main = function;
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        self.slots = (0..func.slots)
+        self.regs = (0..routine.registers)
             .map(|n| {
                 self.builder
-                    .build_alloca(self.context.i64_type(), &format!("slot{n}"))
-                    .expect("a stack slot")
+                    .build_alloca(self.context.i64_type(), &format!("r{n}"))
+                    .expect("a register")
             })
             .collect();
         self.out_slot =
             self.builder.build_alloca(self.context.i64_type(), "fallback.out").expect("a slot");
-        let outer_answer = self.answer_slot;
         self.answer_slot =
             self.builder.build_alloca(self.context.i64_type(), "call.answer").expect("a slot");
 
-        // The celled parameters get the first cells of the frame, in order, because that
-        // is where `cells_enter` puts the arguments the caller staged.
-        for (n, ty) in func.params.iter().enumerate() {
-            if celled(*ty) {
-                let cell = self.new_cell(Value::zero(*ty));
-                self.slot_cells.insert(n, cell);
-            }
-        }
+        // A register that ever holds a celled value uses the frame cell of the same
+        // number. A register holds one value at a time, so the two can never both be
+        // wanted, and nothing has to be allocated or looked up.
+        self.frame = vec![Value::Bool(false); routine.registers];
 
-        let routine = self.context.i64_type().const_int(index as u64, false);
+        let number = self.context.i64_type().const_int(index as u64, false);
         self.builder
-            .build_call(self.helpers.cells_enter, &[routine.into()], "")
+            .build_call(self.helpers.cells_enter, &[number.into()], "")
             .expect("a call");
 
-        // The native parameters arrive as arguments, and go straight into their slots.
-        let mut argument = u32::from(func.returns.is_some_and(|ty| !celled(ty)));
-        for (n, ty) in func.params.iter().enumerate() {
+        // The arguments: celled ones were staged by the caller and are taken here in the
+        // order they were staged; the rest arrived as machine arguments.
+        let mut argument = u32::from(routine.returns.is_some_and(|ty| !celled(ty)));
+        for (n, ty) in routine.params.iter().enumerate() {
             if celled(*ty) {
-                continue;
+                let cell = self.cell_number(n as u64);
+                self.builder
+                    .build_call(self.helpers.cell_unstage, &[cell.into()], "")
+                    .expect("a call");
+            } else {
+                let bits = function.get_nth_param(argument).expect("a parameter");
+                argument += 1;
+                self.builder.build_store(self.regs[n], bits).expect("a store");
             }
-            let bits = function.get_nth_param(argument).expect("a parameter");
-            argument += 1;
-            self.builder.build_store(self.slots[n], bits).expect("a store");
         }
 
-        self.guard_depth(func.span);
-        self.block(&func.body);
-
-        // A function that answers nothing may simply reach its end; one that answers a
-        // value cannot, and the checker has already refused any that could.
-        self.leave(None, func.returns);
+        let span = routine.spans.first().copied().unwrap_or_default();
+        self.guard_depth(span);
+        self.walk(chunk, &routine.code, &routine.spans, true);
 
         self.templates.push(std::mem::take(&mut self.frame));
         self.frame = outer_frame;
-        self.slot_cells = outer_cells;
-        self.slots = outer_slots;
+        self.regs = outer_regs;
         self.out_slot = outer_out;
         self.answer_slot = outer_answer;
         self.main = outer_main;
     }
 
-    /// `loop.while`: ask, run, count, ask again.
-    fn while_stmt(
-        &mut self,
-        counter: Option<(usize, Ty)>,
-        condition: &Expr,
-        body: &[Stmt],
-        span: Span,
-    ) {
-        if let Some((slot, ty)) = counter {
-            let zero = self.constant(&Value::zero(ty));
-            let bits = self.to_bits(zero, ty);
-            self.builder.build_store(self.slots[slot], bits).expect("a store");
+    /// Walk a run of instructions, emitting each into the block it belongs to.
+    fn walk(&mut self, chunk: &Chunk, code: &[Op], spans: &[Span], inside: bool) {
+        let made: std::collections::BTreeMap<usize, inkwell::basic_block::BasicBlock<'ctx>> =
+            blocks::leaders(code)
+                .iter()
+                .map(|at| (*at, self.context.append_basic_block(self.main, &format!("at{at}"))))
+                .collect();
+        self.landings = made.clone();
+
+        // Out of the entry block, where the allocas live, and into the first real one.
+        self.builder.build_unconditional_branch(made[&0]).expect("a branch");
+
+        for (at, op) in code.iter().enumerate() {
+            if let Some(block) = made.get(&at) {
+                // Falling into a new block from an unterminated one is an ordinary jump.
+                let here = self.builder.get_insert_block().expect("a block");
+                if here.get_terminator().is_none() {
+                    self.builder.build_unconditional_branch(*block).expect("a branch");
+                }
+                self.builder.position_at_end(*block);
+            }
+            self.op(chunk, *op, spans[at]);
         }
 
-        let check = self.context.append_basic_block(self.main, "while.check");
-        let top = self.context.append_basic_block(self.main, "while.top");
-        let done = self.context.append_basic_block(self.main, "while.done");
-        self.builder.build_unconditional_branch(check).expect("a branch");
-
-        self.builder.position_at_end(check);
-        let held = self.truth(condition);
-        self.builder.build_conditional_branch(held, top, done).expect("a branch");
-
-        self.builder.position_at_end(top);
-        // Counted at the start of the pass, so afterwards it holds however many ran.
-        if let Some((slot, ty)) = counter {
-            let held = self.load(slot, ty);
-            let one = self.one(ty);
-            let next = self.arithmetic(BinOp::Add, held, one, ty, span);
-            let bits = self.to_bits(next, ty);
-            self.builder.build_store(self.slots[slot], bits).expect("a store");
+        // Whatever block is open at the end. Unreachable in practice -- a routine returns
+        // and the top level halts -- but LLVM will not take a block without a terminator
+        // whether anything can reach it or not.
+        let here = self.builder.get_insert_block().expect("a block");
+        if here.get_terminator().is_none() {
+            if inside {
+                self.builder.build_call(self.helpers.cells_leave, &[], "").expect("a call");
+            }
+            self.builder
+                .build_return(Some(&self.context.i64_type().const_zero()))
+                .expect("a return");
         }
-        self.loop_ends.push(done);
-        self.block(body);
-        self.loop_ends.pop();
-        self.builder.build_unconditional_branch(check).expect("a branch");
-
-        self.builder.position_at_end(done);
     }
 
-    /// A call: stage what has to travel through the runtime, pass the rest as arguments,
-    /// and carry a fault out of the callee unchanged.
-    fn emit_call(
-        &mut self,
-        func: usize,
-        args: &[Expr],
-        span: Span,
-        answers: Option<Ty>,
-    ) -> Option<(Emitted<'ctx>, Ty)> {
-        // Every argument is worked out before any is staged. Staging as we go would let
-        // an argument that is itself a call take the ones already queued.
-        let emitted: Vec<(Emitted<'ctx>, Ty)> = args.iter().map(|arg| self.expr(arg)).collect();
+    /// A register, read as whatever the instruction says it holds.
+    fn get(&self, reg: u16, ty: Ty) -> BasicValueEnum<'ctx> {
+        let raw = self
+            .builder
+            .build_load(self.context.i64_type(), self.regs[reg as usize], "load")
+            .expect("a load")
+            .into_int_value();
+        self.of_bits(raw, ty)
+    }
 
-        let mut natives: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-        for (value, ty) in &emitted {
-            match value {
-                Emitted::Cell(index) => {
-                    let number = self.cell_number(*index);
+    /// Put a value in a register, as bits.
+    fn put(&self, reg: u16, value: BasicValueEnum<'ctx>, ty: Ty) {
+        let bits = self.to_bits(value, ty);
+        self.builder.build_store(self.regs[reg as usize], bits).expect("a store");
+    }
+
+    /// One instruction.
+    fn op(&mut self, chunk: &Chunk, op: Op, span: Span) {
+        match op {
+            Op::Const { dst, konst } => {
+                let value = &chunk.consts[konst as usize];
+                let ty = value.ty();
+                if celled(ty) {
+                    let from = self.constant_cell(value.clone());
+                    self.call_cell_move(u64::from(dst), from);
+                } else {
+                    let held = self.constant(value);
+                    self.put(dst, held, ty);
+                }
+            }
+
+            Op::Move { dst, src, ty } => {
+                if celled(ty) {
+                    if dst != src {
+                        self.call_cell_move(u64::from(dst), u64::from(src));
+                    }
+                } else {
+                    let held = self.get(src, ty);
+                    self.put(dst, held, ty);
+                }
+            }
+
+            Op::Binary { op, ty, dst, lhs, rhs } => {
+                if celled(ty) {
+                    self.call_cell_binary(op, u64::from(dst), u64::from(lhs), u64::from(rhs), span);
+                } else {
+                    let (a, b) = (self.get(lhs, ty), self.get(rhs, ty));
+                    let answer = self.arithmetic(op, a, b, ty, span);
+                    self.put(dst, answer, ty);
+                }
+            }
+
+            Op::Neg { dst, src, ty } => {
+                if celled(ty) {
+                    self.call_cell_neg(u64::from(dst), u64::from(src), span);
+                } else {
+                    let held = self.get(src, ty);
+                    let answer = self.negated(held, ty, span);
+                    self.put(dst, answer, ty);
+                }
+            }
+
+            Op::Not { dst, src } => {
+                let held = self
+                    .builder
+                    .build_load(self.context.i64_type(), self.regs[src as usize], "load")
+                    .expect("a load")
+                    .into_int_value();
+                let flipped = self
+                    .builder
+                    .build_xor(held, self.context.i64_type().const_int(1, false), "not")
+                    .expect("an xor");
+                self.builder.build_store(self.regs[dst as usize], flipped).expect("a store");
+            }
+
+            Op::Compare { op, operands, dst, lhs, rhs } => {
+                let truth = self.stands(lhs, rhs, operands, op);
+                let widened = self
+                    .builder
+                    .build_int_z_extend(truth, self.context.i64_type(), "truth")
+                    .expect("an extend");
+                self.builder.build_store(self.regs[dst as usize], widened).expect("a store");
+            }
+
+            Op::TimeNow { dst, ty } => self.time_now(dst, ty),
+
+            Op::PrintText { text } => {
+                let written = &chunk.texts[text as usize];
+                let global =
+                    self.builder.build_global_string_ptr(written, "text").expect("a string");
+                let len = self.context.i64_type().const_int(written.len() as u64, false);
+                self.builder
+                    .build_call(
+                        self.helpers.print_text,
+                        &[global.as_pointer_value().into(), len.into()],
+                        "",
+                    )
+                    .expect("a call");
+            }
+
+            Op::PrintValue { src, ty } => {
+                if celled(ty) {
+                    let cell = self.cell_number(u64::from(src));
                     self.builder
-                        .build_call(self.helpers.cell_stage, &[number.into()], "")
+                        .build_call(self.helpers.print_cell, &[cell.into()], "")
+                        .expect("a call");
+                } else {
+                    let held = self.get(src, ty);
+                    let bits = self.to_bits(held, ty);
+                    let tag = self.context.i32_type().const_int(runtime::tag_of(ty) as u64, false);
+                    self.builder
+                        .build_call(self.helpers.print_value, &[bits.into(), tag.into()], "")
                         .expect("a call");
                 }
-                Emitted::Native(native) => natives.push(self.to_bits(*native, *ty).into()),
+            }
+
+            Op::Jump { target } => {
+                let landing = self.landing(target);
+                self.builder.build_unconditional_branch(landing).expect("a branch");
+            }
+
+            Op::JumpIfFalse { cond, target } | Op::JumpIfTrue { cond, target } => {
+                let held = self
+                    .builder
+                    .build_load(self.context.i64_type(), self.regs[cond as usize], "load")
+                    .expect("a load")
+                    .into_int_value();
+                let truth = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, held, held.get_type().const_zero(), "held")
+                    .expect("a compare");
+                let onward = self.context.append_basic_block(self.main, "on");
+                let landing = self.landing(target);
+                if matches!(op, Op::JumpIfFalse { .. }) {
+                    self.builder.build_conditional_branch(truth, onward, landing)
+                } else {
+                    self.builder.build_conditional_branch(truth, landing, onward)
+                }
+                .expect("a branch");
+                self.builder.position_at_end(onward);
+            }
+
+            Op::JumpIfGreater { lhs, rhs, ty, target }
+            | Op::JumpIfEqual { lhs, rhs, ty, target } => {
+                let want = if matches!(op, Op::JumpIfGreater { .. }) {
+                    CmpOp::Greater
+                } else {
+                    CmpOp::Equal
+                };
+                let truth = self.stands(lhs, rhs, ty, want);
+                let onward = self.context.append_basic_block(self.main, "on");
+                let landing = self.landing(target);
+                self.builder
+                    .build_conditional_branch(truth, landing, onward)
+                    .expect("a branch");
+                self.builder.position_at_end(onward);
+            }
+
+            Op::Call { func, base, argc, dst } => self.emit_call(chunk, func, base, argc, dst),
+
+            Op::Return { src, ty } => {
+                if celled(ty) {
+                    let cell = self.cell_number(u64::from(src));
+                    self.builder
+                        .build_call(self.helpers.cells_leave_with, &[cell.into()], "")
+                        .expect("a call");
+                } else {
+                    let held = self.get(src, ty);
+                    let bits = self.to_bits(held, ty);
+                    let answer = self.main.get_nth_param(0).expect("the answer pointer");
+                    self.builder
+                        .build_store(answer.into_pointer_value(), bits)
+                        .expect("a store");
+                    self.builder.build_call(self.helpers.cells_leave, &[], "").expect("a call");
+                }
+                self.builder
+                    .build_return(Some(&self.context.i64_type().const_zero()))
+                    .expect("a return");
+            }
+
+            Op::ReturnNothing => {
+                self.builder.build_call(self.helpers.cells_leave, &[], "").expect("a call");
+                self.builder
+                    .build_return(Some(&self.context.i64_type().const_zero()))
+                    .expect("a return");
+            }
+
+            Op::Halt => {
+                self.builder
+                    .build_return(Some(&self.context.i64_type().const_zero()))
+                    .expect("a return");
+            }
+        }
+    }
+
+    /// Whether two registers stand in a relation, celled or not.
+    fn stands(&mut self, lhs: u16, rhs: u16, ty: Ty, op: CmpOp) -> inkwell::values::IntValue<'ctx> {
+        if celled(ty) {
+            return self.cells_compare(u64::from(lhs), u64::from(rhs), op);
+        }
+        let (a, b) = (self.get(lhs, ty), self.get(rhs, ty));
+        self.relation(a, b, ty, op)
+    }
+
+    /// The block a jump lands in.
+    fn landing(&self, target: u32) -> inkwell::basic_block::BasicBlock<'ctx> {
+        self.landings[&(target as usize)]
+    }
+
+    /// A call: stage what travels through the runtime, pass the rest as arguments.
+    fn emit_call(&mut self, chunk: &Chunk, func: u32, base: u16, argc: u16, dst: u16) {
+        let callee = &chunk.funcs[func as usize];
+        let returns = callee.returns;
+        let params = callee.params.clone();
+
+        let mut natives: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for (n, ty) in params.iter().enumerate().take(argc as usize) {
+            let reg = base + n as u16;
+            if celled(*ty) {
+                let cell = self.cell_number(u64::from(reg));
+                self.builder
+                    .build_call(self.helpers.cell_stage, &[cell.into()], "")
+                    .expect("a call");
+            } else {
+                let held = self.get(reg, *ty);
+                natives.push(self.to_bits(held, *ty).into());
             }
         }
 
-        let wants_pointer = answers.is_some_and(|ty| !celled(ty));
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-        if wants_pointer {
+        if returns.is_some_and(|ty| !celled(ty)) {
             call_args.push(self.answer_slot.into());
         }
         call_args.extend(natives);
 
         let outcome = self
             .builder
-            .build_call(self.funcs[func], &call_args, "call")
+            .build_call(self.funcs[func as usize], &call_args, "call")
             .expect("a call")
             .try_as_basic_value()
             .expect_basic("a function answers a fault code")
             .into_int_value();
         self.carry_fault(outcome);
 
-        let ty = answers?;
-        if celled(ty) {
-            let cell = self.new_cell(Value::zero(ty));
-            let number = self.cell_number(cell);
-            self.builder
-                .build_call(self.helpers.cell_take_answer, &[number.into()], "")
-                .expect("a call");
-            return Some((Emitted::Cell(cell), ty));
+        match returns {
+            None => {}
+            Some(ty) if celled(ty) => {
+                let cell = self.cell_number(u64::from(dst));
+                self.builder
+                    .build_call(self.helpers.cell_take_answer, &[cell.into()], "")
+                    .expect("a call");
+            }
+            Some(_) => {
+                let bits = self
+                    .builder
+                    .build_load(self.context.i64_type(), self.answer_slot, "answered")
+                    .expect("a load")
+                    .into_int_value();
+                self.builder.build_store(self.regs[dst as usize], bits).expect("a store");
+            }
         }
-
-        let bits = self
-            .builder
-            .build_load(self.context.i64_type(), self.answer_slot, "answered")
-            .expect("a load")
-            .into_int_value();
-        let _ = span;
-        Some((Emitted::Native(self.of_bits(bits, ty)), ty))
     }
 
     /// Hand a callee's fault straight out. It already knows where it happened, so nothing
-    /// is added to it -- the line reported is the line that actually faulted.
+    /// is added to it — the line reported is the line that actually faulted.
     fn carry_fault(&mut self, outcome: inkwell::values::IntValue<'ctx>) {
         let failed = self
             .builder
@@ -674,13 +850,11 @@ impl<'ctx> Emitter<'ctx> {
             .try_as_basic_value()
             .expect_basic("it answers how deep the frames go")
             .into_int_value();
-        let limit = self
-            .context
-            .i64_type()
-            .const_int(luarust_check::value::DEPTH_LIMIT as u64, false);
+        let limit =
+            self.context.i64_type().const_int(luarust_check::value::DEPTH_LIMIT as u64, false);
         let too_deep = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::UGT, depth, limit, "too.deep")
+            .build_int_compare(IntPredicate::UGT, depth, limit, "too.deep")
             .expect("a comparison");
 
         let stop = self.context.append_basic_block(self.main, "too.deep");
@@ -689,49 +863,10 @@ impl<'ctx> Emitter<'ctx> {
 
         self.builder.position_at_end(stop);
         let code = self.fault_marker(span, runtime::TOO_DEEP);
-        // The frame this call pushed is left behind on purpose: the program is over, and
-        // the runtime is laid out fresh before the next one.
         self.builder
             .build_return(Some(&self.context.i64_type().const_int(code as u64, false)))
             .expect("a return");
-
         self.builder.position_at_end(carry_on);
-    }
-
-    /// Leave the function that is being emitted, giving back what it answers.
-    fn leave(&mut self, value: Option<(Emitted<'ctx>, Ty)>, returns: Option<Ty>) {
-        match (value, returns) {
-            (Some((Emitted::Cell(index), _)), Some(_)) => {
-                let cell = self.cell_number(index);
-                self.builder
-                    .build_call(self.helpers.cells_leave_with, &[cell.into()], "")
-                    .expect("a call");
-                self.builder
-                    .build_return(Some(&self.context.i64_type().const_zero()))
-                    .expect("a return");
-            }
-            (Some((Emitted::Native(native), ty)), Some(_)) => {
-                let bits = self.to_bits(native, ty);
-                let answer = self.main.get_nth_param(0).expect("the answer pointer");
-                self.builder
-                    .build_store(answer.into_pointer_value(), bits)
-                    .expect("a store");
-                self.builder
-                    .build_call(self.helpers.cells_leave, &[], "")
-                    .expect("a call");
-                self.builder
-                    .build_return(Some(&self.context.i64_type().const_zero()))
-                    .expect("a return");
-            }
-            _ => {
-                self.builder
-                    .build_call(self.helpers.cells_leave, &[], "")
-                    .expect("a call");
-                self.builder
-                    .build_return(Some(&self.context.i64_type().const_zero()))
-                    .expect("a return");
-            }
-        }
     }
 
     /// Note where a fault could happen, and give back the value to return if it does.
@@ -741,253 +876,14 @@ impl<'ctx> Emitter<'ctx> {
         (index << 8) | code
     }
 
-    fn block(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
-            self.stmt(stmt);
-        }
-    }
-
-    fn stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Store { slot, value, span } => {
-                let (emitted, ty) = self.expr(value);
-                match emitted {
-                    Emitted::Native(value) => {
-                        // Whole-width, so nothing is left over from whatever was in the
-                        // slot before. A narrow store into a wide slot leaves the top of
-                        // it holding the last value that lived there.
-                        let bits = self.to_bits(value, ty);
-                        self.builder.build_store(self.slots[*slot], bits).expect("a store");
-                    }
-                    Emitted::Cell(src) => {
-                        let dst = self.slot_cell(*slot, ty);
-                        if dst != src {
-                            self.call_cell_move(dst, src);
-                        }
-                    }
-                }
-                let _ = span;
-            }
-
-            Stmt::Print { items, span } => {
-                for item in items {
-                    match item {
-                        Item::Text(text) => {
-                            let global = self
-                                .builder
-                                .build_global_string_ptr(text, "text")
-                                .expect("a string");
-                            let len = self.context.i64_type().const_int(text.len() as u64, false);
-                            self.builder
-                                .build_call(
-                                    self.helpers.print_text,
-                                    &[global.as_pointer_value().into(), len.into()],
-                                    "",
-                                )
-                                .expect("a call");
-                        }
-                        Item::Value(expr) => {
-                            let (emitted, ty) = self.expr(expr);
-                            match emitted {
-                                Emitted::Native(value) => {
-                                    let bits = self.to_bits(value, ty);
-                                    let tag = self
-                                        .context
-                                        .i32_type()
-                                        .const_int(runtime::tag_of(ty) as u64, false);
-                                    self.builder
-                                        .build_call(
-                                            self.helpers.print_value,
-                                            &[bits.into(), tag.into()],
-                                            "",
-                                        )
-                                        .expect("a call");
-                                }
-                                Emitted::Cell(index) => {
-                                    let cell = self.cell_number(index);
-                                    self.builder
-                                        .build_call(self.helpers.print_cell, &[cell.into()], "")
-                                        .expect("a call");
-                                }
-                            }
-                        }
-                    }
-                }
-                let _ = span;
-            }
-
-            Stmt::Loop { slot, ty, from, to, body, span } => {
-                self.loop_stmt(*slot, *ty, from, to, body, *span)
-            }
-
-            Stmt::If { arms, otherwise, .. } => self.if_stmt(arms, otherwise),
-
-            Stmt::While { counter, condition, body, span } => {
-                self.while_stmt(*counter, condition, body, *span)
-            }
-
-            Stmt::Break { .. } => {
-                let end = *self.loop_ends.last().expect("`break` outside a loop was checked for");
-                self.builder.build_unconditional_branch(end).expect("a branch");
-                // Nothing after a `break` runs, and LLVM still wants it somewhere.
-                let after = self.context.append_basic_block(self.main, "after.break");
-                self.builder.position_at_end(after);
-            }
-
-            Stmt::Return { value, span } => {
-                let answered = value.as_ref().map(|expr| self.expr(expr));
-                let returns = answered.as_ref().map(|(_, ty)| *ty);
-                self.leave(answered, returns);
-                // Nothing after a `return` runs, but LLVM still wants somewhere to put
-                // it, so it goes in a block with no way in.
-                let after = self.context.append_basic_block(self.main, "after.return");
-                self.builder.position_at_end(after);
-                let _ = span;
-            }
-
-            // Called for what it does. Whatever it answers is dropped here.
-            Stmt::Call { func, args, span } => {
-                self.emit_call(*func, args, *span, None);
-            }
-        }
-    }
-
-    /// Each arm gets a block to run in and a block to fall through to. Everything that
-    /// ran lands on the same block afterwards, which is where the program carries on.
-    fn if_stmt(&mut self, arms: &[luarust_check::ir::Arm], otherwise: &[Stmt]) {
-        let done = self.context.append_basic_block(self.main, "if.done");
-
-        for (n, arm) in arms.iter().enumerate() {
-            let held = self.truth(&arm.condition);
-            let then = self.context.append_basic_block(self.main, &format!("if.then{n}"));
-            let next = self.context.append_basic_block(self.main, &format!("if.next{n}"));
-            self.builder.build_conditional_branch(held, then, next).expect("a branch");
-
-            self.builder.position_at_end(then);
-            self.block(&arm.body);
-            self.builder.build_unconditional_branch(done).expect("a branch");
-
-            // The next arm is asked only here, which is what makes it unreachable when an
-            // earlier one held.
-            self.builder.position_at_end(next);
-        }
-
-        self.block(otherwise);
-        self.builder.build_unconditional_branch(done).expect("a branch");
-        self.builder.position_at_end(done);
-    }
-
-    /// A condition as the one bit a branch wants, rather than the sixty-four a slot holds.
-    fn truth(&mut self, condition: &Expr) -> inkwell::values::IntValue<'ctx> {
-        let (emitted, _) = self.expr(condition);
-        let held = emitted.native().into_int_value();
-        let zero = held.get_type().const_zero();
-        self.builder
-            .build_int_compare(inkwell::IntPredicate::NE, held, zero, "held")
-            .expect("a comparison")
-    }
-
-    fn loop_stmt(&mut self, slot: usize, ty: Ty, from: &Expr, to: &Expr, body: &[Stmt], span: Span) {
-        // Start the counter, and take the far bound somewhere it will survive the body.
-        let (start, _) = self.expr(from);
-        let counter = match start {
-            Emitted::Native(value) => {
-                let bits = self.to_bits(value, ty);
-                self.builder.build_store(self.slots[slot], bits).expect("a store");
-                None
-            }
-            Emitted::Cell(src) => {
-                let dst = self.slot_cell(slot, ty);
-                if dst != src {
-                    self.call_cell_move(dst, src);
-                }
-                Some(dst)
-            }
-        };
-        let (limit, _) = self.expr(to);
-
-        let check = self.context.append_basic_block(self.main, "loop.check");
-        let top = self.context.append_basic_block(self.main, "loop.top");
-        let step = self.context.append_basic_block(self.main, "loop.step");
-        let done = self.context.append_basic_block(self.main, "loop.done");
-
-        self.builder.build_unconditional_branch(check).expect("a branch");
-
-        // Counting down is an empty range, so the first thing asked is whether to run at
-        // all rather than whether to stop.
-        self.builder.position_at_end(check);
-        let past = self.loop_test(counter, slot, ty, limit, CmpOp::Greater);
-        self.builder.build_conditional_branch(past, done, top).expect("a branch");
-
-        self.builder.position_at_end(top);
-        self.loop_ends.push(done);
-        self.block(body);
-        self.loop_ends.pop();
-        let finished = self.loop_test(counter, slot, ty, limit, CmpOp::Equal);
-        self.builder.build_conditional_branch(finished, done, step).expect("a branch");
-
-        // Stepping only after the body, and only below the bound, so a loop can reach the
-        // top of its type without the increment that would take it past.
-        self.builder.position_at_end(step);
-        match counter {
-            None => {
-                let held = self.load(slot, ty);
-                let one = self.one(ty);
-                let next = self.arithmetic(BinOp::Add, held, one, ty, span);
-                let bits = self.to_bits(next, ty);
-                self.builder.build_store(self.slots[slot], bits).expect("a store");
-            }
-            Some(cell) => {
-                let one = self.constant_cell(luarust_check::value::one_of(ty));
-                self.call_cell_binary(BinOp::Add, cell, cell, one, span);
-            }
-        }
-        self.builder.build_unconditional_branch(top).expect("a branch");
-
-        self.builder.position_at_end(done);
-    }
-
-    /// Whether the counter stands in the given relation to the bound.
-    fn loop_test(
-        &mut self,
-        counter: Option<u64>,
-        slot: usize,
-        ty: Ty,
-        limit: Emitted<'ctx>,
-        wanted: CmpOp,
-    ) -> inkwell::values::IntValue<'ctx> {
-        match counter {
-            None => {
-                let held = self.load(slot, ty);
-                self.relation(held, limit.native(), ty, wanted)
-            }
-            Some(cell) => self.cells_compare(cell, limit.cell(), wanted),
-        }
-    }
-
     // ---- cells ------------------------------------------------------------------
 
-    /// A new cell in the frame being emitted, holding this to begin with.
-    fn new_cell(&mut self, initial: Value) -> u64 {
-        self.frame.push(initial);
-        (self.frame.len() - 1) as u64
-    }
 
     /// A cell holding a constant. Constants are shared by every frame, so their numbers
     /// carry a bit that says to look somewhere other than the frame.
     fn constant_cell(&mut self, value: Value) -> u64 {
         self.constants.push(value);
         (self.constants.len() - 1) as u64 | runtime::CONSTANT
-    }
-
-    /// The cell a celled variable lives in, made the first time it is stored to.
-    fn slot_cell(&mut self, slot: usize, ty: Ty) -> u64 {
-        if let Some(found) = self.slot_cells.get(&slot) {
-            return *found;
-        }
-        let index = self.new_cell(Value::zero(ty));
-        self.slot_cells.insert(slot, index);
-        index
     }
 
     fn cell_number(&self, index: u64) -> inkwell::values::IntValue<'ctx> {
@@ -1063,184 +959,68 @@ impl<'ctx> Emitter<'ctx> {
 
     // ---- values -----------------------------------------------------------------
 
-    fn expr(&mut self, expr: &Expr) -> (Emitted<'ctx>, Ty) {
-        match expr {
-            Expr::Const(value) => {
-                if celled(value.ty()) {
-                    let cell = self.constant_cell(value.clone());
-                    return (Emitted::Cell(cell), value.ty());
-                }
-                (Emitted::Native(self.constant(value)), value.ty())
-            }
-
-            Expr::Load { slot, ty, .. } => {
-                if celled(*ty) {
-                    return (Emitted::Cell(self.slot_cell(*slot, *ty)), *ty);
-                }
-                (Emitted::Native(self.load(*slot, *ty)), *ty)
-            }
-
-            Expr::TimeNow { ty, span } => {
-                // Asked for in the format it is being read as. Answering in b64 whatever
-                // was wanted would put a b64's bits in a b32 variable.
-                let tag = self.context.i32_type().const_int(runtime::tag_of(*ty) as u64, false);
-                if celled(*ty) {
-                    let dst = self.new_cell(Value::zero(*ty));
-                    let number = self.cell_number(dst);
-                    self.builder
-                        .build_call(self.helpers.cell_time_now, &[number.into(), tag.into()], "")
-                        .expect("a call");
-                    return (Emitted::Cell(dst), *ty);
-                }
-                let bits = self
-                    .builder
-                    .build_call(self.helpers.time_now, &[tag.into()], "now")
-                    .expect("a call")
-                    .try_as_basic_value()
-                    .expect_basic("the clock returns a value")
-                    .into_int_value();
-                let _ = span;
-                (Emitted::Native(self.value_from_bits(bits, *ty)), *ty)
-            }
-
-            Expr::Neg { operand, ty, span } => {
-                let (value, _) = self.expr(operand);
-                if celled(*ty) {
-                    let dst = self.new_cell(Value::zero(*ty));
-                    let i32_t = self.context.i32_type();
-                    let trapping = i32_t.const_int(u64::from(self.overflow == Overflow::Trap), false);
-                    let outcome = self
-                        .builder
-                        .build_call(
-                            self.helpers.cell_neg,
-                            &[
-                                self.cell_number(dst).into(),
-                                self.cell_number(value.cell()).into(),
-                                trapping.into(),
-                            ],
-                            "negated",
-                        )
-                        .expect("a call")
-                        .try_as_basic_value()
-                        .expect_basic("it returns a fault code")
-                        .into_int_value();
-                    self.stop_if_nonzero(outcome, *span);
-                    return (Emitted::Cell(dst), *ty);
-                }
-                let value = value.native();
-                // Negating a float is flipping its sign bit and nothing else, which is
-                // exact for every value including the zeros and the NaNs. Not `0 - x`:
-                // `0.0 - 0.0` is `+0.0` where negating a zero gives `-0.0`.
-                if *ty == Ty::B16 {
-                    let sign = self.context.i16_type().const_int(0x8000, false);
-                    let flipped = self
-                        .builder
-                        .build_xor(value.into_int_value(), sign, "neg")
-                        .expect("an xor");
-                    return (Emitted::Native(flipped.into()), *ty);
-                }
-                if ty.is_float() {
-                    let negated = self
-                        .builder
-                        .build_float_neg(value.into_float_value(), "neg")
-                        .expect("a negate");
-                    return (Emitted::Native(negated.into()), *ty);
-                }
-                let zero = self.zero(*ty);
-                (Emitted::Native(self.arithmetic(BinOp::Sub, zero, value, *ty, *span)), *ty)
-            }
-
-            // The right side gets a block of its own that is branched over when the left
-            // already settled it, so it is not merely ignored -- it is not run.
-            Expr::Logic { op, lhs, rhs, .. } => {
-                let left = self.truth(lhs);
-                let from = self.builder.get_insert_block().expect("a block");
-                let other = self.context.append_basic_block(self.main, "logic.rhs");
-                let done = self.context.append_basic_block(self.main, "logic.done");
-                match op {
-                    // `and` asks the right only when the left was true; `or`, only when
-                    // it was false.
-                    LogicOp::And => self.builder.build_conditional_branch(left, other, done),
-                    LogicOp::Or => self.builder.build_conditional_branch(left, done, other),
-                }
-                .expect("a branch");
-
-                self.builder.position_at_end(other);
-                let right = self.truth(rhs);
-                // Nested logic leaves the builder somewhere else entirely, so where the
-                // right side actually finished is asked rather than assumed.
-                let right_from = self.builder.get_insert_block().expect("a block");
-                self.builder.build_unconditional_branch(done).expect("a branch");
-
-                self.builder.position_at_end(done);
-                let answer = self
-                    .builder
-                    .build_phi(self.context.bool_type(), "logic")
-                    .expect("a phi");
-                let settled = self.context.bool_type().const_int(
-                    u64::from(*op == LogicOp::Or),
-                    false,
-                );
-                answer.add_incoming(&[(&settled, from), (&right, right_from)]);
-
-                let widened = self
-                    .builder
-                    .build_int_z_extend(
-                        answer.as_basic_value().into_int_value(),
-                        self.context.i64_type(),
-                        "truth",
-                    )
-                    .expect("an extend");
-                (Emitted::Native(widened.into()), Ty::Bool)
-            }
-
-            Expr::Call { func, args, ty, span } => self
-                .emit_call(*func, args, *span, Some(*ty))
-                .expect("a call in a value position answers a value"),
-
-            Expr::Not { operand, .. } => {
-                let held = self.truth(operand);
-                let flipped = self
-                    .builder
-                    .build_not(held, "not")
-                    .expect("a not");
-                let widened = self
-                    .builder
-                    .build_int_z_extend(flipped, self.context.i64_type(), "truth")
-                    .expect("an extend");
-                (Emitted::Native(widened.into()), Ty::Bool)
-            }
-
-            Expr::Compare { op, operands, lhs, rhs, .. } => {
-                let (a, _) = self.expr(lhs);
-                let (b, _) = self.expr(rhs);
-                let truth = if celled(*operands) {
-                    self.cells_compare(a.cell(), b.cell(), *op)
-                } else {
-                    self.relation(a.native(), b.native(), *operands, *op)
-                };
-                // One bit widened to the sixty-four a slot holds.
-                let widened = self
-                    .builder
-                    .build_int_z_extend(truth, self.context.i64_type(), "truth")
-                    .expect("an extend");
-                (Emitted::Native(widened.into()), Ty::Bool)
-            }
-
-            Expr::Binary { op, lhs, rhs, ty, span } => {
-                let (a, _) = self.expr(lhs);
-                let (b, _) = self.expr(rhs);
-                if celled(*ty) {
-                    let dst = self.new_cell(Value::zero(*ty));
-                    self.call_cell_binary(*op, dst, a.cell(), b.cell(), *span);
-                    return (Emitted::Cell(dst), *ty);
-                }
-                (
-                    Emitted::Native(self.arithmetic(*op, a.native(), b.native(), *ty, *span)),
-                    *ty,
-                )
-            }
+    /// The clock, in whichever format it was asked for.
+    fn time_now(&mut self, dst: u16, ty: Ty) {
+        // Asked for in the format it is being read as. Answering in `b64` whatever was
+        // wanted would put a `b64`'s bits in a `b32` register.
+        let tag = self.context.i32_type().const_int(runtime::tag_of(ty) as u64, false);
+        if celled(ty) {
+            let number = self.cell_number(u64::from(dst));
+            self.builder
+                .build_call(self.helpers.cell_time_now, &[number.into(), tag.into()], "")
+                .expect("a call");
+            return;
         }
+        let bits = self
+            .builder
+            .build_call(self.helpers.time_now, &[tag.into()], "now")
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("the clock returns a value")
+            .into_int_value();
+        self.builder.build_store(self.regs[dst as usize], bits).expect("a store");
+    }
+
+    /// Negating a celled value, which is a call like everything else done to one.
+    fn call_cell_neg(&mut self, dst: u64, src: u64, span: Span) {
+        let i32_t = self.context.i32_type();
+        let trapping = i32_t.const_int(u64::from(self.overflow == Overflow::Trap), false);
+        let outcome = self
+            .builder
+            .build_call(
+                self.helpers.cell_neg,
+                &[self.cell_number(dst).into(), self.cell_number(src).into(), trapping.into()],
+                "negated",
+            )
+            .expect("a call")
+            .try_as_basic_value()
+            .expect_basic("it returns a fault code")
+            .into_int_value();
+        self.stop_if_nonzero(outcome, span);
+    }
+
+    /// Negating a value the machine holds.
+    fn negated(&mut self, value: BasicValueEnum<'ctx>, ty: Ty, span: Span) -> BasicValueEnum<'ctx> {
+        // Flipping the sign bit and nothing else, which is exact for every value
+        // including the zeros and the NaNs. Not `0 - x`: `0.0 - 0.0` is `+0.0`, where
+        // negating a zero has to give `-0.0`.
+        if ty == Ty::B16 {
+            let sign = self.context.i16_type().const_int(0x8000, false);
+            return self
+                .builder
+                .build_xor(value.into_int_value(), sign, "neg")
+                .expect("an xor")
+                .into();
+        }
+        if ty.is_float() && !ty.is_decimal() {
+            return self
+                .builder
+                .build_float_neg(value.into_float_value(), "neg")
+                .expect("a negate")
+                .into();
+        }
+        let zero = self.zero(ty);
+        self.arithmetic(BinOp::Sub, zero, value, ty, span)
     }
 
     fn constant(&self, value: &Value) -> BasicValueEnum<'ctx> {
@@ -1273,15 +1053,6 @@ impl<'ctx> Emitter<'ctx> {
 
     /// The stack slots are all `i64`; a narrower or floating value is reshaped on the way
     /// in and out, which LLVM removes entirely once it can see through the alloca.
-    fn load(&self, slot: usize, ty: Ty) -> BasicValueEnum<'ctx> {
-        let raw = self
-            .builder
-            .build_load(self.context.i64_type(), self.slots[slot], "load")
-            .expect("a load")
-            .into_int_value();
-        self.of_bits(raw, ty)
-    }
-
     /// The other direction from [`Self::to_bits`]: bits back into whatever they hold.
     fn of_bits(&self, raw: inkwell::values::IntValue<'ctx>, ty: Ty) -> BasicValueEnum<'ctx> {
         match ty {
@@ -1344,20 +1115,6 @@ impl<'ctx> Emitter<'ctx> {
             Ty::B32 => self.context.f32_type().const_float(0.0).into(),
             Ty::B64 => self.context.f64_type().const_float(0.0).into(),
             _ => self.int_type(ty).const_int(0, false).into(),
-        }
-    }
-
-    /// One, of whichever type — taken from the same place every other execution path takes
-    /// it, because "one" is not the integer 1 in every format. As a `b16` encoding, `1` is
-    /// the smallest subnormal there is, and a loop counting up by it never arrives.
-    fn one(&self, ty: Ty) -> BasicValueEnum<'ctx> {
-        let Value::Num { bits, .. } = luarust_check::value::one_of(ty) else {
-            unreachable!("a number")
-        };
-        match ty {
-            Ty::B32 => self.context.f32_type().const_float(f64::from(f32::from_bits(bits as u32))).into(),
-            Ty::B64 => self.context.f64_type().const_float(f64::from_bits(bits)).into(),
-            _ => self.int_type(ty).const_int(bits, false).into(),
         }
     }
 
