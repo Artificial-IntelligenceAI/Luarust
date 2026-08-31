@@ -24,7 +24,7 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
-use luarust_core::Ty;
+use luarust_core::{BinOp, Ty};
 use luarust_core::heap;
 use luarust_core::value::{
     DEPTH_LIMIT, Fault, Stopped, Value, int_compare, binary_op, compare, format_of, holds, int_op, negate,
@@ -42,6 +42,68 @@ struct Frame {
     registers: Vec<Value>,
     /// The register in the *caller* that receives the answer.
     dst: u16,
+}
+
+/// The instruction the machine actually steps, as opposed to the one the chunk stores.
+///
+/// The one hot case — integer arithmetic — is split so the operation is an opcode
+/// rather than a field. Stored as `Binary { op, .. }`, the operation is data, and
+/// x86-64 pays a second dispatch inside `int_op` for every single instruction; split,
+/// the outer match lands on an arm where the operation is a constant, and the inner
+/// match folds away at compile time. The arithmetic itself is still `int_op`, so this
+/// changes where a decision is made and not what any answer is. The chunk format does
+/// not know this type exists.
+#[derive(Clone, Copy)]
+enum Micro {
+    Add { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Sub { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Mul { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Div { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Mod { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    Other(Op),
+}
+
+/// One-for-one, so every jump target and span index survives unchanged.
+fn widen(code: &[Op]) -> Vec<Micro> {
+    code.iter()
+        .map(|&op| match op {
+            Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Add { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Sub, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Sub { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Mul, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Mul { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Div, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Div { ty, dst, lhs, rhs }
+            }
+            Op::Binary { op: BinOp::Mod, ty, dst, lhs, rhs } if ty.is_integer() => {
+                Micro::Mod { ty, dst, lhs, rhs }
+            }
+            other => Micro::Other(other),
+        })
+        .collect()
+}
+
+/// The integer-arithmetic step, once per [`Micro`] opcode, so the operation reaches
+/// `int_op` as a constant and the dispatch on it disappears into the code.
+macro_rules! int_arm {
+    ($binop:expr, $ty:expr, $dst:expr, $lhs:expr, $rhs:expr,
+     $registers:expr, $spans:expr, $here:expr, $overflow:expr) => {{
+        let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+            (&$registers[$lhs as usize], &$registers[$rhs as usize])
+        else {
+            return Err(Stopped {
+                fault: not_as_described("this says it works on whole numbers"),
+                span: $spans[$here],
+            });
+        };
+        let bits = int_op($binop, $ty, *a, *b, $overflow)
+            .map_err(|fault| Stopped { fault, span: $spans[$here] })?;
+        $registers[$dst as usize] = Value::Num { ty: $ty, bits };
+    }};
 }
 
 /// Run a compiled chunk.
@@ -64,6 +126,11 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
         dst: 0,
     }];
 
+    // Translated once, up front. A map over every instruction costs what a handful of
+    // executed ones do, so this is paid back before the first loop finishes.
+    let top = widen(&chunk.code);
+    let routines: Vec<Vec<Micro>> = chunk.funcs.iter().map(|f| widen(&f.code)).collect();
+
     // Two loops rather than one. The outer runs once per call, and settles which code is
     // being run and where its registers are; the inner runs once per instruction and has
     // both of those in hand already. Doing it in one loop meant finding the frame, and
@@ -75,8 +142,8 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             (frame.routine, frame.at)
         };
         let (code, spans) = match routine {
-            None => (&chunk.code[..], &chunk.spans[..]),
-            Some(index) => (&chunk.funcs[index].code[..], &chunk.funcs[index].spans[..]),
+            None => (&top[..], &chunk.spans[..]),
+            Some(index) => (&routines[index][..], &chunk.funcs[index].spans[..]),
         };
         let depth = frames.len() - 1;
 
@@ -94,6 +161,23 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 at += 1;
 
                 match op {
+            Micro::Add { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Sub { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Sub, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Mul { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Mul, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Div { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Div, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+            Micro::Mod { ty, dst, lhs, rhs } => {
+                int_arm!(BinOp::Mod, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+
+            Micro::Other(op) => match op {
             Op::Halt => return Ok(()),
 
             Op::Call { func, base, argc, dst } => {
@@ -352,6 +436,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     at = target as usize;
                 }
             }
+                },
                 }
             }
         };
