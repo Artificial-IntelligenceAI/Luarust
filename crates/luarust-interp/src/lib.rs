@@ -436,7 +436,7 @@ impl Machine<'_> {
                 Ok(Value::Num { ty: *ty, bits: count })
             }
 
-            Expr::Binary { op, ty, lhs, rhs, span } => {
+            Expr::Binary { op, ty, lhs, rhs, span, .. } => {
                 let lhs = self.eval(lhs, out)?;
                 let rhs = self.eval(rhs, out)?;
                 // The checker already said what these are, so the integers go straight to

@@ -100,7 +100,13 @@ pub enum Expr {
     Load { slot: usize, ty: Ty, span: Span },
     /// The monotonic clock, in seconds.
     TimeNow { ty: Ty, span: Span },
-    Binary { op: BinOp, ty: Ty, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    /// `nonnegative` is only ever true on `Div` and `Mod`, and says the checker proved
+    /// the dividend at or above zero and the divisor above it — which makes floored and
+    /// truncated division the same operation, with nothing to guard. It is advice for a
+    /// compiler, not a fact about the values: both interpreters ignore it and keep
+    /// computing floored `mod` the long way, so a proof that was wrong is caught by the
+    /// three paths disagreeing rather than believed by all of them.
+    Binary { op: BinOp, ty: Ty, lhs: Box<Expr>, rhs: Box<Expr>, span: Span, nonnegative: bool },
     Neg { ty: Ty, operand: Box<Expr>, span: Span },
     /// Answers `bool`. `operands` is what the two sides are, which is what decides how
     /// they get compared.
