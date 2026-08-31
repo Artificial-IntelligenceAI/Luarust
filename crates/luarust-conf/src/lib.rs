@@ -280,6 +280,29 @@ mod tests {
     }
 
     #[test]
+    fn a_hash_is_a_comment_wherever_it_is() {
+        // TOML's comment character. The reader has always handled it; the CLI used to lex
+        // a project file as if it were a program, and `#` is the first thing in TOML that
+        // is nothing at all in Luarust, so that is where it gave itself away.
+        let project = clean(
+            "# what this project wants\n\
+             [defaults]\n\
+             overflow = \"trap\"   # stop rather than wrap\n\
+             \n\
+             # collecting\n\
+             [gc]\n\
+             mode = \"silent\"\n",
+        );
+        assert_eq!(project.overflow, Overflow::Trap);
+        assert_eq!(project.gc, Collect::Silent);
+
+        // And inside quotes it is just a character.
+        let (_, errors) = read("[gc]\nmode = \"#\"\n");
+        assert_eq!(errors.len(), 1, "`\"#\"` is a bad value, not a comment");
+        assert_eq!(errors[0].code, "C0005");
+    }
+
+    #[test]
     fn collecting_is_asked_for_and_never_assumed() {
         assert_eq!(Project::default().gc, Collect::Off, "a program collects only if it says so");
         assert_eq!(clean("[gc]\nmode = \"off\"\n").gc, Collect::Off);

@@ -107,6 +107,24 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
     };
     let source = SourceFile::new(path.clone(), text);
 
+    // A project file is checked as a project file and not as a program.
+    //
+    // Without this, naming one lexes it as Luarust: it has words, `=`, quotes and square
+    // brackets, so it gets a surprising distance before something gives it away -- `#`,
+    // which is a comment in TOML and nothing at all here. The error was then E0003, from
+    // the lexer, about a file the lexer had no business reading.
+    if path.file_name().is_some_and(|name| name == luarust_conf::FILENAME) {
+        let (_, errors) = luarust_conf::read(source.text());
+        if errors.is_empty() {
+            if matches!(then, Then::Nothing) {
+                println!("{} says nothing wrong.", path.display());
+            }
+            return ExitCode::SUCCESS;
+        }
+        eprint!("{}", luarust_diag::report(&source, &errors));
+        return ExitCode::FAILURE;
+    }
+
     // What the project decided applies to every file in it. A `defaults.` line inside the
     // file still overrules it, which the checker handles by starting from these.
     let project = match project_settings(&path) {

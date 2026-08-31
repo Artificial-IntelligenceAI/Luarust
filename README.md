@@ -666,6 +666,9 @@ Anything under `[defaults]` applies to every file in the project, so a preferenc
 hold everywhere is written once. A `defaults.` line at the top of a file still wins for
 that file — whatever a file says about itself is the last word on it.
 
+Comments are `#`, as in any TOML file, at the start of a line or after a value.
+`luarust check Luarust.toml` reads it as a project file and says what is wrong with it.
+
 `[build]` is about what gets delivered rather than what gets accepted. `embed-source`
 decides whether a compiled chunk carries the text it was built from. With it off, the
 chunk carries the line table instead — four bytes per line — so a fault still reports
