@@ -3,59 +3,97 @@
 /// How many dimensions an array may have. Three is a shape you can still picture.
 pub const MAX_RANK: usize = 3;
 
-/// An array type: what it holds and what shape it is.
-///
-/// The element is a *scalar*, never another array. That is what keeps this `Copy` and
-/// keeps a type from having to point at another one — and it is also the reason no value
-/// in this language can contain itself, which turns out to matter more than it looks.
+/// What an array holds and what shape it is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ArrayOf {
-    /// The element, held as its tag so that a type never points at a type.
-    element: u8,
-    /// The fixed dimensions, of which `rank` are used.
+pub struct Shape {
+    /// The element. It may itself be an array, because a shape lives in a table rather
+    /// than inside the type that names it — so nothing here has to be `Copy`-sized.
+    pub element: Ty,
     dims: [u32; MAX_RANK],
-    /// Zero when the array grows, and its length is whatever it has become.
+    /// Zero when the array grows.
     rank: u8,
 }
 
-impl ArrayOf {
-    /// A growable array of this element.
-    pub fn growable(element: Ty) -> Self {
-        ArrayOf { element: element.tag(), dims: [0; MAX_RANK], rank: 0 }
-    }
-
-    /// A fixed array of this element and shape. `None` if the shape is more dimensions
-    /// than an array may have, or if any of them is zero.
-    pub fn fixed(element: Ty, shape: &[u32]) -> Option<Self> {
-        if shape.is_empty() || shape.len() > MAX_RANK || shape.contains(&0) {
-            return None;
-        }
-        let mut dims = [0; MAX_RANK];
-        dims[..shape.len()].copy_from_slice(shape);
-        Some(ArrayOf { element: element.tag(), dims, rank: shape.len() as u8 })
-    }
-
-    pub fn element(self) -> Ty {
-        Ty::from_tag(self.element).expect("an element tag came from a type")
-    }
-
+impl Shape {
     /// The fixed dimensions, as many as there are.
-    pub fn shape(&self) -> &[u32] {
+    pub fn dims(&self) -> &[u32] {
         &self.dims[..self.rank as usize]
     }
 
-    /// Whether it grows, rather than being one fixed size for ever.
-    pub fn grows(self) -> bool {
+    /// Whether it grows, rather than being one size for ever.
+    pub fn grows(&self) -> bool {
         self.rank == 0
     }
 
     /// How many elements a fixed one holds. `None` when it grows.
-    pub fn length(self) -> Option<usize> {
+    pub fn length(&self) -> Option<usize> {
         if self.grows() {
             return None;
         }
-        Some(self.shape().iter().map(|d| *d as usize).product())
+        Some(self.dims().iter().map(|d| *d as usize).product())
     }
+}
+
+thread_local! {
+    /// Every array type the program has named, in the order it named them.
+    ///
+    /// A type has to be small. `Ty` travels inside every `Value` and on every
+    /// instruction, so putting an array's element and dimensions *inside* it made every
+    /// integer in the language wider and cost six percent of the two interpreted paths.
+    /// So an array type is an index into this instead, and `Ty` stays four bytes.
+    ///
+    /// Append-only, so an index is valid for as long as the program runs, and nothing is
+    /// ever freed — there are as many array types as a source file wrote down.
+    static SHAPES: std::cell::RefCell<Vec<Shape>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many different array types one program may name.
+///
+/// Two hundred and fifty-five, because the index rides inside `Ty` and every byte there
+/// is a byte on every value and every instruction. A program with that many *distinct*
+/// array types is not one anybody has written, and the limit is reported rather than
+/// wrapped around quietly.
+pub const MAX_ARRAY_TYPES: usize = 255;
+
+/// The index of this shape, adding it if it is new.
+///
+/// Deliberately *not* thread-safe: an index means what it means within one thread, and a
+/// `Ty` that crossed threads would read the wrong row. Nothing here crosses threads —
+/// compiling and running both happen on one — and a lock on a lookup this hot would cost
+/// more than the whole thing saves.
+pub fn intern(shape: Shape) -> Option<u8> {
+    SHAPES.with(|table| {
+        let mut table = table.borrow_mut();
+        if let Some(found) = table.iter().position(|held| *held == shape) {
+            return Some(found as u8);
+        }
+        if table.len() >= MAX_ARRAY_TYPES {
+            return None;
+        }
+        table.push(shape);
+        Some((table.len() - 1) as u8)
+    })
+}
+
+/// The shape an array type names.
+pub fn shape_of(index: u8) -> Shape {
+    SHAPES.with(|table| table.borrow()[index as usize])
+}
+
+/// A growable array of this element.
+pub fn growable(element: Ty) -> Option<Ty> {
+    Some(Ty::Array(intern(Shape { element, dims: [0; MAX_RANK], rank: 0 })?))
+}
+
+/// A fixed array of this element and shape. `None` if the shape has too many dimensions,
+/// or none, or any of them is zero.
+pub fn fixed(element: Ty, shape: &[u32]) -> Option<Ty> {
+    if shape.is_empty() || shape.len() > MAX_RANK || shape.contains(&0) {
+        return None;
+    }
+    let mut dims = [0; MAX_RANK];
+    dims[..shape.len()].copy_from_slice(shape);
+    Some(Ty::Array(intern(Shape { element, dims, rank: shape.len() as u8 })?))
 }
 
 /// One of Luarust's types.
@@ -80,8 +118,9 @@ pub enum Ty {
     U64,
     Bool,
     Str,
-    /// `array.ui32`, `array.8.ui32`, `array.2x3.ui32`.
-    Array(ArrayOf),
+    /// `array.ui32`, `array.8.ui32`, `array.2x3.ui32`. The index names a [`Shape`];
+    /// see [`intern`] for why it is an index and not the shape itself.
+    Array(u8),
 }
 
 impl Ty {
@@ -138,10 +177,10 @@ impl Ty {
         })
     }
 
-    /// The array this is, if it is one.
-    pub fn array(self) -> Option<ArrayOf> {
+    /// The shape this is an array of, if it is an array.
+    pub fn array(self) -> Option<Shape> {
         match self {
-            Ty::Array(of) => Some(of),
+            Ty::Array(index) => Some(shape_of(index)),
             _ => None,
         }
     }
@@ -175,12 +214,13 @@ impl Ty {
     /// string; [`Ty::word`] is the one for the scalars, which are all names already.
     pub fn written(self) -> String {
         match self {
-            Ty::Array(of) => {
+            Ty::Array(index) => {
+                let of = shape_of(index);
                 if of.grows() {
-                    return format!("array.{}", of.element().word());
+                    return format!("array.{}", of.element.written());
                 }
-                let shape: Vec<String> = of.shape().iter().map(|d| d.to_string()).collect();
-                format!("array.{}.{}", shape.join("x"), of.element().word())
+                let dims: Vec<String> = of.dims().iter().map(|d| d.to_string()).collect();
+                format!("array.{}.{}", dims.join("x"), of.element.written())
             }
             scalar => scalar.word().to_string(),
         }
@@ -319,5 +359,44 @@ impl LogicOp {
             LogicOp::And => "and",
             LogicOp::Or => "or",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shape_named_twice_is_one_shape() {
+        let a = fixed(Ty::U32, &[2, 3]).expect("a shape");
+        let b = fixed(Ty::U32, &[2, 3]).expect("the same shape");
+        assert_eq!(a, b, "naming it twice should not make two types");
+        // And a different shape is a different type, whichever way round.
+        assert_ne!(a, fixed(Ty::U32, &[3, 2]).expect("a shape"));
+        assert_ne!(a, fixed(Ty::I32, &[2, 3]).expect("a shape"));
+        assert_ne!(a, growable(Ty::U32).expect("a shape"));
+    }
+
+    #[test]
+    fn an_array_type_says_what_it_is() {
+        assert_eq!(growable(Ty::U32).expect("a type").written(), "array.ui32");
+        assert_eq!(fixed(Ty::U32, &[8]).expect("a type").written(), "array.8.ui32");
+        assert_eq!(fixed(Ty::B64, &[2, 3]).expect("a type").written(), "array.2x3.b64");
+        assert_eq!(fixed(Ty::I8, &[2, 3, 4]).expect("a type").written(), "array.2x3x4.i8");
+    }
+
+    #[test]
+    fn a_shape_has_to_be_a_shape() {
+        assert!(fixed(Ty::U32, &[]).is_none(), "no dimensions is not a shape");
+        assert!(fixed(Ty::U32, &[2, 0]).is_none(), "a dimension of nothing is not a shape");
+        assert!(fixed(Ty::U32, &[1, 2, 3, 4]).is_none(), "four dimensions is more than three");
+    }
+
+    #[test]
+    fn how_many_elements_a_fixed_one_holds() {
+        let two_by_three = fixed(Ty::U32, &[2, 3]).expect("a type").array().expect("an array");
+        assert_eq!(two_by_three.length(), Some(6));
+        assert_eq!(two_by_three.dims(), &[2, 3]);
+        assert!(growable(Ty::U32).expect("a type").array().expect("an array").length().is_none());
     }
 }

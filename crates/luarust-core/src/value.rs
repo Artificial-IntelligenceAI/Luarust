@@ -63,13 +63,6 @@ pub enum Value {
     /// `er`. Shared for the same reason a string is: a number does not change, so two
     /// names for one is two names for one, and nothing can tell the difference.
     Exact(std::rc::Rc<Exact>),
-    /// An array. Shared rather than copied, so two names for one array *are* one array
-    /// and writing through either is visible through both — which is what choosing a
-    /// collector over ownership means in practice.
-    ///
-    /// The element type travels with it because an empty array still has one, and
-    /// nothing else would be able to say what it is.
-    List(std::rc::Rc<std::cell::RefCell<List>>),
 }
 
 impl PartialEq for Value {
@@ -81,12 +74,6 @@ impl PartialEq for Value {
     }
 }
 
-/// An array's contents and what it is an array of.
-#[derive(Clone, Debug)]
-pub struct List {
-    pub ty: Ty,
-    pub items: Vec<Value>,
-}
 
 /// What every operation gives back: an answer, or a fault behind a pointer.
 ///
@@ -196,12 +183,7 @@ pub fn compare(a: &Value, b: &Value) -> Comparison {
     // text answered "unordered", and unordered makes all three comparisons false.
     let ordering = match (a, b) {
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        // Two arrays are the same array when they are the same array. Comparing the
-        // contents would make `=` mean something different for arrays than for
-        // everything else, where it asks whether two things are one thing.
-        (Value::List(x), Value::List(y)) => {
-            return if std::rc::Rc::ptr_eq(x, y) { Comparison::Equal } else { Comparison::Unordered };
-        }
+
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         // An exact rational orders exactly. There is no NaN here and nothing unordered:
         // every pair of ratios stands one way or the other.
@@ -278,7 +260,6 @@ impl Value {
             Value::Bool(_) => Ty::Bool,
             Value::Str(_) => Ty::Str,
             Value::Exact(_) => Ty::Er,
-            Value::List(list) => list.borrow().ty,
         }
     }
 
@@ -819,12 +800,7 @@ impl std::fmt::Display for Value {
             // A fraction, because that is what it is. A third has no finite decimal, and
             // printing `0.333…` is the one thing this type exists not to do.
             Value::Exact(value) => write!(f, "{value}"),
-            // The elements, in order, in the brackets an array is written in.
-            Value::List(list) => {
-                let list = list.borrow();
-                let written: Vec<String> = list.items.iter().map(|v| v.to_string()).collect();
-                write!(f, "[{}]", written.join(", "))
-            }
+
             _ if self.ty().is_integer() => write!(f, "{}", self.as_i128().unwrap()),
             // A decimal writes out exactly, always: its significand *is* decimal digits,
             // so this is arranging them rather than searching for a shortest form.

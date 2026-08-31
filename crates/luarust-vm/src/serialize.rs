@@ -190,10 +190,6 @@ fn put_value(out: &mut Vec<u8>, value: &Value, dpd: bool) {
     // A decimal is repacked on the way out when the project asked for the other encoding.
     let value = &recode(value, dpd);
     match value {
-        // An array is never a constant. Every time an array literal is reached it has to
-        // make a *new* array, or two passes of a loop would be writing into one -- so the
-        // compiler emits instructions to build one rather than putting it in the pool.
-        Value::List(_) => unreachable!("an array is built by instructions, not stored"),
         Value::Num { ty, bits } => {
             out.push(0);
             put_ty(out, *ty);
@@ -377,9 +373,11 @@ fn put_ty(out: &mut Vec<u8>, ty: Ty) {
         None => out.push(ty.tag()),
         Some(of) => {
             out.push(ARRAY_TAG);
-            out.push(of.element().tag());
-            out.push(of.shape().len() as u8);
-            for dim in of.shape() {
+            // Written out in full rather than as its index: an index means something
+            // only inside the run that made it, and a chunk outlives that.
+            put_ty(out, of.element);
+            out.push(of.dims().len() as u8);
+            for dim in of.dims() {
                 put_u32(out, *dim);
             }
         }
@@ -710,8 +708,7 @@ impl<'a> Cursor<'a> {
     fn ty(&mut self) -> Result<Ty, Broken> {
         let tag = self.u8()?;
         if tag == ARRAY_TAG {
-            let element = Ty::from_tag(self.u8()?)
-                .ok_or(Broken::Unknown { what: "type", value: 0 })?;
+            let element = self.ty()?;
             let rank = self.u8()? as usize;
             if rank > luarust_core::ty::MAX_RANK {
                 return Err(Broken::Unknown { what: "array rank", value: rank as u64 });
@@ -720,13 +717,12 @@ impl<'a> Cursor<'a> {
             for _ in 0..rank {
                 shape.push(self.u32()?);
             }
-            let of = if rank == 0 {
-                luarust_core::ty::ArrayOf::growable(element)
+            let made = if rank == 0 {
+                luarust_core::ty::growable(element)
             } else {
-                luarust_core::ty::ArrayOf::fixed(element, &shape)
-                    .ok_or(Broken::Unknown { what: "array shape", value: 0 })?
+                luarust_core::ty::fixed(element, &shape)
             };
-            return Ok(Ty::Array(of));
+            return made.ok_or(Broken::Unknown { what: "array shape", value: 0 });
         }
         Ok(match tag {
             0 => Ty::B16,
