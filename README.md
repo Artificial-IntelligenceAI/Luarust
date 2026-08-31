@@ -25,7 +25,7 @@ We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.**
 | An error names the rule that was broken and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language with no standard library, no `sqrt`, and no way to read a file or take an argument |
 | Nothing is implicit — no conversion, no truthiness, no coercion. Two types meet only where something said they should | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
 | Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all | Nothing is built on top of them. The tower is wide and the library on it is empty |
-| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | The collector runs on the VM and not yet in compiled code, so a JIT run keeps every array it makes |
+| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | A function can neither take an array nor answer with one, so an array goes no further than the block it was made in |
 | Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine that builds it. That is a big dependency for a small language |
 | Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
 | Only what a program uses gets delivered, and `[gc] mode` is off until asked for — a program that makes no arrays pays nothing for a collector, measurably: 125 ms either way | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
@@ -445,12 +445,32 @@ what no root can reach is garbage, and a reference count would have found exactl
 set. A swept slot keeps its index, because a handle *is* an index, and gives up its
 elements, because that is where the memory was.
 
-**The VM collects. The tree-walker and the JIT do not**, and the reason is the same one
-both times. The VM's intermediate values live in registers, and registers are roots. The
-tree-walker's live in Rust locals up the recursion — the vector being filled for an array
-that is half-built — where nothing can enumerate them. Compiled code's live in machine
-registers, which is the same problem again and is exactly what `gc.statepoint` exists to
-solve; it is not wired up yet.
+**Compiled code collects too**, and not by the usual route. LLVM's `gc.statepoint`
+machinery tracks *pointers* and relocates them from a stack map; a Luarust handle is an
+*index*, so there is nothing for a stack map to relocate and none of that applies.
+
+What compiled code does instead is keep a copy. Register `n` already has cell `n` for
+values machine code cannot hold, and a handle rides in a register perfectly well — so it
+is written to its cell as well, and the frames become the root set. That is one store per
+handle written, and handles are written when an array is made or moved, never in the loop
+that reads one. On the benchmark, which makes no arrays, collection at its most eager
+costs nothing measurable: 276 ms against 276 ms.
+
+| a loop making 200,000 arrays | `"off"` | `"silent"` |
+| --- | --- | --- |
+| VM | 359.7 MB | 3.3 MB |
+| JIT | 385.3 MB | 29.0 MB |
+
+The JIT's floor is higher because the process is carrying LLVM.
+
+It is **conservative**: a cell whose register has since been reused for something else
+keeps its old array alive. That holds on to something dead and never frees something
+live, which is the right way round for that trade to fall.
+
+**The tree-walker does not collect**, and cannot as it stands. Its intermediate values
+live in Rust locals up the recursion — the vector being filled for an array that is
+half-built — where nothing can enumerate them. It is the oracle rather than something
+anybody ships, so it keeps every array it makes and that costs nothing that matters.
 
 None of that can make the paths disagree, because **collecting changes no output**. So
 `luarust fuzz` runs with the VM sweeping every four kilobytes and the other two never

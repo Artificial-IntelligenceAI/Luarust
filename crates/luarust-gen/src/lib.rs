@@ -222,7 +222,7 @@ impl Writer {
         let written: Vec<String> = params
             .iter()
             .enumerate()
-            .map(|(n, ty)| format!("{} 'p{n}'", ty.word()))
+            .map(|(n, ty)| format!("{} 'p{n}'", ty.written()))
             .collect();
         self.line(&format!("fn.{chain} ['{name}'] [{}] {{", written.join(", ")));
 

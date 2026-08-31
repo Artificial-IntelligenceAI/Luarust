@@ -380,7 +380,28 @@ pub extern "C" fn array_len(handle: u64) -> u64 {
 }
 
 /// A new array of `count` elements taken from cells, one after another from `first`.
+/// Sweep, if the heap has asked to be, before making one more array.
+///
+/// Here rather than after, so the array about to be made is never a candidate. Every
+/// frame's cells are the roots: an array handle is written to its cell as well as its
+/// register precisely so that this can see it.
+///
+/// Anything a register holds that is not a handle is looked at and passed over, and a
+/// cell whose register has since been reused for something else keeps its old array
+/// alive. That is conservative -- it holds on to something dead, never frees something
+/// live -- and it is the trade a collector for compiled code without stack maps makes.
+fn sweep_if_asked() {
+    if !luarust_core::heap::wants_collecting() {
+        return;
+    }
+    FRAMES.with(|frames| {
+        let frames = frames.borrow();
+        luarust_core::heap::collect(frames.iter().flatten());
+    });
+}
+
 pub extern "C" fn array_new(element: u32, first: u64, count: u64) -> u64 {
+    sweep_if_asked();
     let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
     let held: Vec<Value> = (0..count).map(|n| cell(first + n)).collect();
     u64::from(luarust_core::heap::of(element, &held))
@@ -388,6 +409,7 @@ pub extern "C" fn array_new(element: u32, first: u64, count: u64) -> u64 {
 
 /// A new array of `count` elements, every one of them what is in `fill`.
 pub extern "C" fn array_filled(element: u32, count: u64, fill: u64) -> u64 {
+    sweep_if_asked();
     let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
     u64::from(luarust_core::heap::make(element, count as usize, &cell(fill)))
 }
@@ -416,6 +438,16 @@ pub extern "C" fn cell_from_bits(dst: u64, bits: u64, tag: u32) {
         Value::Num { ty, bits }
     };
     put(dst, value);
+}
+
+/// An array handle into a cell, so the collector can find it.
+///
+/// It cannot go through `cell_from_bits`, because that takes a scalar's tag and an array
+/// has none -- `Ty::tag` answers `u8::MAX` for one, and there is nowhere in a byte to put
+/// a shape as well as a type. So the shape index travels instead, which is all
+/// `Ty::Array` is made of.
+pub extern "C" fn note_handle(dst: u64, bits: u64, shape: u32) {
+    put(dst, Value::Num { ty: Ty::Array(shape as u8), bits });
 }
 
 /// A whole array, written the way every other path writes one.

@@ -294,6 +294,7 @@ struct Helpers<'ctx> {
     array_get: FunctionValue<'ctx>,
     array_put: FunctionValue<'ctx>,
     cell_from_bits: FunctionValue<'ctx>,
+    note_handle: FunctionValue<'ctx>,
     print_array: FunctionValue<'ctx>,
     note_index: FunctionValue<'ctx>,
 }
@@ -466,6 +467,16 @@ impl<'ctx> Emitter<'ctx> {
         );
         engine.add_global_mapping(&cell_from_bits, runtime::cell_from_bits as *const () as usize);
 
+        let note_handle = module.add_function(
+            "luarust_note_handle",
+            context.void_type().fn_type(
+                &[context.i64_type().into(), context.i64_type().into(), context.i32_type().into()],
+                false,
+            ),
+            None,
+        );
+        engine.add_global_mapping(&note_handle, runtime::note_handle as *const () as usize);
+
         let print_array = module.add_function(
             "luarust_print_array",
             void_t.fn_type(&[i64_t.into(), i32_t.into()], false),
@@ -543,6 +554,7 @@ impl<'ctx> Emitter<'ctx> {
                 array_get,
                 array_put,
                 cell_from_bits,
+                note_handle,
                 print_array,
                 note_index,
             },
@@ -638,6 +650,11 @@ impl<'ctx> Emitter<'ctx> {
                 let bits = function.get_nth_param(argument).expect("a parameter");
                 argument += 1;
                 self.builder.build_store(self.regs[n], bits).expect("a store");
+                // An array arriving as an argument is rooted by the caller's frame, which
+                // is still open. Mirroring it here as well costs one store and means a
+                // routine's own frame answers for everything it holds, rather than the
+                // answer depending on who called it.
+                self.mirror(n as u16, bits.into_int_value(), *ty);
             }
         }
 
@@ -705,6 +722,35 @@ impl<'ctx> Emitter<'ctx> {
     fn put(&self, reg: u16, value: BasicValueEnum<'ctx>, ty: Ty) {
         let bits = self.to_bits(value, ty);
         self.builder.build_store(self.regs[reg as usize], bits).expect("a store");
+        self.mirror(reg, bits, ty);
+    }
+
+    /// Keep a copy of an array handle where the collector can find it.
+    ///
+    /// This is the whole of what compiled code has to do about collecting, and it is the
+    /// answer to a problem LLVM's own `gc.statepoint` machinery cannot solve here: that
+    /// machinery tracks *pointers*, and a Luarust handle is an *index*. There is nothing
+    /// for a stack map to relocate.
+    ///
+    /// So the frame of cells doubles as the root set. Register `n` already has cell `n`
+    /// for values machine code cannot hold; an array handle can live in a register
+    /// perfectly well, and is written to its cell as well so that something on the Rust
+    /// side can enumerate it. One store per handle written, and handles are written when
+    /// an array is made or moved -- never in the loop that reads one, which is the part
+    /// that had to stay a load.
+    fn mirror(&self, reg: u16, bits: inkwell::values::IntValue<'ctx>, ty: Ty) {
+        if ty.array().is_none() {
+            return;
+        }
+        let Ty::Array(shape) = ty else { return };
+        let shape = self.context.i32_type().const_int(u64::from(shape), false);
+        self.builder
+            .build_call(
+                self.helpers.note_handle,
+                &[self.cell_number(u64::from(reg)).into(), bits.into(), shape.into()],
+                "",
+            )
+            .expect("a call");
     }
 
     /// One instruction.
@@ -910,6 +956,7 @@ impl<'ctx> Emitter<'ctx> {
                     .expect_basic("it answers a handle")
                     .into_int_value();
                 self.builder.build_store(self.regs[dst as usize], handle).expect("a store");
+                self.mirror(dst, handle, ty);
             }
 
             Op::Filled { dst, length, value, ty } => {
@@ -930,6 +977,7 @@ impl<'ctx> Emitter<'ctx> {
                     .expect_basic("it answers a handle")
                     .into_int_value();
                 self.builder.build_store(self.regs[dst as usize], handle).expect("a store");
+                self.mirror(dst, handle, ty);
             }
 
             Op::At { dst, array, at, rank, ty } => {
