@@ -631,10 +631,22 @@ That rule is why there are two binaries and not one.
 | `luarust` with the JIT | 32 MB | the above plus LLVM |
 
 `luarust-run` takes a `.lrc` and runs it. It cannot compile, because a chunk already is
-compiled, and it has no lexer, parser, checker, program generator or JIT linked into it
-at all — those are facts about writing Luarust, not about running it. LLVM is fifty times
-the size of everything in this repository put together, which is the clearest possible
-argument that a JIT is a development tool and never part of what you hand somebody.
+compiled, and it has no lexer, parser, checker or program generator linked into it at all
+— those are facts about writing Luarust, not about running it.
+
+The JIT is a different case, and not a fourth thing left out of the runtime because it is
+only for development. **How a shipped program runs is a choice, and there are three of
+them.** The same `.lrc` runs on the VM, or through the JIT, or — eventually — as native
+code compiled ahead of time. A program that starts, does a little and exits wants the VM,
+where nothing is spent compiling. A program that runs for hours wants the JIT, where 25 ms
+of LLVM buys four times the speed for the rest of the day. Neither is the development
+answer and the other the real one.
+
+What the sizes above argue is narrower, and it is the same rule as everywhere else: a
+program that will not use the JIT should not be carrying it. LLVM is fifty times the size
+of everything in this repository put together, so *bundling it by default* would be the
+whole of pay-for-what-you-use thrown away for the benefit of the programs that happen to
+want it. Choosing it should cost 32 MB. Not choosing it should cost nothing.
 
 ## Types
 
