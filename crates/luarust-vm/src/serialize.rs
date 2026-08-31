@@ -25,7 +25,7 @@
 //! complaint and not a crash — and "run anywhere" means files will arrive from places
 //! nobody vouched for.
 
-use crate::chunk::{Chunk, Op, Routine};
+use crate::chunk::{Chunk, Op, Reg, Routine};
 use luarust_core::value::{Overflow, Value};
 use luarust_diag::Span;
 use luarust_num::Uint;
@@ -53,6 +53,8 @@ pub enum Broken {
     NotText,
     /// It points at something that is not there.
     OutOfRange { what: &'static str, index: u64, of: usize },
+    /// It asks for more registers than an instruction could ever name.
+    TooManyRegisters { asked: u64, most: usize },
 }
 
 impl std::fmt::Display for Broken {
@@ -71,6 +73,10 @@ impl std::fmt::Display for Broken {
             Broken::OutOfRange { what, index, of } => {
                 write!(f, "this chunk asks for {what} {index}, and there are {of}.")
             }
+            Broken::TooManyRegisters { asked, most } => write!(
+                f,
+                "this chunk asks for {asked} registers, and an instruction can name {most}."
+            ),
         }
     }
 }
@@ -571,10 +577,32 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
 
 /// Everything a chunk claims about itself, held against what it actually contains.
 ///
+/// Refuse a register count no instruction could name.
+fn too_many(registers: usize) -> Result<(), Broken> {
+    const REACHABLE: usize = Reg::MAX as usize + 1;
+    if registers > REACHABLE {
+        return Err(Broken::TooManyRegisters { asked: registers as u64, most: REACHABLE });
+    }
+    Ok(())
+}
+
 /// The VM indexes registers, constants, text and instructions without checking, because
 /// the compiler never produces an index that is wrong. A file from somewhere else has made
 /// no such promise, so this is where that promise is either kept or refused.
 fn check(chunk: &Chunk) -> Result<(), Broken> {
+    // How many registers a chunk says it wants, before a frame is made out of it.
+    //
+    // An instruction names a register in a `Reg`, which is sixteen bits, so a chunk asking
+    // for more than a `Reg` can reach is describing registers no instruction could ever
+    // address. Every other index is checked against something; this one was the count
+    // itself and was checked against nothing, so a chunk claiming four billion of them
+    // passed and the VM then tried to make four billion values -- ninety-six gigabytes,
+    // for a program of nine registers. One flipped byte in a file is enough to say it.
+    too_many(chunk.registers)?;
+    for routine in &chunk.funcs {
+        too_many(routine.registers)?;
+    }
+
     check_code(chunk, &chunk.code, &chunk.spans, chunk.registers)?;
 
     // The main code halts; a routine returns. Each is checked against its own registers

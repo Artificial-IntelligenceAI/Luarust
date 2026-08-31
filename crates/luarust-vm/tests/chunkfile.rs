@@ -229,3 +229,40 @@ fn a_decimal_survives_being_written_either_way() {
         serialize::write_with(&chunk, "t.lr", source, true, true)
     );
 }
+
+/// A chunk that says it wants more registers than an instruction could name.
+///
+/// Every other index in a chunk is checked against something. This was the count itself,
+/// checked against nothing, so a chunk claiming four billion registers was accepted and
+/// the VM then tried to build four billion values — about ninety-six gigabytes, for a
+/// program of nine registers. One flipped byte in a file was enough to ask for it.
+#[test]
+fn a_chunk_cannot_ask_for_registers_nothing_could_name() {
+    let chunk = compiled("var.local.ui64 ['n'] = [|1|]; print['n'];");
+    let written = serialize::write(&chunk, "test.lr", "");
+
+    // The count is a `u32`, just past the eight magic bytes and the two words after them.
+    let at = 16;
+    assert_eq!(
+        u32::from_le_bytes(written[at..at + 4].try_into().expect("four bytes")) as usize,
+        chunk.registers,
+        "the register count is not where this test thinks it is"
+    );
+
+    let mut asking = |registers: u32| {
+        let mut bytes = written.clone();
+        bytes[at..at + 4].copy_from_slice(&registers.to_le_bytes());
+        serialize::read(&bytes).map(|_| ())
+    };
+
+    // What an instruction can name is fine, however wasteful.
+    assert!(asking(65_536).is_ok(), "a `Reg` reaches 65,536 of them");
+
+    // One more than that cannot be named by anything, so it is refused rather than made.
+    for asked in [65_537, 100_000_000, 4_000_000_000] {
+        assert!(
+            matches!(asking(asked), Err(Broken::TooManyRegisters { .. })),
+            "{asked} registers should be refused, not allocated"
+        );
+    }
+}
