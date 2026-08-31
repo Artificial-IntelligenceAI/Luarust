@@ -41,8 +41,7 @@ jobs:
         run: |
           set +e
           sudo apt-get install -y -qq lua5.4 luajit pypy3 >/dev/null 2>&1
-          cargo install lust-rs >/dev/null 2>&1
-          lua5.4 -v; luajit -v; lust --version; java --version | head -1; cc --version | head -1
+          lua5.4 -v; luajit -v; java --version | head -1; cc --version | head -1
           pypy3 -VV | head -1; python3 -VV
           echo "-- the versions above are what the README's table is describing --"
           exit 0
@@ -144,20 +143,12 @@ jobs:
           EOF
           sed -i 's/^          //' bench.py
 
-            cat > bench.lust <<EOF
-          local sum: int = 0
-          for i = 1, $N do
-            sum = (sum + i) % 1000000007
-          end
-          println(tostring(sum))
-          EOF
 
             bench "C, clang -O2"   ./bench_c $N
             bench "Rust, rustc -O"  ./bench_rs $N
             bench "Java 21"        java Bench $N
             bench "Lua 5.4"        lua5.4 bench.lua
             bench "LuaJIT"         luajit bench.lua
-            bench "Lust"           lust bench.lust
             bench "PyPy"           pypy3 bench.py
             bench "Luarust JIT"    ./target/release/luarust jit bench.lr
             bench "Luarust VM"     ./target/release/luarust run bench.lr
