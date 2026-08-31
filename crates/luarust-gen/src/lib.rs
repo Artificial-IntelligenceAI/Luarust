@@ -447,7 +447,19 @@ impl Writer {
             self.print();
             return;
         };
-        let value = self.value_of(target.ty);
+        // An `er` inside a loop gets a literal, never an expression.
+        //
+        // `er` is exact and unbounded, so it never rounds and never overflows -- which
+        // means `set ['x'] = [math { (524 - 'x') x (792 - 'x') }]` doubles the length of
+        // its numerator and denominator every time round. Sixteen iterations is 65,536
+        // times the digits, and the fuzzer sat on one such program for nine seconds.
+        // Nothing is wrong with the arithmetic; it is the one type in the language with
+        // no ceiling to stop it, so the generator has to supply one.
+        let value = if target.ty == Ty::Er && self.depth > 0 {
+            format!("|{}|", self.literal(target.ty))
+        } else {
+            self.value_of(target.ty)
+        };
         self.line(&format!("set ['{}'] = [{value}];", target.name));
     }
 
@@ -824,7 +836,12 @@ impl Writer {
         let target = changeable[self.rng.below(changeable.len() as u64) as usize].clone();
         let element = target.ty.array().expect("just filtered for one").element;
         let at = self.indices_for(&target);
-        let value = self.value_of(element);
+        // Same ceiling as a plain assignment: see `assignment`.
+        let value = if element == Ty::Er && self.depth > 0 {
+            format!("|{}|", self.literal(element))
+        } else {
+            self.value_of(element)
+        };
         self.line(&format!("set ['{}'{at}] = [{value}];", target.name));
     }
 
