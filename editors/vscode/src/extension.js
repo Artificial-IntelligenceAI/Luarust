@@ -7,6 +7,7 @@
 const { spawn } = require("child_process");
 const vscode = require("vscode");
 const complete = require("./complete");
+const completeToml = require("./complete-toml");
 
 /** Where `luarust` is, as the settings have it. */
 function command() {
@@ -83,7 +84,7 @@ function parse(output) {
 
 /** Run `luarust check` over one file and show whatever it says. */
 function check(document, collection, output) {
-  if (document.languageId !== "luarust") return;
+  if (document.languageId !== "luarust" && document.languageId !== "luarust-toml") return;
 
   const child = spawn(command(), ["check", document.fileName], {
     cwd: vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath,
@@ -163,6 +164,7 @@ function activate(context) {
   );
 
   complete.register(context);
+  completeToml.register(context);
 
   vscode.workspace.textDocuments.forEach((d) => when() !== "never" && now(d));
 }

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Luarust project file",
+  "scopeName": "source.luarust-toml",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#section"
+    },
+    {
+      "include": "#key"
+    },
+    {
+      "include": "#value"
+    },
+    {
+      "include": "#boolean"
+    },
+    {
+      "include": "#text"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.luarust-toml"
+    },
+    "section": {
+      "match": "^\\s*\\[\\s*(defaults|build|gc)\\s*\\]",
+      "captures": {
+        "0": {
+          "name": "entity.name.section.luarust-toml"
+        }
+      }
+    },
+    "key": {
+      "match": "^\\s*(overflow|no-visibility-stated|embed-source|decimal-encoding|mode)\\s*(?==)",
+      "captures": {
+        "1": {
+          "name": "support.type.property-name.luarust-toml"
+        }
+      }
+    },
+    "value": {
+      "match": "\"(wrap|trap|restricted|error|bid|dpd|off|silent|aggressive)\"",
+      "name": "constant.language.luarust-toml"
+    },
+    "boolean": {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.boolean.luarust-toml"
+    },
+    "text": {
+      "name": "string.quoted.double.luarust-toml",
+      "begin": "\"",
+      "end": "\"|$"
+    }
+  }
+}

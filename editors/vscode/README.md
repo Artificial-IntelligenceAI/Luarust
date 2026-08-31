@@ -2,6 +2,8 @@
 
 Syntax highlighting and the compiler's own errors, in the Problems panel.
 
+Covers `.lr` and `Luarust.toml`.
+
 ## What it does
 
 **Highlighting** for `.lr`. The word lists are taken from the lexer and the parser rather
@@ -29,6 +31,29 @@ next, so the list is exactly right rather than merely long:
 Every type carries what it is beside it, so `d64` says *where money keeps its cents* and
 `er` says *never rounds, never overflows*. There are snippets for a declaration, a
 function, both loops, an `if`, a `print` and an array.
+
+**The project file too.** `Luarust.toml` gets its own highlighting, its own suggestions
+and the same errors. There are three sections and five settings, all of them enumerable,
+so the editor is no vaguer about them than the compiler is:
+
+| where | it offers |
+| --- | --- |
+| typing `[` | `defaults` `build` `gc` |
+| in `[gc]` | `mode` |
+| in `[defaults]` | `overflow`, `no-visibility-stated` — minus any already set |
+| after `mode = ` | `"off"` `"silent"` `"aggressive"` |
+| after `embed-source = ` | `true` `false` |
+
+A section that is not one of the three is not coloured, which is the first sign something
+is wrong — before saving, and before the compiler says so. `luarust check Luarust.toml`
+does the rest:
+
+```
+2:12  [C0005] `"explode"` is not something `overflow` can be set to.
+5:1   [C0001] there is no `[bulid]` section.
+6:1   [C0003] `embed-source` is not under any section.
+9:8   [C0005] `"sometimes"` is not something `mode` can be set to.
+```
 
 **Commands**, from the palette: check, run, run through the JIT, and show the bytecode.
 The last three open a terminal so the output is yours to keep.
@@ -70,7 +95,13 @@ function they will offer a name declared outside it, which the checker will then
 
 ## Keeping it honest
 
-`check-grammar.py` compares both copied lists against the compiler and fails if either
-drifted: every word the parser knows must be a word the grammar colours, and the types
-completion offers must be exactly the types that exist. It runs in CI. Both halves were
-checked by breaking them on purpose and watching them fail.
+`check-grammar.py` compares every copied list against the compiler and fails if any of
+them drifted:
+
+- every word the parser knows must be a word the grammar colours
+- the types completion offers must be exactly the types that exist
+- the project file's sections and keys must be exactly what `luarust-conf` reads
+- every value suggested for a setting must be one that reader accepts
+
+It runs in CI, and each of those was checked by breaking it on purpose and watching the
+check fail. A guard nobody has seen fail is not a guard.

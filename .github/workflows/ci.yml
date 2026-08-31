@@ -109,11 +109,14 @@ jobs:
         run: |
           for f in editors/vscode/package.json \
                    editors/vscode/language-configuration.json \
-                   editors/vscode/syntaxes/luarust.tmLanguage.json; do
+                   editors/vscode/syntaxes/luarust.tmLanguage.json \
+                   editors/vscode/syntaxes/luarust-toml.tmLanguage.json \
+                   editors/vscode/toml-configuration.json; do
             python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$f"
           done
           node --check editors/vscode/src/extension.js
           node --check editors/vscode/src/complete.js
+          node --check editors/vscode/src/complete-toml.js
 
   lint:
     name: clippy

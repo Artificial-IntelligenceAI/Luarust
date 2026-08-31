@@ -54,3 +54,36 @@ if unoffered or invented:
     sys.exit(1)
 
 print(f"completion offers all {len(types)} of the compiler's types and no others.")
+
+# The project file's settings are enumerable, so the editor's table and the reader's can be
+# compared outright: section, key and every value each key allows.
+conf = (root / "crates/luarust-conf/src/lib.rs").read_text()
+real_pairs = set(re.findall(r'\("([a-z]+)", "([a-z-]+)"\)', conf))
+toml_js = (root / "editors/vscode/src/complete-toml.js").read_text()
+
+offered_pairs = set()
+for section in re.finditer(r"^  ([a-z]+): \{(.*?)^  \},", toml_js, re.S | re.M):
+    for key in re.findall(r'^      "?([a-z-]+)"?: \{', section.group(2), re.M):
+        offered_pairs.add((section.group(1), key))
+
+if real_pairs != offered_pairs:
+    missing = sorted(real_pairs - offered_pairs)
+    extra = sorted(offered_pairs - real_pairs)
+    if missing:
+        print("settings `luarust-conf` reads that the editor never offers:", missing)
+    if extra:
+        print("settings the editor offers that `luarust-conf` does not read:", extra)
+    print()
+    print("the table is in editors/vscode/src/complete-toml.js.")
+    sys.exit(1)
+
+# Every value the editor suggests must be one the reader accepts.
+accepted = set(re.findall(r'Some\("([a-z]+)"\) =>', conf)) | {"true", "false"}
+suggested = set(re.findall(r'\[\'?"?\\?"?([a-z]+)\\?"?\'?, "', toml_js))
+suggested = set(re.findall(r"\['\\?\"?([a-z]+)\\?\"?'", toml_js)) | set(re.findall(r'\["([a-z]+)",', toml_js))
+invented = sorted(v for v in suggested - accepted if v not in {"what", "keys", "values"})
+if invented:
+    print("values the editor suggests that the project reader would refuse:", invented)
+    sys.exit(1)
+
+print(f"the project file's {len(real_pairs)} settings match `luarust-conf` exactly.")

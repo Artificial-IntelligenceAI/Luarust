@@ -25,6 +25,16 @@
           ".lr"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "luarust-toml",
+        "aliases": [
+          "Luarust project file"
+        ],
+        "filenames": [
+          "Luarust.toml"
+        ],
+        "configuration": "./toml-configuration.json"
       }
     ],
     "grammars": [
@@ -32,6 +42,11 @@
         "language": "luarust",
         "scopeName": "source.luarust",
         "path": "./syntaxes/luarust.tmLanguage.json"
+      },
+      {
+        "language": "luarust-toml",
+        "scopeName": "source.luarust-toml",
+        "path": "./syntaxes/luarust-toml.tmLanguage.json"
       }
     ],
     "configuration": {
