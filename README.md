@@ -25,7 +25,7 @@ We ran some benchmarks, **Luarust is one of the slowest JIT ever 😭.**
 | An error names the rule that was broken and the fix, points at the line, and apologises for the interruption | That is a lot of polish on a language with no standard library, no `sqrt`, and no way to read a file or take an argument |
 | Nothing is implicit — no conversion, no truthiness, no coercion. Two types meet only where something said they should | Saying so is wordy. `var.local.mut.ui32 ['total'] = [\|0\|];` is a lot of characters for a counter |
 | Real IEEE 754, correctly rounded, in five binary formats and three decimal ones — including `b256` and `d128`, which almost nothing else on earth implements — and `er`, which never rounds at all. A float prints as the value it holds, exactly, so `b64 \|0.1\|` shows you it is not one tenth | Nothing is built on top of them. The tower is wide and the library on it is empty. And a `b256` prints more digits than the literal parser can read back |
-| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | A function can neither take an array nor answer with one, so an array goes no further than the block it was made in |
+| Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | An array holds scalars, so there are no arrays of arrays and nothing in the language can contain itself |
 | Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 on the machine that builds it. That is a big dependency for a small language |
 | Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
 | Only what a program uses gets delivered, and `[gc] mode` is off until asked for — a program that makes no arrays pays nothing for a collector, measurably: 125 ms either way | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
@@ -412,6 +412,22 @@ array costs nothing to have around: no new kind of value, and none of the drop-c
 that a reference-counted one would put on every assignment in the language.
 
 ### Collecting them
+
+A function takes one and answers with one, written the way any other type is:
+
+```luarust
+fn.local.array.ui32 ['doubled'] [array.3.ui32 'xs'] {
+    var.local.mut.array.ui32 ['out'] = [filled[|3|, |0|]];
+    loop.temp.range.ui32 ['i'] = [|1|, |3|] {
+        set ['out'['i']] = [math { 'xs'['i'] + 'xs'['i'] }];
+    }
+    return 'out';
+}
+print["doubled " doubled[[|1|, |2|, |3|]] \n];   -- doubled [2, 4, 6]
+```
+
+Nothing is copied. A handle is what travels, so passing a hundred thousand elements costs
+what passing a number costs.
 
 Nothing frees an array on its own, so a program that makes one every time round a loop
 grows for as long as it runs. The collector is what stops that, and it is **off unless

@@ -210,13 +210,13 @@ impl Writer {
     /// A function that answers a value, or nothing, and calls only functions already
     /// written -- so a generated program always finishes.
     fn func_decl(&mut self) {
-        let returns = if self.rng.below(5) == 0 { None } else { Some(self.pick_type()) };
+        let returns = if self.rng.below(5) == 0 { None } else { Some(self.pick_carried_type()) };
         let name = format!("f{}", self.funcs.len());
         let count = self.rng.below(3);
-        let params: Vec<Ty> = (0..count).map(|_| self.pick_type()).collect();
+        let params: Vec<Ty> = (0..count).map(|_| self.pick_carried_type()).collect();
 
         let chain = match returns {
-            Some(ty) => format!("local.{}", ty.word()),
+            Some(ty) => format!("local.{}", ty.written()),
             None => "local.nothing".to_string(),
         };
         let written: Vec<String> = params
@@ -342,6 +342,22 @@ impl Writer {
         let chain = if mutable { format!("local.mut.{}", ty.written()) } else { format!("local.{}", ty.written()) };
         self.line(&format!("var.{chain} ['{name}'] = [{value}];"));
         self.scope.push(Known { name, ty, mutable, depth: self.depth, length: None });
+    }
+
+    /// What a function takes or answers. Sometimes an array, because carrying one across
+    /// a call is its own path -- through registers on one machine and cells on another.
+    ///
+    /// A fixed shape rather than a growable one, so the length is in the type and a body
+    /// can index it without knowing what the caller made.
+    fn pick_carried_type(&mut self) -> Ty {
+        if self.rng.below(6) == 0 {
+            let element = self.pick_type();
+            let len = 1 + self.rng.below(3) as u32;
+            if let Some(ty) = luarust_core::ty::fixed(element, &[len]) {
+                return ty;
+            }
+        }
+        self.pick_type()
     }
 
     /// An array: fixed, shaped, or growable, written out or filled.

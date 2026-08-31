@@ -714,13 +714,49 @@ impl<'a> Parser<'a> {
 
         let mut visibility: Option<(Visibility, Span)> = None;
         let mut returns: Option<(Option<Ty>, Span)> = None;
+        // An `array` opened here and not yet closed by the type it holds, and where it was
+        // opened, so an answer of `array.3.ui32` reads the same way a declaration's does.
+        let mut array: Option<(Option<Vec<u32>>, Span)> = None;
         for (word, span) in &chain {
-            if let Some(found) = Visibility::from_word(word) {
+            if *word == "array" {
+                array = Some((None, *span));
+            } else if let Some(dims) = shape_of(word) {
+                match &mut array {
+                    Some((held @ None, _)) => *held = Some(dims),
+                    _ => self.errors.push(
+                        Diagnostic::new("E0102", format!("`{word}` is a shape, and nothing here is an array."))
+                            .primary(*span, "written here")
+                            .rule("a shape belongs to an `array`")
+                            .fix("write `array` before it, or delete it."),
+                    ),
+                }
+            } else if let Some(found) = Visibility::from_word(word) {
                 visibility = Some((found, *span));
             } else if word == "nothing" {
                 returns = Some((None, *span));
             } else if let Some(found) = Ty::from_word(word) {
-                returns = Some((Some(found), *span));
+                // The type word closes an array opened before it, or is the whole answer.
+                match array.take() {
+                    None => returns = Some((Some(found), *span)),
+                    Some((dims, opened)) => {
+                        let made = match &dims {
+                            None => luarust_core::ty::growable(found),
+                            Some(dims) => luarust_core::ty::fixed(found, dims),
+                        };
+                        match made {
+                            Some(ty) => returns = Some((Some(ty), opened.to(*span))),
+                            None => {
+                                self.errors.push(
+                                    Diagnostic::new("E0135", "this array's shape is not a shape.".to_string())
+                                        .primary(opened.to(*span), "written here")
+                                        .rule("an array has between one and three dimensions, each of them at least one and at most 65,535")
+                                        .fix("give it a smaller shape, or leave the shape out to let it grow."),
+                                );
+                                returns = Some((Some(found), *span));
+                            }
+                        }
+                    }
+                }
             } else {
                 self.errors.push(
                     Diagnostic::new("E0120", format!("`{word}` is not part of a function."))
@@ -818,8 +854,90 @@ impl<'a> Parser<'a> {
         Ok(Expr::Call { name, args, span: word.span.to(close.span) })
     }
 
+    /// A type where one is written on its own: a parameter's, or what a function answers.
+    ///
+    /// A declaration's type arrives inside a dotted chain that also holds a visibility and
+    /// `mut`, so it is sorted out a word at a time by `absorb`. Here there is nothing else
+    /// in the chain -- it is only ever `ui32`, or `array.3.ui32` -- so it reads left to
+    /// right and stops when it has a type.
+    ///
+    /// Returns `None` without consuming anything if the first word is not a type at all,
+    /// so the caller can complain in its own words.
+    fn standalone_type(&mut self) -> Option<(Ty, Span)> {
+        let first = self.peek();
+        if !chainable(first.kind) {
+            return None;
+        }
+        let word = self.text(first);
+
+        if word != "array" {
+            let ty = Ty::from_word(word)?;
+            let span = self.advance().span;
+            return Some((ty, span));
+        }
+
+        // `array`, then optionally a shape, then what it holds.
+        self.advance();
+        let mut dims = None;
+        loop {
+            if self.peek_kind() != Kind::Dot {
+                break;
+            }
+            self.advance();
+            // A shape may arrive as a number (`array.8.ui32`), a shape (`array.2x3.ui32`)
+            // or a word, which is why a chain is read by what a token *may* be rather than
+            // by asking for a word and being handed a `3`.
+            if !chainable(self.peek_kind()) {
+                break;
+            }
+            let word = self.text(self.peek());
+            if let Some(shape) = shape_of(word) {
+                if dims.is_some() {
+                    break;
+                }
+                dims = Some(shape);
+                self.advance();
+                continue;
+            }
+            let Some(element) = Ty::from_word(word) else { break };
+            let last = self.advance().span;
+            let whole = first.span.to(last);
+            let made = match &dims {
+                None => luarust_core::ty::growable(element),
+                Some(dims) => luarust_core::ty::fixed(element, dims),
+            };
+            let Some(ty) = made else {
+                self.errors.push(
+                    Diagnostic::new("E0135", "this array's shape is not a shape.".to_string())
+                        .primary(whole, "written here")
+                        .rule("an array has between one and three dimensions, each of them at least one and at most 65,535")
+                        .tip("a fixed array larger than that wants to be a growable one.")
+                        .fix("give it a smaller shape, or leave the shape out to let it grow."),
+                );
+                // Carry on as the element type, so one mistake makes one complaint.
+                return Some((element, whole));
+            };
+            return Some((ty, whole));
+        }
+        None
+    }
+
     /// `i32 'a'` — the type, then the name it answers to inside the body.
     fn param(&mut self) -> Result<Param> {
+        let start = self.peek();
+        let _ = start;
+        if let Some((ty, ty_span)) = self.standalone_type() {
+            let name_token = self.expect(Kind::Name, "a parameter's name is written in quotes")?;
+            return Ok(Param {
+                span: ty_span.to(name_token.span),
+                ty,
+                ty_span,
+                name: Ident {
+                    text: name_value(self.text(name_token)).to_string(),
+                    span: name_token.span,
+                },
+            });
+        }
         let start = self.peek();
         let Some(ty) = self.word().and_then(Ty::from_word) else {
             return self.fail(
