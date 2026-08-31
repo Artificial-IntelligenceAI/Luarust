@@ -107,6 +107,8 @@ jobs:
         run: python3 editors/vscode/check-grammar.py
       - name: The extension will actually start
         run: python3 editors/vscode/check-manifest.py
+      - name: Each word is offered once, and each snippet says what it inserts
+        run: node editors/vscode/check-suggestions.js
       - name: The extension is valid JSON and valid JavaScript
         run: |
           for f in editors/vscode/package.json \

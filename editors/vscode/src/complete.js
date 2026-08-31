@@ -81,7 +81,22 @@ function snippet(label, detail, body) {
   const made = new vscode.CompletionItem(label, vscode.CompletionItemKind.Snippet);
   made.detail = detail;
   made.insertText = new vscode.SnippetString(body);
+  // What it will actually put in the file, so a snippet and a bare word are told apart by
+  // reading rather than by noticing which icon is beside them.
+  made.documentation = new vscode.MarkdownString("```luarust\n" + plain(body) + "\n```");
   return made;
+}
+
+/** A snippet body as the text it starts out as, with the holes shown filled in. */
+function plain(body) {
+  return body
+    // `${1|a,b|}` -- a choice, shown as the first of them.
+    .replace(/\$\{\d+\|([^|]*)\|\}/g, (_, choices) => choices.split(",")[0])
+    // `${1:name}` -- a hole with something written in it already.
+    .replace(/\$\{\d+:([^}]*)\}/g, "$1")
+    // `$0`, `$1` -- a hole with nothing in it.
+    .replace(/\$\d+/g, "")
+    .replace(/\t/g, "    ");
 }
 
 const SNIPPETS = () => [
@@ -164,9 +179,17 @@ function register(context) {
           const chained = after(before);
           if (chained) return chained;
 
+          // One entry per word. `var`, `fn`, `loop`, `if` and `print` are each a
+          // statement and a snippet, and offering both put two identical-looking rows in
+          // the list with no way to tell which was which. The snippet wins: it is the
+          // same word plus the rest of the construct, and typing the `.` after it opens
+          // the chain list anyway.
+          const written = new Set(SNIPPETS().map((s) => s.label));
           return [
             ...SNIPPETS(),
-            ...STATEMENTS.map(([w, d]) => item(w, d, vscode.CompletionItemKind.Keyword)),
+            ...STATEMENTS.filter(([w]) => !written.has(w)).map(([w, d]) =>
+              item(w, d, vscode.CompletionItemKind.Keyword),
+            ),
             ...types(),
           ];
         },
