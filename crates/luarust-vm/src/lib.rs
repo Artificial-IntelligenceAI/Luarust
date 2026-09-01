@@ -664,6 +664,13 @@ fn engine<F: File>(
         let step = {
             let file = &mut frames.last_mut().expect("a frame is always open").file;
             loop {
+                // Checked, on purpose, and `Ends` in `serialize` is why it *could* be
+                // otherwise: since a chunk has to end in a stop, `at` provably names a
+                // real instruction and this could be `get_unchecked`. It was, and it
+                // measured nothing -- -2.7% on one loop by best and +1.6% by median,
+                // +0.4% on another -- because `at` is already in a register and the
+                // compare predicts perfectly against a load that dominates it. Unsafe
+                // that buys nothing is unsafe that costs something.
                 let op = code[at];
                 // Where this instruction came from is only ever wanted when something
                 // goes wrong, and nothing goes wrong on the overwhelming majority of

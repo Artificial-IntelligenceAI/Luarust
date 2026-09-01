@@ -61,6 +61,8 @@ pub enum Broken {
     /// An instruction disagrees with its registers about what they hold — the claim the
     /// checker proves about programs it compiles, demonstrated here by anything loaded.
     Mistyped { at: u64, register: u64 },
+    /// Its last instruction is one control could fall off the end of.
+    NeverStops { what: &'static str, ends: &'static str },
 }
 
 impl std::fmt::Display for Broken {
@@ -93,6 +95,11 @@ impl std::fmt::Display for Broken {
             Broken::TooManyRegisters { asked, most } => write!(
                 f,
                 "this chunk asks for {asked} registers, and an instruction can name {most}."
+            ),
+            Broken::NeverStops { what, ends } => write!(
+                f,
+                "the {what} of this chunk ends with {ends}, which control can run past -- \
+                 and there is nothing past it."
             ),
         }
     }
@@ -676,12 +683,12 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
         too_many(routine.registers)?;
     }
 
-    check_code(chunk, &chunk.code, &chunk.spans, chunk.registers)?;
+    check_code(chunk, &chunk.code, &chunk.spans, chunk.registers, Ends::Halting)?;
 
     // The main code halts; a routine returns. Each is checked against its own registers
     // and its own instruction count, since neither shares those with anybody.
     for routine in &chunk.funcs {
-        check_code(chunk, &routine.code, &routine.spans, routine.registers)?;
+        check_code(chunk, &routine.code, &routine.spans, routine.registers, Ends::Returning)?;
         if routine.params.len() > routine.registers {
             return Err(Broken::OutOfRange {
                 what: "parameters in a function with registers",
@@ -691,12 +698,24 @@ fn check(chunk: &Chunk) -> Result<(), Broken> {
         }
     }
 
-    // The machine runs until it is told to stop, so a chunk that never says so would run
-    // off the end of its own instructions.
-    if !chunk.code.iter().any(|op| matches!(op, Op::Halt)) {
-        return Err(Broken::Truncated);
-    }
     Ok(())
+}
+
+/// What the last instruction of a run of code has to be.
+///
+/// Not a nicety. Every jump in a chunk is held against the instruction count, so control
+/// can only leave an instruction for a real one -- except by walking off the last, which
+/// nothing was holding against anything. `[Const r0, Jump -> 3, Halt, Move r0 r0]` passed
+/// every check there was, loaded without complaint, and then read instruction four of
+/// four. The compiler ends the top level with a halt and every routine with a return,
+/// across five thousand generated programs and every example in the tree, so demanding it
+/// refuses nothing that was ever written on purpose.
+#[derive(Clone, Copy)]
+enum Ends {
+    /// The top level, which halts.
+    Halting,
+    /// A routine, which returns.
+    Returning,
 }
 
 fn check_code(
@@ -704,6 +723,7 @@ fn check_code(
     code: &[Op],
     spans: &[Span],
     registers: usize,
+    ends: Ends,
 ) -> Result<(), Broken> {
     if spans.len() != code.len() {
         return Err(Broken::OutOfRange {
@@ -714,6 +734,23 @@ fn check_code(
     }
     if code.is_empty() {
         return Err(Broken::Truncated);
+    }
+    let last = code.last().expect("just proved it is not empty");
+    let stops = match ends {
+        Ends::Halting => matches!(last, Op::Halt),
+        Ends::Returning => matches!(last, Op::Return { .. } | Op::ReturnNothing),
+    };
+    if !stops {
+        return Err(Broken::NeverStops {
+            what: match ends {
+                Ends::Halting => "top level",
+                Ends::Returning => "a routine",
+            },
+            ends: match ends {
+                Ends::Halting => "something other than a halt",
+                Ends::Returning => "something other than a return",
+            },
+        });
     }
 
     let register = |r: u16| -> Result<(), Broken> {

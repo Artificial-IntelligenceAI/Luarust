@@ -96,22 +96,34 @@ to within a point.
 
 ## What was left, and why
 
-**The instruction fetch keeps its bounds check.** `check` proves every jump target lands
-on a real instruction and that a `Halt` exists *somewhere* — not that control ever reaches
-it. A chunk ending in something that is not a stop runs off the end of its own code. That
-is a panic today; with the fetch unchecked it would be worse than a panic, so the fetch
-stays honest until the format has a rule that the last instruction stops.
-
-**Verified, not reasoned.** These four instructions — `Const r0`, `Jump → 3`, `Halt`,
-`Move r0, r0` — pass `check`, pass `well_typed`, load without complaint, and then panic
-with `index out of bounds: the len is 4 but the index is 4`. Which is also a hole in a
-promise the serializer makes in its own first paragraph: that a corrupt file produces a
-complaint and not a crash. A panic is a crash.
-
 **The flat instruction was not taken.** Worth −8.7 % and −3.4 % on its own in the spike,
 with no `unsafe` at all, but it means `Micro` stops being a Rust enum, which is a change
 to how every arm of the dispatch loop is written and how `widen` builds one. Worth doing
 deliberately, not as a footnote to this.
+
+## The instruction fetch: a rule worth having, for a reason that turned out to be wrong
+
+This note first said the fetch kept its bounds check only because a chunk could run off
+the end of its own code — `check` proves every jump target lands somewhere real and that a
+`Halt` exists, but never that control reaches it. That was verified, not reasoned: `Const
+r0`, `Jump → 3`, `Halt`, `Move r0, r0` passed every check, loaded without complaint, and
+panicked reading instruction four of four. It broke the promise `serialize` makes in its
+own first paragraph, that a corrupt file produces a complaint and not a crash.
+
+So the rule went in. `Ends` says the top level must end in a halt and a routine in a
+return, which is enough to make walking off the end impossible, and refuses nothing
+anybody meant: 5,010 compiled chunks and 8,785 routines, every generated program and every
+example in the tree, all already ended that way.
+
+**And then the fetch was left checked anyway.** With the rule in place `at` provably names
+a real instruction, so `get_unchecked` is sound — and measuring it found nothing: −2.7 %
+by best and +1.6 % by median on the scalar loop, +0.4 % on the array one. Signs that
+disagree are a measurement of noise. The check is a compare against a value already in a
+register, on a path whose load dominates it, and the predictor never misses.
+
+Which is the honest correction to make: the rule is worth having because a chunk that
+crashes the VM is a broken promise, not because it buys speed. It buys none. The `unsafe`
+that would have collected it is not written.
 
 ## The standing answer
 
