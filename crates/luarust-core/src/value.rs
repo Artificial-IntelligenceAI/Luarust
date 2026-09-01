@@ -79,6 +79,7 @@ pub enum Floats {
 
 thread_local! {
     static FLOATS: std::cell::Cell<Floats> = const { std::cell::Cell::new(Floats::Exact) };
+    static DIVISION: std::cell::Cell<Division> = const { std::cell::Cell::new(Division::Floored) };
 }
 
 impl Floats {
@@ -107,6 +108,25 @@ pub fn set_floats(how: Floats) {
 /// How floats are being written out.
 pub fn floats() -> Floats {
     FLOATS.with(std::cell::Cell::get)
+}
+
+/// Choose which way division rounds, for the rest of this program's run.
+///
+/// Settled once, where `float-printing` is settled, and for the same reasons. It is a
+/// property of the program rather than of an operation: the chunk carries it, every path
+/// installs it before running anything, and it cannot change while a program runs.
+///
+/// It was an argument first, threaded through `binary_op` to `int_op`, and that cost the
+/// tree-walker 6% -- four extra slots on every arithmetic operation, to carry an answer
+/// that only two of them ever look at. The VM never showed it, because its hot arms call
+/// `int_op` directly and skip the chain the tree-walker goes through for everything.
+pub fn set_division(how: Division) {
+    DIVISION.with(|it| it.set(how));
+}
+
+/// Which way division is rounding.
+pub fn division() -> Division {
+    DIVISION.with(std::cell::Cell::get)
 }
 
 pub const DEPTH_LIMIT: usize = if cfg!(debug_assertions) { 100 } else { 2_000 };
@@ -602,24 +622,27 @@ fn decimal_op(op: BinOp, fmt: decimal::Format, lhs: &Value, rhs: &Value) -> Valu
 }
 
 /// `lhs op rhs`, both already known to be the same type.
-pub fn binary_op(
-    op: BinOp,
-    lhs: &Value,
-    rhs: &Value,
-    overflow: Overflow,
-    division: Division,
-) -> Answer<Value> {
-    let plain = floored_binary_op(op, lhs, rhs, overflow, division)?;
-    // Almost nothing leans, and the test for it belongs here rather than behind a call.
-    // Only a remainder can, only under a convention `luarust-num` does not compute, and
-    // only for the families that compute it there -- integers settled quotient and
-    // remainder together at their own width and are already right. Left to `leaning`,
-    // this cost the tree-walker 8% on a loop with no remainder in it at all: it calls
-    // `binary_op` for every operation, where the VM's hot arms go straight to `int_op`.
-    if op != BinOp::Mod || division == Division::Floored || lhs.ty().is_integer() {
+pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Answer<Value> {
+    let ty = lhs.ty();
+    // Whole numbers first, and straight out: they are what hot loops are made of, and they
+    // can never lean -- `int_op` settles a quotient and a remainder together at their own
+    // width, so what comes back is already the convention the project asked for.
+    //
+    // Not merely an ordering preference. Sending them through the wrapper below instead
+    // cost the tree-walker 12% on a loop of nothing but additions: it calls `binary_op`
+    // for every operation, and one more call with a sixteen-byte value coming back through
+    // it is most of what an addition costs. The VM never showed it, because its hot arms
+    // call `int_op` directly and never come here at all.
+    if ty.is_integer() && rhs.ty().is_integer() {
+        return integer_op(op, ty, lhs, rhs, overflow);
+    }
+    let plain = other_binary_op(op, lhs, rhs)?;
+    // What is left can lean, and almost never does: only a remainder, and only under a
+    // convention `luarust-num` does not compute.
+    if op != BinOp::Mod || division() == Division::Floored {
         return Ok(plain);
     }
-    leaning(op, lhs, rhs, plain, overflow, division)
+    leaning(op, lhs, rhs, plain)
 }
 
 /// A remainder the project did not ask for, moved to the one it did.
@@ -638,15 +661,8 @@ pub fn binary_op(
 /// inside `int_op`, because there the quotient has to move with the remainder and both
 /// come out of one place; here `div` is exact division and has no quotient to correct.
 #[inline]
-fn leaning(
-    op: BinOp,
-    lhs: &Value,
-    rhs: &Value,
-    floored: Value,
-    overflow: Overflow,
-    division: Division,
-) -> Answer<Value> {
-    if op != BinOp::Mod || division == Division::Floored {
+fn leaning(op: BinOp, lhs: &Value, rhs: &Value, floored: Value) -> Answer<Value> {
+    if op != BinOp::Mod || division() == Division::Floored {
         return Ok(floored);
     }
     // Integers were settled at their own width, quotient and remainder together.
@@ -658,7 +674,7 @@ fn leaning(
     if is_nought(&floored) {
         return Ok(floored);
     }
-    let step = match division {
+    let step = match division() {
         Division::Floored => false,
         Division::Truncated => negative(lhs) != negative(rhs),
         Division::Euclidean => negative(rhs),
@@ -666,7 +682,7 @@ fn leaning(
     if !step {
         return Ok(floored);
     }
-    floored_binary_op(BinOp::Sub, &floored, rhs, overflow, division)
+    other_binary_op(BinOp::Sub, &floored, rhs)
 }
 
 /// Whether a value is below zero. Not-a-number is not, and neither is a negative nought:
@@ -680,13 +696,12 @@ fn is_nought(value: &Value) -> bool {
     matches!(compare(value, &Value::zero(value.ty())), Comparison::Equal)
 }
 
-fn floored_binary_op(
-    op: BinOp,
-    lhs: &Value,
-    rhs: &Value,
-    overflow: Overflow,
-    division: Division,
-) -> Answer<Value> {
+/// Everything that is not two whole numbers: rationals, decimals, and the floats.
+///
+/// Named for what it is left with rather than for what it does, because what it does is
+/// "the rest". A remainder from here is floored, which is what `luarust-num` computes, and
+/// `leaning` moves it when the project asked for one of the other two.
+fn other_binary_op(op: BinOp, lhs: &Value, rhs: &Value) -> Answer<Value> {
     let ty = lhs.ty();
     if let (Value::Exact(a), Value::Exact(b)) = (lhs, rhs) {
         return exact_op(op, a, b);
@@ -695,9 +710,6 @@ fn floored_binary_op(
         && ty == rhs.ty()
     {
         return Ok(decimal_op(op, fmt, lhs, rhs));
-    }
-    if ty.is_integer() && rhs.ty().is_integer() {
-        return integer_op(op, ty, lhs, rhs, overflow, division);
     }
     // b32 and b64 are the two formats the hardware knows, and for these operations what
     // the hardware does is *correctly rounded* -- which means there is exactly one right
@@ -735,12 +747,11 @@ fn integer_op(
     lhs: &Value,
     rhs: &Value,
     overflow: Overflow,
-    division: Division,
 ) -> Answer<Value> {
     let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (lhs, rhs) else {
         unreachable!("both were checked to be integers");
     };
-    Ok(Value::Num { ty, bits: int_op(op, ty, *a, *b, overflow, division)? })
+    Ok(Value::Num { ty, bits: int_op(op, ty, *a, *b, overflow)? })
 }
 
 /// Integer arithmetic, at the width it is actually stored at.
@@ -757,7 +768,6 @@ pub fn int_op(
     a: u64,
     b: u64,
     overflow: Overflow,
-    division: Division,
 ) -> Answer<u64> {
     macro_rules! at_width {
         ($signed:ty, $unsigned:ty) => {{
@@ -774,7 +784,7 @@ pub fn int_op(
                     if b == 0 {
                         return Err(divide_by_zero());
                     }
-                    let (quotient, _, over) = divided!(division, a, b, $signed);
+                    let (quotient, _, over) = divided!(division(), a, b, $signed);
                     (quotient, over)
                 }
                 BinOp::Mod => {
@@ -784,7 +794,7 @@ pub fn int_op(
                     // A remainder never overflows: it is smaller than the divisor. The
                     // one case the hardware crashes on is the most negative value against
                     // `-1`, whose remainder is nought in every convention.
-                    let (_, remainder, _) = divided!(division, a, b, $signed);
+                    let (_, remainder, _) = divided!(division(), a, b, $signed);
                     (remainder, false)
                 }
                 BinOp::Pow => return power(op, ty, a as i128, b as i128, overflow),

@@ -5,7 +5,7 @@
 //! functions the interpreter and the VM use. That is not a shortcut: it is what keeps the
 //! three paths giving the same answers instead of nearly the same ones.
 
-use luarust_check::value::{Division, Overflow, Value, binary_op, compare, format_of, negate};
+use luarust_check::value::{Overflow, Value, binary_op, compare, format_of, negate};
 use luarust_num::binary::{self, Comparison, Round};
 use luarust_parse::ast::{BinOp, Ty};
 use std::cell::RefCell;
@@ -186,11 +186,10 @@ pub extern "C" fn cell_move(dst: u64, src: u64) {
 
 /// Arithmetic on two cells, into a third. Reading happens before writing, so the
 /// destination may be one of the sources.
-pub extern "C" fn cell_binary(op: u32, dst: u64, a: u64, b: u64, trapping: u32, division: u32) -> i64 {
+pub extern "C" fn cell_binary(op: u32, dst: u64, a: u64, b: u64, trapping: u32) -> i64 {
     let overflow = if trapping == 0 { Overflow::Wrap } else { Overflow::Trap };
-    let division = Division::from_tag(division).expect("the compiler wrote this tag");
     let (x, y) = (cell(a), cell(b));
-    match binary_op(unop(op), &x, &y, overflow, division) {
+    match binary_op(unop(op), &x, &y, overflow) {
         Ok(value) => {
             put(dst, value);
             OK
@@ -394,12 +393,10 @@ pub unsafe extern "C" fn fallback(
     a: u64,
     b: u64,
     trapping: u32,
-    division: u32,
     out: *mut u64,
 ) -> i64 {
     let overflow = if trapping == 0 { Overflow::Wrap } else { Overflow::Trap };
-    let division = Division::from_tag(division).expect("the compiler wrote this tag");
-    let result = binary_op(unop(op), &value_of(tag, a), &value_of(tag, b), overflow, division);
+    let result = binary_op(unop(op), &value_of(tag, a), &value_of(tag, b), overflow);
     match result {
         Ok(Value::Num { bits, .. }) => {
             unsafe { *out = bits };

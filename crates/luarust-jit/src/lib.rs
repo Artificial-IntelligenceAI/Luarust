@@ -113,6 +113,7 @@ fn celled(ty: Ty) -> bool {
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
     luarust_core::heap::set_threshold(chunk.collect.threshold());
     luarust_core::value::set_floats(chunk.floats);
+    luarust_core::value::set_division(chunk.division);
     // A run starts with nothing, the way it does on the other two paths.
     luarust_core::heap::clear();
     match compile_and_run(chunk, Entry::Start, Vec::new(), std::time::Instant::now(), out)? {
@@ -581,7 +582,6 @@ impl<'ctx> Emitter<'ctx> {
                     i64_t.into(),
                     i64_t.into(),
                     i32_t.into(),
-                    i32_t.into(),
                     ptr_t.into(),
                 ],
                 false,
@@ -599,7 +599,7 @@ impl<'ctx> Emitter<'ctx> {
         let cell_binary = module.add_function(
             "luarust_cell_binary",
             i64_t.fn_type(
-                &[i32_t.into(), i64_t.into(), i64_t.into(), i64_t.into(), i32_t.into(), i32_t.into()],
+                &[i32_t.into(), i64_t.into(), i64_t.into(), i64_t.into(), i32_t.into()],
                 false,
             ),
             None,
@@ -1746,7 +1746,6 @@ impl<'ctx> Emitter<'ctx> {
                     self.cell_number(a).into(),
                     self.cell_number(b).into(),
                     trapping.into(),
-                    i32_t.const_int(u64::from(self.division.tag()), false).into(),
                 ],
                 "celled",
             )
@@ -2306,7 +2305,6 @@ impl<'ctx> Emitter<'ctx> {
                     a_bits.into(),
                     b_bits.into(),
                     trapping.into(),
-                    i32_t.const_int(u64::from(self.division.tag()), false).into(),
                     out.into(),
                 ],
                 "fallback",

@@ -196,7 +196,7 @@ fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>) -> Vec<Micro> {
 /// `int_op` as a constant and the dispatch on it disappears into the code.
 macro_rules! int_arm {
     ($binop:expr, $ty:expr, $dst:expr, $lhs:expr, $rhs:expr,
-     $registers:expr, $spans:expr, $here:expr, $overflow:expr, $division:expr) => {{
+     $registers:expr, $spans:expr, $here:expr, $overflow:expr) => {{
         let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
             (&$registers[$lhs as usize], &$registers[$rhs as usize])
         else {
@@ -205,7 +205,7 @@ macro_rules! int_arm {
                 span: $spans[$here],
             });
         };
-        let bits = int_op($binop, $ty, *a, *b, $overflow, $division)
+        let bits = int_op($binop, $ty, *a, *b, $overflow)
             .map_err(|fault| Stopped { fault, span: $spans[$here] })?;
         // Written a field at a time when the slot already holds a number, which it
         // almost always does: a whole-value write is a 16-byte vector store, and the
@@ -242,6 +242,7 @@ pub fn run_with(
     // one -- behaves as the project said.
     heap::set_threshold(chunk.collect.threshold());
     luarust_core::value::set_floats(chunk.floats);
+    luarust_core::value::set_division(chunk.division);
     // A register the checker has proved is written before it is read. The placeholder is
     // never observed by a program that got this far.
     let placeholder = Value::Bool(false);
@@ -324,19 +325,19 @@ pub fn run_with(
                 at = target as usize;
             }
             Micro::Add { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow, chunk.division)
+                int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
             }
             Micro::Sub { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Sub, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow, chunk.division)
+                int_arm!(BinOp::Sub, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
             }
             Micro::Mul { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Mul, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow, chunk.division)
+                int_arm!(BinOp::Mul, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
             }
             Micro::Div { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Div, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow, chunk.division)
+                int_arm!(BinOp::Div, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
             }
             Micro::Mod { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Mod, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow, chunk.division)
+                int_arm!(BinOp::Mod, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
             }
 
             Micro::Other(op) => match op {
@@ -386,7 +387,7 @@ pub fn run_with(
                         span: spans[here],
                     });
                 };
-                let bits = int_op(op, ty, *a, *b, chunk.overflow, chunk.division)
+                let bits = int_op(op, ty, *a, *b, chunk.overflow)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = Value::Num { ty, bits };
             }
@@ -397,7 +398,6 @@ pub fn run_with(
                     &registers[lhs as usize],
                     &registers[rhs as usize],
                     chunk.overflow,
-                    chunk.division,
                 )
                 .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 registers[dst as usize] = value;
