@@ -24,6 +24,7 @@ const JIT_USAGE: &str = "\
     luarust jit <file.lr>       compile it with LLVM, in memory, and run it
     luarust ir <file.lr>        show the LLVM IR
     luarust native <file.lr>    compile it to a program that runs on its own
+    luarust native <file.lr> --for <target>    ... for a different machine
 ";
 
 /// What to do once a file has checked out.
@@ -46,6 +47,16 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let command = args.next();
     let path = args.next().map(PathBuf::from);
+    // `luarust native file.lr --for x86_64-unknown-linux-gnu`. Only `native` reads it:
+    // a chunk already runs anywhere, so only a program being turned into machine code has
+    // a machine to be turned into it *for*.
+    let mut wanted: Option<String> = None;
+    while let Some(arg) = args.next() {
+        if arg == "--for" {
+            wanted = args.next();
+        }
+    }
+    let target = wanted;
 
     let then = match command.as_deref() {
         Some("run") => Then::Run,
@@ -99,10 +110,10 @@ fn main() -> ExitCode {
         eprintln!("that needs a file to work on.\n\n{USAGE}");
         return ExitCode::from(2);
     };
-    act(path, then)
+    act(path, then, target.as_deref())
 }
 
-fn act(path: PathBuf, then: Then) -> ExitCode {
+fn act(path: PathBuf, then: Then, target: Option<&str>) -> ExitCode {
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(why) => {
@@ -208,7 +219,12 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         #[cfg(feature = "jit")]
         Then::Native => {
             let chunk = luarust_vm::compile(&program);
-            native(&chunk, &path, project.target_cpu == luarust_conf::TargetCpu::ThisMachine)
+            native(
+                &chunk,
+                &path,
+                project.target_cpu == luarust_conf::TargetCpu::ThisMachine,
+                target,
+            )
         }
 
         Then::Build => {
@@ -752,27 +768,55 @@ fn ending(outcome: &Result<(), luarust_check::value::Stopped>) -> String {
 /// program. That is the ordinary bargain for compiling ahead of time, and it is the
 /// machine that already has a Luarust toolchain on it.
 #[cfg(feature = "jit")]
-fn native(chunk: &luarust_vm::Chunk, path: &Path, for_this_machine: bool) -> ExitCode {
+fn native(
+    chunk: &luarust_vm::Chunk,
+    path: &Path,
+    for_this_machine: bool,
+    target: Option<&str>,
+) -> ExitCode {
     let object = path.with_extension("o");
-    if let Err(declined) = luarust_jit::write_object(chunk, &object, for_this_machine) {
+    if let Err(declined) = luarust_jit::write_object(chunk, &object, for_this_machine, target) {
         eprintln!("this could not be compiled ahead of time: {}", declined.because);
         return ExitCode::from(2);
     }
 
-    let Some(archive) = runtime_archive() else {
-        eprintln!(
-            "the runtime archive was not found. Build it with `cargo build --release -p \
-             luarust-native`, or name it in LUARUST_RUNTIME."
-        );
+    let Some(archive) = runtime_archive(target) else {
+        let _ = std::fs::remove_file(&object);
+        match target {
+            Some(name) => eprintln!(
+                "the runtime archive for `{name}` was not found. Build it with\n    \
+                 cargo build --release -p luarust-native --target {name}\n\
+                 or name it in LUARUST_RUNTIME. A program cannot be finished for a machine \
+                 whose runtime has never been built."
+            ),
+            None => eprintln!(
+                "the runtime archive was not found. Build it with `cargo build --release \
+                 -p luarust-native`, or name it in LUARUST_RUNTIME."
+            ),
+        }
         return ExitCode::from(2);
     };
 
     let out = path.with_extension("");
-    let linked = std::process::Command::new("cc")
+    let Some((linker, first)) = linker_for(target) else {
+        let _ = std::fs::remove_file(&object);
+        eprintln!(
+            "nothing here can link for `{}`. A cross-linker is needed -- `zig cc -target \
+             <triple>` is one that carries its own libc, and a `<triple>-gcc` is another.",
+            target.unwrap_or("this machine")
+        );
+        return ExitCode::from(2);
+    };
+    let linked = std::process::Command::new(linker)
+        .args(&first)
         .arg("-o")
         .arg(&out)
         .arg(&object)
         .arg(&archive)
+        // Rust's standard library keeps a personality routine for unwinding a panic, and
+        // it wants the unwinder even in a program that never panics. Named here rather
+        // than left to the linker's defaults, which differ per platform.
+        .args(if target.is_some() { &["-lunwind"][..] } else { &[][..] })
         .status();
     let _ = std::fs::remove_file(&object);
     match linked {
@@ -797,12 +841,62 @@ fn native(chunk: &luarust_vm::Chunk, path: &Path, for_this_machine: bool) -> Exi
 /// Named outright in `LUARUST_RUNTIME` if the machine wants to say; otherwise beside this
 /// executable, which is where a built workspace leaves it.
 #[cfg(feature = "jit")]
-fn runtime_archive() -> Option<PathBuf> {
+fn runtime_archive(target: Option<&str>) -> Option<PathBuf> {
     if let Some(named) = std::env::var_os("LUARUST_RUNTIME") {
         let named = PathBuf::from(named);
         return named.exists().then_some(named);
     }
     let here = std::env::current_exe().ok()?;
-    let beside = here.parent()?.join("libluarust_native.a");
-    beside.exists().then_some(beside)
+    let beside = here.parent()?;
+    let found = match target {
+        // Where cargo leaves it when told to build for somewhere else. The host's archive
+        // would link, and would be machine code for the wrong machine.
+        Some(name) => beside.join("..").join(name).join("release/libluarust_native.a"),
+        None => beside.join("libluarust_native.a"),
+    };
+    found.exists().then_some(found)
+}
+
+/// What can turn an object into a program for `target`, and the arguments it needs first.
+///
+/// Building for this machine, the system's `cc` is right and needs telling nothing. For
+/// somewhere else it has to be a linker that knows that somewhere -- `zig cc` carries a
+/// libc for every target it supports, which is why it is looked for first; a
+/// `<triple>-gcc` is the other usual answer and needs no flag because its name is the flag.
+#[cfg(feature = "jit")]
+fn linker_for(target: Option<&str>) -> Option<(String, Vec<String>)> {
+    let Some(name) = target else {
+        return Some(("cc".into(), Vec::new()));
+    };
+    if which("zig") {
+        return Some(("zig".into(), vec!["cc".into(), "-target".into(), zigged(name)]));
+    }
+    let gcc = format!("{name}-gcc");
+    if which(&gcc) {
+        return Some((gcc, Vec::new()));
+    }
+    None
+}
+
+/// Zig spells a target slightly differently from Rust: no vendor in the middle.
+#[cfg(feature = "jit")]
+fn zigged(triple: &str) -> String {
+    let parts: Vec<&str> = triple.split('-').collect();
+    match parts.as_slice() {
+        [arch, _vendor, system, abi] => format!("{arch}-{system}-{abi}"),
+        [arch, _vendor, system] => format!("{arch}-{system}"),
+        _ => triple.to_string(),
+    }
+}
+
+/// Whether `PATH` has this program.
+///
+/// Looked for rather than run. Asking a program its version means knowing how each one
+/// spells the question -- `zig version` has no dashes, and asking it for `--version` says
+/// no such linker exists, which is a wrong answer arrived at confidently.
+#[cfg(feature = "jit")]
+fn which(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join(program).exists())
+    })
 }

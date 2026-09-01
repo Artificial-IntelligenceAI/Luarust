@@ -704,12 +704,28 @@ that file — whatever a file says about itself is the last word on it.
 Comments are `#`, as in any TOML file, at the start of a line or after a value.
 `luarust check Luarust.toml` reads it as a project file and says what is wrong with it.
 
+`luarust native file.lr --for x86_64-unknown-linux-gnu` builds the program for a machine
+that is not this one. LLVM writes the object for whichever target it was built with, so
+that half costs nothing; the rest of it needs two things the language cannot supply for
+you — the runtime archive built for that target, and a linker that can finish the job:
+
+```bash
+cargo build --release -p luarust-native --target x86_64-unknown-linux-gnu
+luarust native hello.lr --for x86_64-unknown-linux-gnu
+```
+
+`zig cc` is looked for first because it carries a libc for every target it knows, and a
+`<triple>-gcc` after it. When neither is there, or the runtime for that target has never
+been built, it says which of the two is missing and what to run — rather than writing an
+object and leaving you with it.
+
 `target-cpu` decides which machine `luarust native` is building a program *for*. It is
 `"portable"` by default — everything the architecture guarantees, and nothing this
 particular processor happens to add — because native output is for the machine that will
 run it, and that machine is not this one unless somebody says so. `"this-machine"` uses
 everything the builder has, which is faster and runs only on a processor at least as
-capable. Getting this wrong is not a slow program: it is an illegal instruction on the
+capable — and is ignored when `--for` names somewhere else, since naming this machine's
+processor is only truthful when this machine is the one that will run it. Getting this wrong is not a slow program: it is an illegal instruction on the
 first one the target does not implement.
 
 `[build]` is about what gets delivered rather than what gets accepted. `embed-source`

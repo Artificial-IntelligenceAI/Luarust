@@ -388,11 +388,12 @@ pub fn write_object(
     chunk: &Chunk,
     to: &std::path::Path,
     for_this_machine: bool,
+    triple: Option<&str>,
 ) -> Result<(), Declined> {
     let context = Context::create();
     let module = context.create_module("luarust");
     native_module(&context, &module, chunk)?;
-    write_out(&module, to, for_this_machine)
+    write_out(&module, to, for_this_machine, triple)
 }
 
 /// The ahead-of-time module's optimised IR, for looking at and for guarding.
@@ -440,13 +441,25 @@ fn write_out(
     module: &Module<'_>,
     to: &std::path::Path,
     for_this_machine: bool,
+    asked: Option<&str>,
 ) -> Result<(), Declined> {
-    if Target::initialize_native(&InitializationConfig::default()).is_err() {
-        return Err(Declined { because: "LLVM has no back end for this machine".into() });
-    }
-    let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple)
-        .map_err(|why| Declined { because: format!("no target for this machine: {why}") })?;
+    // Every back end LLVM was built with, not just this machine's, because the machine
+    // being compiled for is not always this one. Registering the rest costs a table.
+    Target::initialize_all(&InitializationConfig::default());
+    let triple = match asked {
+        Some(name) => inkwell::targets::TargetTriple::create(name),
+        None => TargetMachine::get_default_triple(),
+    };
+    let target = Target::from_triple(&triple).map_err(|why| Declined {
+        because: match asked {
+            Some(name) => format!("LLVM has no back end for `{name}`: {why}"),
+            None => format!("no target for this machine: {why}"),
+        },
+    })?;
+    // Naming this machine's processor is only truthful when this machine is the one that
+    // will run it. Compiling for somewhere else, the answer is what the architecture
+    // guarantees and nothing more.
+    let for_this_machine = for_this_machine && asked.is_none();
     let (cpu, features) = if for_this_machine {
         (
             TargetMachine::get_host_cpu_name().to_string(),
