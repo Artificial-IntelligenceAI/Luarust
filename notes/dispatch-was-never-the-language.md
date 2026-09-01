@@ -155,6 +155,40 @@ So the chunk keeps it and `widen` fuses it away for the machine alone -- `Micro:
 one dimension, nothing else arriving at the `At` it swallows. **307.6 -> 200.9 ms, -34.7%**,
 and `tests/optimised.rs` still finds the vector unit.
 
+## Afterwards again: the flat instruction, and what it was hiding
+
+The flat instruction was approved on this note's own figure -- -8.7% and -3.4% -- and the
+figure was wrong. Two things flattered it: the spike's instructions were eight bytes with
+no variant carrying a whole `Op`, and its enum still had the panic path in the tail arm
+that the real VM lost in `bb413f5`. Matched for size, and with the fix on both sides, a
+flat struct is **+4.3% and +0.5%**. It was not built.
+
+Two more measurements of my own mistakes on the way there: a flat struct at fourteen bytes
+against an enum at twelve read +55%, and one that loaded the whole word before switching
+rather than the tag first read +37%. The gap between those two flat variants was larger
+than anything the comparison was trying to see. Print the sizes; read the tag first.
+
+Size, at what the real `Micro` can actually reach:
+
+| `Micro` at | thin | fat |
+| --- | ---: | ---: |
+| twelve bytes, as it is | -- | -- |
+| ten, which is reachable | -3.3% | +2.1% |
+| eight, which is not | -8.1% | -3.1% |
+
+Ten is worse than twelve on both medians -- it is not a power of two, and the multiply an
+index costs is more than the smaller load saves. Eight is real and out of reach: `Add {
+ty, dst, lhs, rhs }` is eight bytes of payload before the tag.
+
+**Which is what pointed at the thing worth having.** `int_op` settled the width and the
+overflow mode once per instruction executed, for a chunk that had settled both at compile
+time. Ablated off the add loop -- 2.73 ns to 1.92, thirty per cent -- and then built, as
+an opcode per width for chunks that wrap: **-16.9% on the add loop, -9.4% on the array
+loop, -10.7% on the divide-bound one.** Lua goes from 1.56x to 1.34x on the add loop.
+
+Three ideas measured nothing before this one measured something. The instrument that
+found it was ablation, every time; the ones that found nothing were all stories.
+
 ## The standing answer
 
 C is not on the table for the VM. If it comes back it should come back for something C is
