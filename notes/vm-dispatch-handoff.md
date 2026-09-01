@@ -88,6 +88,17 @@ hole it did not have (fable). A check that summarizes its own evidence down to o
 line will eventually summarize away the verdict. Gates ask the exit code —
 `cmd || echo GATE-FAILED` — and filters are for reading, never for deciding.
 
+**The same lesson, wearing optimisation's clothes.** The array loop was 4.04x Lua and
+two confident accounts of why — the index arithmetic, then the shape lookups — were
+written, built, measured and reverted at **0.0% each**. Both were summaries: a story
+about the code, arrived at by reading it. What answered the question was ablating the
+arm a piece at a time and letting each piece say what it cost — index computation
+1.50 ns, element load 2.40 ns, and 6.18 ns still standing with the whole element read
+stubbed out to a store. That last figure is the one that pointed at a `move` nobody
+was looking at, and the fusion that followed took 34.7% off. A diagnosis you reasoned
+your way to is a filter over the evidence, the same as `tail -1` is; it will summarize
+away the answer just as readily. Measure the parts, then say what it was.
+
 **Fixed, the first way.** `run_widened` in `luarust-vm` takes the arrangement as a
 parameter, and `tails_fused_against_not` (ignored, `--nocapture`) times both from one
 binary, interleaved, minima — layout cancels because there is one layout. Its unfused
