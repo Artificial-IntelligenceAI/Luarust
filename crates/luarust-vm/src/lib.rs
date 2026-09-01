@@ -382,11 +382,16 @@ impl File for Boxed {
     }
 }
 
-/// Raw words beside cells: the JIT's split, adopted. The word is authoritative for
-/// everything `celled` says the opcode can type — integers, floats as their encodings,
-/// `bool`, array handles — and the cell beside it for everything else. Arrays sit in
-/// the cells although their handles are words, because the cells are the root set and
-/// an array is the one thing a collection must be able to see.
+/// Raw words beside cells: the JIT's split, adopted whole. The word is authoritative
+/// for everything the opcode can type — integers, floats as their encodings, `bool`,
+/// and array handles — and the cell beside it for the four wide things. A handle
+/// lives in its word, where the loop that reads elements finds it without reaching
+/// through a `Value`, and is *mirrored* into the cell beside it when written — the
+/// JIT's own answer, one store at the sites that make or move an array, so the cells
+/// stay the whole of the root set a collection walks. Celling the handle instead cost
+/// the array loop 11% end to end, found by be against main where the in-binary
+/// harness could not see it: the harness compares the two arrangements in this
+/// binary, and the boxed one had drifted under the same refactor.
 struct Split {
     raw: Vec<u64>,
     /// Grown to size on the first celled write, and empty until then: most frames hold
@@ -406,9 +411,9 @@ impl Split {
     }
 }
 
-/// Whether a register of this type lives in the cells.
+/// Whether a register of this type lives in the cells. The JIT's line, exactly.
 fn celled(ty: Ty) -> bool {
-    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str | Ty::Er | Ty::Array(_)) || ty.is_decimal()
+    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str | Ty::Er) || ty.is_decimal()
 }
 
 impl File for Split {
@@ -425,7 +430,7 @@ impl File for Split {
         Some(self.raw[at as usize] != 0)
     }
     fn handle(&self, at: chunk::Reg) -> Option<u32> {
-        handle_of(self.cells.get(at as usize)?)
+        Some(self.raw[at as usize] as u32)
     }
     fn index(&self, at: chunk::Reg) -> i128 {
         i128::from(self.raw[at as usize])
@@ -440,11 +445,20 @@ impl File for Split {
         } else if ty == Ty::Bool {
             Value::Bool(self.raw[at as usize] != 0)
         } else {
+            // Arrays come this way too: the word is the handle, and `Num` around it is
+            // exactly the value the boxed file would have held.
             Value::Num { ty, bits: self.raw[at as usize] }
         }
     }
     fn put(&mut self, at: chunk::Reg, value: Value) {
         match value {
+            // A handle's word is what the element loop reads; the mirror into the cell
+            // is what the collector reads. Written here, at the sites that make or
+            // move an array, never in the loop that reads one.
+            Value::Num { ty: ty @ Ty::Array(_), bits } => {
+                self.raw[at as usize] = bits;
+                self.cells_now()[at as usize] = Value::Num { ty, bits };
+            }
             Value::Num { ty, bits } if !celled(ty) => self.raw[at as usize] = bits,
             Value::Bool(answer) => self.raw[at as usize] = u64::from(answer),
             value => self.cells_now()[at as usize] = value,
