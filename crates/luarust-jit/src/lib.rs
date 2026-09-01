@@ -362,6 +362,16 @@ fn compile_and_run(
     })
 }
 
+/// Wake LLVM's process-wide target registry, before anything else might.
+///
+/// Everything here makes its own `Context` and its own engine, so two threads compiling at
+/// once do not share anything -- except this, which LLVM initialises lazily on first use
+/// and does not promise is safe to race. Touched once, deliberately, by whoever is about
+/// to start threads.
+pub fn ready() {
+    let _ = Target::initialize_native(&InitializationConfig::default());
+}
+
 /// Compile a chunk to an object file, for linking into a program that runs by itself.
 ///
 /// The same emitter, the same passes, the same machine code as the in-memory JIT -- what

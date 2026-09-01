@@ -550,125 +550,187 @@ fn verify(program: &luarust_check::ir::Checked, source: &SourceFile) -> ExitCode
 ///
 /// Type-directed, so every generated program compiles -- one that did not would be
 /// rejected identically by both paths and would prove nothing.
+/// What one seed came to.
+#[derive(Default)]
+struct Tally {
+    ran: u64,
+    stopped: u64,
+    took: u64,
+}
+
+/// Write and check one program. `Err` is the whole report, ready to print.
+///
+/// Everything a seed touches is one thread's: the heap, the table of array shapes, how
+/// floats print, which way division rounds. That is why this can be handed to a pool
+/// without a lock anywhere -- the arrangement that makes parallel *loops* in the language
+/// hard is exactly what makes checking many programs at once easy.
+fn one_seed(seed: u64) -> Result<Tally, String> {
+    use std::fmt::Write as _;
+    let mut tally = Tally::default();
+    let written = luarust_gen::program(seed);
+    let source = SourceFile::new(format!("seed-{seed}.lr"), written.source.clone());
+
+    let lexed = luarust_lex::lex(source.text());
+    let parsed = luarust_parse::parse(source.text(), &lexed.tokens);
+    // The settings this seed runs under, so a sweep covers the combinations rather than
+    // one corner of them. Every path is told the same thing, so this varies what the
+    // answer is and never who agrees about it. `overflow` matters most: under `trap` the
+    // JIT stops compiling arithmetic and calls back for every operation.
+    let start = luarust_check::Start {
+        overflow: if seed.is_multiple_of(5) {
+            luarust_core::value::Overflow::Trap
+        } else {
+            luarust_core::value::Overflow::Wrap
+        },
+        collect: match (seed / 5) % 3 {
+            0 => luarust_core::heap::Collect::Off,
+            1 => luarust_core::heap::Collect::Silent,
+            _ => luarust_core::heap::Collect::Aggressive,
+        },
+        floats: if (seed / 15).is_multiple_of(2) {
+            luarust_core::value::Floats::Exact
+        } else {
+            luarust_core::value::Floats::Shortest
+        },
+        division: match (seed / 30) % 3 {
+            0 => luarust_core::value::Division::Floored,
+            1 => luarust_core::value::Division::Truncated,
+            _ => luarust_core::value::Division::Euclidean,
+        },
+        ..luarust_check::Start::default()
+    };
+    let (program, errors) = luarust_check::check_with(&parsed.program, start);
+    let refused: Vec<_> = lexed.errors.into_iter().chain(parsed.errors).chain(errors).collect();
+    if !refused.is_empty() {
+        let mut why = format!("seed {seed}: a generated program did not compile.\n\n");
+        why.push_str(&written.source);
+        why.push_str(&luarust_diag::report(&source, &refused));
+        return Err(why);
+    }
+
+    let mut walked = Vec::new();
+    let walk = luarust_interp::run(&program, &mut walked);
+    let chunk = luarust_vm::compile(&program);
+    let mut vm_out = Vec::new();
+    let vm = luarust_vm::run(&chunk, &mut vm_out);
+
+    let agreed = |a: &Result<(), luarust_check::value::Stopped>,
+                  b: &Result<(), luarust_check::value::Stopped>| match (a, b) {
+        (Ok(()), Ok(())) => true,
+        (Err(a), Err(b)) => a.fault.code == b.fault.code,
+        _ => false,
+    };
+
+    // And the third path, when this build has one. A program the JIT declines is not a
+    // disagreement -- it is the JIT saying so, which is its right.
+    #[cfg(feature = "jit")]
+    if let Ok(jitted) = {
+        let mut jit_out = Vec::new();
+        luarust_jit::run(&chunk, &mut jit_out).map(|outcome| (outcome, jit_out))
+    } {
+        tally.took += 1;
+        let (outcome, jit_out) = jitted;
+        if walked != jit_out || !agreed(&walk, &outcome) {
+            let mut why = format!("seed {seed}: the interpreter and the JIT DISAGREE.\n\n");
+            why.push_str(&written.source);
+            let _ = write!(why, "\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
+            let _ = write!(why, "the JIT printed:\n{}", String::from_utf8_lossy(&jit_out));
+            let _ = writeln!(why, "\ninterpreter: {}", ending(&walk));
+            let _ = writeln!(why, "the JIT:     {}", ending(&outcome));
+            let _ = write!(why, "\n{}", chunk.disassemble());
+            return Err(why);
+        }
+    }
+
+    if walked != vm_out || !agreed(&walk, &vm) {
+        let mut why = format!("seed {seed}: the two paths DISAGREE.\n\n");
+        why.push_str(&written.source);
+        let _ = write!(why, "\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
+        let _ = write!(why, "the VM printed:\n{}", String::from_utf8_lossy(&vm_out));
+        let _ = writeln!(why, "\ninterpreter: {}", ending(&walk));
+        let _ = writeln!(why, "the VM:      {}", ending(&vm));
+        let _ = write!(why, "\n{}", chunk.disassemble());
+        return Err(why);
+    }
+
+    tally.ran += 1;
+    if walk.is_err() {
+        tally.stopped += 1;
+    }
+    Ok(tally)
+}
+
 fn fuzz(count: u64) -> ExitCode {
     // Collecting hard, on purpose, and only on one of the paths. The VM sweeps its heap
     // every four kilobytes; the tree-walker and the JIT never sweep at all. A collector
     // that freed something a program could still reach would show up here as a
     // disagreement, which is a far better way to find out than a wrong answer months
     // later in something that matters.
-    luarust_core::heap::set_threshold(luarust_conf::Collect::Aggressive.threshold());
+    let hard = luarust_conf::Collect::Aggressive.threshold();
+    luarust_core::heap::set_threshold(hard);
 
-    let mut ran = 0u64;
+    // LLVM's target registry is process-wide and initialised on first use. Touched here,
+    // once, before anything is spawned, rather than by whichever thread compiles first.
     #[cfg(feature = "jit")]
-    let mut took = 0u64;
-    let mut stopped = 0u64;
+    luarust_jit::ready();
 
-    for seed in 1..=count {
-        let written = luarust_gen::program(seed);
-        let source = SourceFile::new(format!("seed-{seed}.lr"), written.source.clone());
+    let hands = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
+    let each = count.div_ceil(hands.max(1));
 
-        let lexed = luarust_lex::lex(source.text());
-        let parsed = luarust_parse::parse(source.text(), &lexed.tokens);
-        // The settings this seed runs under, so a sweep covers the combinations rather
-        // than one corner of them. Every path is told the same thing, so this varies what
-        // the answer is and never who agrees about it. `overflow` matters most: under
-        // `trap` the JIT stops compiling arithmetic and calls back for every operation.
-        let start = luarust_check::Start {
-            overflow: if seed.is_multiple_of(5) {
-                luarust_core::value::Overflow::Trap
-            } else {
-                luarust_core::value::Overflow::Wrap
-            },
-            collect: match (seed / 5) % 3 {
-                0 => luarust_core::heap::Collect::Off,
-                1 => luarust_core::heap::Collect::Silent,
-                _ => luarust_core::heap::Collect::Aggressive,
-            },
-            floats: if (seed / 15).is_multiple_of(2) {
-                luarust_core::value::Floats::Exact
-            } else {
-                luarust_core::value::Floats::Shortest
-            },
-            division: match (seed / 30) % 3 {
-                0 => luarust_core::value::Division::Floored,
-                1 => luarust_core::value::Division::Truncated,
-                _ => luarust_core::value::Division::Euclidean,
-            },
-            ..luarust_check::Start::default()
-        };
-        let (program, errors) = luarust_check::check_with(&parsed.program, start);
-        let refused: Vec<_> =
-            lexed.errors.into_iter().chain(parsed.errors).chain(errors).collect();
-        if !refused.is_empty() {
-            println!("seed {seed}: a generated program did not compile.\n");
-            print!("{}", written.source);
-            print!("{}", luarust_diag::report(&source, &refused));
-            return ExitCode::FAILURE;
-        }
-
-        let mut walked = Vec::new();
-        let walk = luarust_interp::run(&program, &mut walked);
-        let chunk = luarust_vm::compile(&program);
-        let mut vm_out = Vec::new();
-        let vm = luarust_vm::run(&chunk, &mut vm_out);
-
-        let same_ending = match (&walk, &vm) {
-            (Ok(()), Ok(())) => true,
-            (Err(a), Err(b)) => a.fault.code == b.fault.code,
-            _ => false,
-        };
-        // And the third path, when this build has one. A program the JIT declines is not a
-        // disagreement -- it is the JIT saying so, which is its right.
-        #[cfg(feature = "jit")]
-        if let Ok(jitted) = {
-            let mut jit_out = Vec::new();
-            luarust_jit::run(&chunk, &mut jit_out).map(|outcome| (outcome, jit_out))
-        } {
-            took += 1;
-            let (outcome, jit_out) = jitted;
-            let same_ending = match (&walk, &outcome) {
-                (Ok(()), Ok(())) => true,
-                (Err(a), Err(b)) => a.fault.code == b.fault.code,
-                _ => false,
-            };
-            if walked != jit_out || !same_ending {
-                println!("seed {seed}: the interpreter and the JIT DISAGREE.\n");
-                print!("{}", written.source);
-                println!("\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
-                println!("the JIT printed:\n{}", String::from_utf8_lossy(&jit_out));
-                println!("\ninterpreter: {}", ending(&walk));
-                println!("the JIT:     {}", ending(&outcome));
-                println!("\n{}", chunk.disassemble());
-                return ExitCode::FAILURE;
+    let results = std::thread::scope(|scope| {
+        let mut running = Vec::new();
+        for hand in 0..hands {
+            let low = 1 + hand * each;
+            let high = ((hand + 1) * each).min(count);
+            if low > high {
+                continue;
             }
+            running.push(scope.spawn(move || {
+                // Per thread, because the heap is per thread.
+                luarust_core::heap::set_threshold(hard);
+                let mut total = Tally::default();
+                for seed in low..=high {
+                    match one_seed(seed) {
+                        Ok(tally) => {
+                            total.ran += tally.ran;
+                            total.stopped += tally.stopped;
+                            total.took += tally.took;
+                        }
+                        Err(why) => return (total, Some((seed, why))),
+                    }
+                }
+                (total, None)
+            }));
         }
+        running.into_iter().map(|hand| hand.join().expect("a fuzzing thread")).collect::<Vec<_>>()
+    });
 
-        if walked != vm_out || !same_ending {
-            println!("seed {seed}: the two paths DISAGREE.\n");
-            print!("{}", written.source);
-            println!("\ninterpreter printed:\n{}", String::from_utf8_lossy(&walked));
-            println!("the VM printed:\n{}", String::from_utf8_lossy(&vm_out));
-            println!("\ninterpreter: {}", ending(&walk));
-            println!("the VM:      {}", ending(&vm));
-            println!("\n{}", chunk.disassemble());
-            return ExitCode::FAILURE;
-        }
-
-        ran += 1;
-        if walk.is_err() {
-            stopped += 1;
-        }
+    // The lowest failing seed, so which one is reported does not depend on which thread
+    // finished first. A run that disagrees is a bug either way, but a bug that names a
+    // different seed each time is a worse one to chase.
+    let worst = results.iter().filter_map(|(_, bad)| bad.as_ref()).min_by_key(|(seed, _)| *seed);
+    if let Some((_, why)) = worst {
+        print!("{why}");
+        return ExitCode::FAILURE;
     }
 
+    let total = results.iter().fold(Tally::default(), |mut all, (tally, _)| {
+        all.ran += tally.ran;
+        all.stopped += tally.stopped;
+        all.took += tally.took;
+        all
+    });
+    let (ran, stopped) = (total.ran, total.stopped);
     #[cfg(feature = "jit")]
     println!(
-        "{ran} programs, all compiled, all agreed. {stopped} of them stopped part way, \
-         and stopped the same way every time. The JIT took {took} of them."
+        "{ran} programs on {hands} threads, all compiled, all agreed. {stopped} of them \
+         stopped part way, and stopped the same way every time. The JIT took {} of them.",
+        total.took
     );
     #[cfg(not(feature = "jit"))]
     println!(
-        "{ran} programs, all compiled, all agreed. {stopped} of them stopped part way, \
-         and stopped the same way both times."
+        "{ran} programs on {hands} threads, all compiled, all agreed. {stopped} of them \
+         stopped part way, and stopped the same way both times."
     );
     ExitCode::SUCCESS
 }
