@@ -63,3 +63,17 @@ the two that exist both call it. Forgetting it is silent: correct output, green 
 fuzzer agreeing, and 43% slower than it should be. The doc comment on `optimise` in
 `luarust-jit/src/lib.rs` says so, because that is how the JIT shipped until somebody read
 the IR it was emitting.
+
+A comment does not fail, so write the guard that does — and do not write it as a timing
+assertion, which is flaky and needs a machine to be quiet. Both paths run the same emitter
+over the same chunk, so **the optimised IR they produce must be identical**:
+
+```rust
+// The ahead-of-time path and the in-memory one differ in where the machine code goes,
+// not in what it says. If they ever disagree, one of them is missing a pass.
+assert_eq!(emit_ir(&chunk), emit_ir_for_native(&chunk));
+```
+
+That is deterministic, runs in milliseconds, needs no benchmark, and fails loudly the day
+somebody adds a fourth path and forgets. It also catches the opposite mistake — a pass
+added to one path and not the other — which no benchmark would ever tell you about.
