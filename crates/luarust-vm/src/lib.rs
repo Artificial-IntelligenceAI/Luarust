@@ -490,7 +490,14 @@ pub fn run_with(
                 };
                 let index = offset(ty, handle, registers, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                registers[dst as usize] = heap::read(handle, index).ok_or(Stopped {
+                // `ok_or_else`, and the difference is not style. `ok_or` builds its
+                // argument whether or not it is wanted, so every element that *was* there
+                // still paid for a fault describing the one time it might not be --
+                // `out_of_range` formats a message, which allocates a `String`, and it
+                // asked the heap for the length again to do it. A profile of a loop
+                // summing thirty million elements had thirty per cent of its samples in
+                // there, building errors for a program that never had one.
+                registers[dst as usize] = heap::read(handle, index).ok_or_else(|| Stopped {
                     fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
                     span: spans[here],
                 })?;

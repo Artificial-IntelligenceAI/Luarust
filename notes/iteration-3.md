@@ -51,6 +51,21 @@ vectorises the loop.
 Worth knowing for the next time an attribute seems to do nothing: check what the *printed*
 IR calls it, not what you set.
 
+**And the VM was paying for errors it never had.** `Op::At` read an element with
+`ok_or(Stopped { fault: out_of_range(...) })`. `ok_or` builds its argument whether it is
+wanted or not, so every element that *was* there still paid to describe the one time it
+might not be: `out_of_range` formats a message, formatting allocates a `String`, and it
+asked the heap for the array's length again in order to do it. A profile of the loop had
+thirty per cent of its samples inside that, building faults for a program that had none.
+
+    array loop, 30M reads      before      after
+      bytecode VM              3,385 ms    651 ms
+      tree-walker              1,010 ms  1,033 ms
+
+`ok_or_else` and it is gone. The tell was there to be read for a long time: the VM was
+*three times slower than the tree-walker* on array code, which is backwards, and the reason
+is that the tree-walker already wrote `ok_or_else` on the same line.
+
 **One caveat on the claim.** `memory(read)` says these calls only read. They also take a
 `RefCell` borrow, which writes a flag -- so it is very slightly stronger than the truth.
 Nothing compiled ever reads that flag, every borrow is balanced inside the call, and the
@@ -60,11 +75,6 @@ Making the claim exactly true means reading the base and length without touching
 `RefCell` -- a small spans table read through a raw pointer -- and is worth doing.
 
 ## Left
-
-**Inline `$bash { }`, gated on native output.** Only meaningful for a program that is
-becoming a binary, because a chunk that runs anywhere cannot promise a shell exists there.
-The syntax sketch is `$<language> { ... }`. Open: what the equivalent is per platform, and
-what crosses the boundary in each direction.
 
 **External FFI — calling C from Luarust.** Not the internal boundary that already exists
 (compiled code calling `luarust_print_text` and the rest of `luarust-runtime`). This is the
@@ -152,6 +162,15 @@ shared-memory threads last if ever, because that one argues with the first line 
 README.
 
 ## Not iteration 3
+
+**Inline `$bash { }` was pulled off the list on 2026-09-01**, to optimise first. Kept here
+rather than deleted, because the reasoning still holds if it comes back:
+
+**Inline `$bash { }`, gated on native output.** Only meaningful for a program that is
+becoming a binary, because a chunk that runs anywhere cannot promise a shell exists there.
+The syntax sketch is `$<language> { ... }`. Open: what the equivalent is per platform, and
+what crosses the boundary in each direction.
+
 
 Caching aside, the hot JIT still cannot count *bare calls* — a routine with no loop in it,
 called a great many times, never trips anything. Measured and deliberately deferred: an
