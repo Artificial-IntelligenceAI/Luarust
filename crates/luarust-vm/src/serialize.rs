@@ -37,7 +37,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -281,13 +281,14 @@ fn put_op(out: &mut Vec<u8>, op: Op) {
             put_u16(out, src);
             put_ty(out, ty);
         }
-        Op::Binary { op, ty, dst, lhs, rhs } => {
+        Op::Binary { op, ty, dst, lhs, rhs, nonnegative } => {
             out.push(2);
             out.push(op_tag(op));
             put_ty(out, ty);
             put_u16(out, dst);
             put_u16(out, lhs);
             put_u16(out, rhs);
+            out.push(u8::from(nonnegative));
         }
         Op::Neg { dst, src, ty } => {
             out.push(3);
@@ -926,12 +927,24 @@ impl<'a> Cursor<'a> {
         Ok(match self.u8()? {
             0 => Op::Const { dst: self.u16()?, konst: self.u32()? },
             1 => Op::Move { dst: self.u16()?, src: self.u16()?, ty: self.ty()? },
+            // The flag is the one field in a chunk that `check` cannot hold against
+            // anything: a proof indexes nothing. A file that lies here makes the JIT
+            // emit a truncated remainder where floored differs, and only the paths
+            // disagreeing will say so. Accepted knowingly — the alternative was the
+            // JIT re-deriving from compiled jumps what the checker read off the tree.
             2 => Op::Binary {
                 op: self.binop()?,
                 ty: self.ty()?,
                 dst: self.u16()?,
                 lhs: self.u16()?,
                 rhs: self.u16()?,
+                nonnegative: match self.u8()? {
+                    0 => false,
+                    1 => true,
+                    value => {
+                        return Err(Broken::Unknown { what: "a division flag", value: value.into() });
+                    }
+                },
             },
             3 => Op::Neg { dst: self.u16()?, src: self.u16()?, ty: self.ty()? },
             4 => Op::TimeNow { dst: self.u16()?, ty: self.ty()? },

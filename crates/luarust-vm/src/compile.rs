@@ -265,7 +265,7 @@ impl Compiler {
                     *span,
                 );
                 self.emit(
-                    Op::Binary { op: BinOp::Add, ty: *ty, dst: counter, lhs: counter, rhs: step },
+                    Op::Binary { op: BinOp::Add, ty: *ty, dst: counter, lhs: counter, rhs: step, nonnegative: false },
                     *span,
                 );
                 self.emit(Op::Jump { target: top }, *span);
@@ -336,7 +336,7 @@ impl Compiler {
                     let step = self.const_operand(one_of(*ty), *span);
                     let reg = *slot as Reg;
                     self.emit(
-                        Op::Binary { op: BinOp::Add, ty: *ty, dst: reg, lhs: reg, rhs: step },
+                        Op::Binary { op: BinOp::Add, ty: *ty, dst: reg, lhs: reg, rhs: step, nonnegative: false },
                         *span,
                     );
                 }
@@ -543,13 +543,13 @@ impl Compiler {
                 self.next = mark;
             }
 
-            Expr::Binary { op, ty, lhs, rhs, span, .. } => {
+            Expr::Binary { op, ty, lhs, rhs, span, nonnegative } => {
                 // Take both sides before writing the answer, since `dst` may well be one
                 // of them -- `set ['sum'] = [math { 'sum' + 'i' }]` is the common case.
                 let mark = self.next;
                 let a = self.operand(lhs, *span);
                 let b = self.operand(rhs, *span);
-                self.emit(Op::Binary { op: *op, ty: *ty, dst, lhs: a, rhs: b }, *span);
+                self.emit(Op::Binary { op: *op, ty: *ty, dst, lhs: a, rhs: b, nonnegative: *nonnegative }, *span);
                 self.next = mark;
             }
         }

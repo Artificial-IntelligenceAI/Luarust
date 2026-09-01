@@ -67,19 +67,19 @@ enum Micro {
 fn widen(code: &[Op]) -> Vec<Micro> {
     code.iter()
         .map(|&op| match op {
-            Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs } if ty.is_integer() => {
+            Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Add { ty, dst, lhs, rhs }
             }
-            Op::Binary { op: BinOp::Sub, ty, dst, lhs, rhs } if ty.is_integer() => {
+            Op::Binary { op: BinOp::Sub, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Sub { ty, dst, lhs, rhs }
             }
-            Op::Binary { op: BinOp::Mul, ty, dst, lhs, rhs } if ty.is_integer() => {
+            Op::Binary { op: BinOp::Mul, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Mul { ty, dst, lhs, rhs }
             }
-            Op::Binary { op: BinOp::Div, ty, dst, lhs, rhs } if ty.is_integer() => {
+            Op::Binary { op: BinOp::Div, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Div { ty, dst, lhs, rhs }
             }
-            Op::Binary { op: BinOp::Mod, ty, dst, lhs, rhs } if ty.is_integer() => {
+            Op::Binary { op: BinOp::Mod, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Mod { ty, dst, lhs, rhs }
             }
             other => Micro::Other(other),
@@ -234,7 +234,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             // Integers go straight to the arithmetic with their raw bits, since the
             // instruction already says what width they are. Everything else goes the long
             // way round, which for a b256 divide is nothing next to the divide.
-            Op::Binary { op, ty, dst, lhs, rhs } if ty.is_integer() => {
+            Op::Binary { op, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
                     (&registers[lhs as usize], &registers[rhs as usize])
                 else {
