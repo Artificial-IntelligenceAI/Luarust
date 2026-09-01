@@ -11,6 +11,7 @@
 //! any of it out again.
 
 pub mod ir;
+mod range;
 
 // `value` moved down to `luarust-core`, because a program needs it while it runs and
 // needs the checker only before it does. It is still named from here.
@@ -102,7 +103,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
     checker.check_bodies(&program.stmts);
 
     let stmts = checker.block(&program.stmts);
-    let checked = Checked {
+    let mut checked = Checked {
         stmts,
         funcs: std::mem::take(&mut checker.funcs),
         slots: checker.slots,
@@ -111,6 +112,10 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         floats: checker.floats,
         engine: checker.engine,
     };
+    // A program with faults never runs, so there is nothing to prove about one.
+    if checker.errors.is_empty() {
+        range::flag(&mut checked);
+    }
     (checked, checker.errors)
 }
 
