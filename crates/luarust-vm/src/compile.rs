@@ -405,6 +405,19 @@ impl Compiler {
     /// raised, and then the next argument lands a register or two further along than the
     /// call is going to look. It cost a fuzzer 46,316 programs to find that.
     fn arguments(&mut self, args: &[Expr], span: Span) -> (Reg, u16) {
+        // A single index looks like it needs no register of its own -- it is one value,
+        // and staging it copies the loop counter into a temp on every pass, one
+        // instruction in six of an array loop. Reading it where it lives makes the VM
+        // about ten per cent faster on such a loop, and was tried and taken back out.
+        //
+        // The copy is load-bearing for the compiled path. With it, the value the address
+        // is computed from is its own thing and LLVM vectorises the loop; without it the
+        // address is derived from the loop counter directly and it stops -- thirteen
+        // milliseconds to seventeen here, and vectorisation is worth thirteen times on
+        // array loops, which ten per cent of the interpreter does not buy.
+        //
+        // `tests/optimised.rs` is what caught it. Worth revisiting when the checker can
+        // prove an index in range, since the proof is what the vectoriser is missing.
         let base = self.next;
         let claimed: Vec<Reg> = args.iter().map(|_| self.temp()).collect();
         let mark = self.next;

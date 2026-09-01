@@ -260,7 +260,14 @@ pub enum Value {
     Bool(bool),
     /// Shared, because a string is immutable here and copying one to move it between
     /// registers would be paying for nothing.
-    Str(std::rc::Rc<str>),
+    ///
+    /// `Rc<String>` and not `Rc<str>`, which would be the obvious spelling. A `Rc<str>` is
+    /// a *fat* pointer -- an address and a length, sixteen bytes -- and this is the widest
+    /// variant, so it decided the size of every value in the language. Twenty-four bytes
+    /// moved on every register write, in a machine where most values are eight bytes of
+    /// number and a type. Thin costs one more hop to reach the characters, on the one kind
+    /// of value that is never in a hot loop.
+    Str(std::rc::Rc<String>),
     /// `er`. Shared for the same reason a string is: a number does not change, so two
     /// names for one is two names for one, and nothing can tell the difference.
     Exact(std::rc::Rc<Exact>),
@@ -507,7 +514,7 @@ impl Value {
     }
 
     pub fn text(value: &str) -> Value {
-        Value::Str(std::rc::Rc::from(value))
+        Value::Str(std::rc::Rc::new(value.to_string()))
     }
 
     /// Zero, of whichever type.

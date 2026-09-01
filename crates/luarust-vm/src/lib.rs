@@ -836,6 +836,14 @@ fn fewer_than_none() -> Box<Fault> {
 #[cfg(test)]
 mod sizes {
     #[test]
+    fn a_value_is_not_wider_than_a_number_and_its_type() {
+        // Every register write moves one of these. The widest variant decides it for all
+        // of them, which is why the string is a thin pointer -- see `Value::Str`.
+        let value = std::mem::size_of::<luarust_core::value::Value>();
+        assert!(value <= 16, "a Value is {value} bytes");
+    }
+
+    #[test]
     fn micro_is_not_bigger_than_the_op_it_widens() {
         // Every instruction fetch loads one of these, so its size is a cost the whole
         // dispatch loop pays whether or not the wide variant is the one running.

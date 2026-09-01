@@ -407,13 +407,13 @@ a fixed array is told only what to fill with, since it already knows how many.
 
 A thousand `ui8`s take a thousand bytes. The elements are packed by width — one byte for
 `ui8` and `bool`, two for `ui16`, four for `ui32`, eight for `ui64` — rather than being a
-run of values, each twenty-four bytes and each carrying a type the array already stated.
+run of values, each sixteen bytes and each carrying a type the array already stated.
 
 | a thousand of | as values | packed |
 | --- | --- | --- |
-| `ui8` | 24,000 bytes | 1,000 |
-| `ui32` | 24,000 | 4,000 |
-| `b64` | 24,000 | 8,000 |
+| `ui8` | 16,000 bytes | 1,000 |
+| `ui32` | 16,000 | 4,000 |
+| `b64` | 16,000 | 8,000 |
 
 The memory is the smaller half of it. The real reason is that packed elements make
 indexing **arithmetic**: element `n` is at `base + n × width`, which the JIT emits as a

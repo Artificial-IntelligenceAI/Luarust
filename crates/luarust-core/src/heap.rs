@@ -37,7 +37,7 @@ pub enum Store {
     /// `b128`, `b256`, `d128` — the ones with no machine width.
     Wide(Vec<Bits>),
     /// `str`, which is shared rather than copied.
-    Text(Vec<Rc<str>>),
+    Text(Vec<Rc<String>>),
     /// `er`, likewise.
     Exact(Vec<Rc<Exact>>),
 }
@@ -68,7 +68,7 @@ impl Store {
             Store::Word(_) => 4,
             Store::Long(_) => 8,
             Store::Wide(_) => std::mem::size_of::<Bits>(),
-            Store::Text(_) => std::mem::size_of::<Rc<str>>(),
+            Store::Text(_) => std::mem::size_of::<Rc<String>>(),
             Store::Exact(_) => std::mem::size_of::<Rc<Exact>>(),
         }
     }
@@ -282,7 +282,7 @@ fn store_for(element: Ty, len: usize) -> Store {
         Ty::B32 | Ty::D32 | Ty::I32 | Ty::U32 | Ty::Array(_) => Store::Word(vec![0; len]),
         Ty::B64 | Ty::D64 | Ty::I64 | Ty::U64 => Store::Long(vec![0; len]),
         Ty::B128 | Ty::B256 | Ty::D128 => Store::Wide(vec![Bits::ZERO; len]),
-        Ty::Str => Store::Text(vec![Rc::from(""); len]),
+        Ty::Str => Store::Text(vec![Rc::new(String::new()); len]),
         Ty::Er => Store::Exact(vec![Rc::new(Exact::zero()); len]),
     }
 }
@@ -379,7 +379,7 @@ pub fn push(index: u32, value: &Value) {
             Store::Word(v) => v.push(0),
             Store::Long(v) => v.push(0),
             Store::Wide(v) => v.push(Bits::ZERO),
-            Store::Text(v) => v.push(Rc::from("")),
+            Store::Text(v) => v.push(Rc::new(String::new())),
             Store::Exact(v) => v.push(Rc::new(Exact::zero())),
         }
         let last = array.len() - 1;
@@ -459,8 +459,9 @@ mod tests {
         assert_eq!(arrays, 1);
         assert_eq!(bytes, 1000, "a thousand `ui8`s should be a thousand bytes");
 
-        // The same thousand as a run of values would be twenty-four times that.
-        assert_eq!(std::mem::size_of::<Value>() * 1000, 24_000);
+        // The same thousand held as a run of values would be sixteen times that -- a
+        // type and a number each, where the array knows the type once for all of them.
+        assert_eq!(std::mem::size_of::<Value>() * 1000, 16_000);
     }
 
     #[test]
