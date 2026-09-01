@@ -172,6 +172,7 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
                 engine: match project.engine {
                     luarust_conf::Engine::Vm => luarust_core::value::Engine::Vm,
                     luarust_conf::Engine::Whole => luarust_core::value::Engine::Whole,
+                    luarust_conf::Engine::Hot => luarust_core::value::Engine::Hot,
                 },
                 division: match project.division {
                     luarust_conf::Division::Floored => luarust_core::value::Division::Floored,
@@ -351,7 +352,43 @@ fn run_as_asked(
             }
         }
     }
+    #[cfg(feature = "jit")]
+    if chunk.engine == luarust_core::value::Engine::Hot {
+        let mut tier = Compiling;
+        return luarust_vm::run_with(chunk, out, Some(&mut tier));
+    }
     luarust_vm::run(chunk, out)
+}
+
+/// The thing that takes a hot loop off the VM.
+///
+/// This lives here rather than in either crate because it is the one place that has both:
+/// the VM cannot reach the JIT without closing a dependency circle, and the JIT has no
+/// business driving the VM. A build with no compiler in it never constructs one.
+#[cfg(feature = "jit")]
+struct Compiling;
+
+#[cfg(feature = "jit")]
+impl luarust_vm::Tier for Compiling {
+    fn hot(
+        &mut self,
+        chunk: &luarust_vm::Chunk,
+        at: usize,
+        registers: &[luarust_core::value::Value],
+        started: std::time::Instant,
+        out: &mut dyn std::io::Write,
+    ) -> luarust_vm::Taken {
+        match luarust_jit::resume(chunk, at, registers, started, out) {
+            Ok(outcome) => luarust_vm::Taken::Finished(outcome),
+            Err(declined) => {
+                eprintln!(
+                    "the JIT declined this loop: {}. Carrying on with the VM.",
+                    declined.because
+                );
+                luarust_vm::Taken::Declined
+            }
+        }
+    }
 }
 
 /// Find and read the `Luarust.toml` for a file, if its project has one.

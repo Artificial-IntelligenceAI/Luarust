@@ -69,6 +69,7 @@ const SETTINGS = {
         values: [
           ['"vm"', "the bytecode, interpreted -- nothing is compiled and nothing is spent compiling"],
           ['"whole"', "all of it through LLVM before it starts -- full speed from the first iteration"],
+          ['"hot"', "interpreted, and a loop that proves itself is compiled and jumped into"],
         ],
       },
     },

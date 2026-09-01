@@ -34,6 +34,57 @@ use std::io::Write;
 use std::time::Instant;
 
 
+/// How many times a loop goes round before it is worth compiling.
+///
+/// Low enough that anything with real work in it trips almost at once -- a loop reaching
+/// ten thousand iterations has already spent more time interpreting than LLVM will spend
+/// compiling it -- and high enough that a loop counting to a hundred is left alone, since
+/// compiling that would cost more than running it ever could.
+pub const HOT: u32 = 10_000;
+
+/// Something that can take a hot loop off the VM's hands.
+///
+/// The VM cannot call the JIT itself: the JIT reads chunks, so it depends on this crate,
+/// and a dependency the other way would close the circle. Handing it out as a trait is
+/// also what lets `luarust-run` stay what it is -- a runtime with no compiler in it
+/// installs nothing here and never tiers, which is why it can be a few hundred kilobytes
+/// while the toolchain with LLVM in it is thirty megabytes.
+pub trait Tier {
+    /// How many times round before a loop is worth compiling. [`HOT`] unless something
+    /// knows better -- a test that wants the switch to happen says so here rather than
+    /// running ten thousand iterations to earn it.
+    fn threshold(&self) -> u32 {
+        HOT
+    }
+
+    /// The loop beginning at `at` has gone round [`threshold`](Tier::threshold) times.
+    /// Take it over if you can.
+    ///
+    /// `registers` is the frame the VM has been filling in, live, and whatever takes over
+    /// must start from exactly those values. `started` is when the program started, which
+    /// is not when this was asked -- a clock that reset itself here would be reporting on
+    /// the compiler rather than on the program. Anything printed goes to `out`, after what
+    /// the VM has already printed.
+    fn hot(
+        &mut self,
+        chunk: &Chunk,
+        at: usize,
+        registers: &[Value],
+        started: Instant,
+        out: &mut dyn Write,
+    ) -> Taken;
+}
+
+/// What a [`Tier`] did with a hot loop.
+pub enum Taken {
+    /// Nothing. The VM carries on, and is not asked about this loop again.
+    Declined,
+    /// Compiled code ran from the loop head to the end of the program, and this is how it
+    /// ended. There is nothing for the VM to resume: entering at a loop head means
+    /// running everything that follows it, the loop's own exit included.
+    Finished(Result<(), Stopped>),
+}
+
 /// One call in progress: where it is, what it is holding, and where its answer goes.
 struct Frame {
     /// The function being run, or `None` for the top level.
@@ -55,6 +106,10 @@ struct Frame {
 /// not know this type exists.
 #[derive(Clone, Copy)]
 enum Micro {
+    /// A jump backwards, and the counter that says how often it has been taken. Only ever
+    /// made when something is listening for it, so the ordinary VM pays nothing for a
+    /// tiering machinery it is not using.
+    Back { target: u32, counter: u32 },
     Add { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
     Sub { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
     Mul { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
@@ -64,9 +119,20 @@ enum Micro {
 }
 
 /// One-for-one, so every jump target and span index survives unchanged.
-fn widen(code: &[Op]) -> Vec<Micro> {
+fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>) -> Vec<Micro> {
     code.iter()
-        .map(|&op| match op {
+        .enumerate()
+        .map(|(here, &op)| match op {
+            // A loop is a jump backwards, so a back edge is a jump whose target is at or
+            // behind it, and counting those counts iterations without touching anything
+            // else. The counter is made here rather than looked up there: by the time the
+            // machine is running, which back edge this is has already been decided.
+            Op::Jump { target } if counters.is_some() && target as usize <= here => {
+                let counters = counters.as_mut().expect("just tested");
+                let counter = counters.len() as u32;
+                counters.push(0);
+                Micro::Back { target, counter }
+            }
             Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Add { ty, dst, lhs, rhs }
             }
@@ -118,6 +184,19 @@ macro_rules! int_arm {
 
 /// Run a compiled chunk.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
+    run_with(chunk, out, None)
+}
+
+/// Run a chunk, with something that may take its hot loops.
+///
+/// Passing `None` is [`run`], and is what a build with no compiler in it can do. Passing
+/// a [`Tier`] is the tiering engine: interpreted until a loop proves itself, compiled from
+/// then on.
+pub fn run_with(
+    chunk: &Chunk,
+    out: &mut impl Write,
+    mut tier: Option<&mut dyn Tier>,
+) -> Result<(), Stopped> {
     heap::clear();
     // A chunk carries what its project decided, so running one applies it. Nothing else
     // has to be told, and `luarust-run` -- which has no project file and no way to read
@@ -139,7 +218,18 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
     // The top level always runs, so it is translated up front; a routine is translated
     // the first time something enters it — the same reasoning that keeps the JIT from
     // compiling what nothing calls, at a much smaller price.
-    let top = widen(&chunk.code);
+    // Counted only where a count could be acted on. A hot loop inside a routine is a
+    // real thing and is not noticed yet: taking one over means returning to the middle of
+    // a call the VM is holding, where taking over the top level means running to the end
+    // of the program and never coming back. So the top level is counted, routines are
+    // not, and neither pays anything when nothing is listening.
+    let mut counters: Vec<u32> = Vec::new();
+    let (top, threshold) = match &tier {
+        // Never nought: a counter is compared after it is raised, so a threshold nothing
+        // could reach would be a loop that compiles before it has gone round at all.
+        Some(tier) => (widen(&chunk.code, Some(&mut counters)), tier.threshold().max(1)),
+        None => (widen(&chunk.code, None), 0),
+    };
     let mut routines: Vec<Option<Vec<Micro>>> = vec![None; chunk.funcs.len()];
 
     // Two loops rather than one. The outer runs once per call, and settles which code is
@@ -156,7 +246,7 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
             None => (&top[..], &chunk.spans[..]),
             Some(index) => {
                 if routines[index].is_none() {
-                    routines[index] = Some(widen(&chunk.funcs[index].code));
+                    routines[index] = Some(widen(&chunk.funcs[index].code, None));
                 }
                 (
                     &routines[index].as_ref().expect("filled just above")[..],
@@ -180,6 +270,17 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                 at += 1;
 
                 match op {
+            Micro::Back { target, counter } => {
+                // Exactly once, at the threshold: a counter that has fired is pushed past
+                // it and saturates there, so a loop nobody wanted is never asked about
+                // twice.
+                let hits = &mut counters[counter as usize];
+                *hits = hits.saturating_add(1);
+                if *hits == threshold {
+                    break Step::Hot { target: target as usize, counter };
+                }
+                at = target as usize;
+            }
             Micro::Add { ty, dst, lhs, rhs } => {
                 int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow, chunk.division)
             }
@@ -473,6 +574,19 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
                     caller.registers[finished.dst as usize] = answer;
                 }
             }
+            Step::Hot { target, counter } => {
+                let frame = frames.last_mut().expect("a frame is always open");
+                frame.at = target;
+                // Never asked about again, whatever the answer: either compiled code ran
+                // the rest of the program, or there is no compiled code to be had.
+                counters[counter as usize] = u32::MAX;
+                if let Some(Taken::Finished(outcome)) = tier
+                    .as_deref_mut()
+                    .map(|tier| tier.hot(chunk, target, &frame.registers, started, out))
+                {
+                    return outcome;
+                }
+            }
             Step::Collecting => {
                 frames.last_mut().expect("a frame is always open").at = at;
                 // Every register of every frame is a root. A register the checker has
@@ -492,6 +606,9 @@ enum Step {
     /// The heap has asked to be collected, which cannot happen in here: the roots are
     /// every frame's registers and this loop is holding one frame's borrowed.
     Collecting,
+    /// A loop has gone round enough times to be worth compiling. Same reason it is
+    /// settled out there: handing the frame over needs it unborrowed.
+    Hot { target: usize, counter: u32 },
 }
 
 /// What a condition answered. The checker refuses anything that is not a `bool` long

@@ -63,6 +63,8 @@ pub enum Engine {
     Vm,
     /// All of it compiled through LLVM before anything starts.
     Whole,
+    /// Interpreted until something turns out to be worth compiling, and compiled then.
+    Hot,
 }
 
 /// How much of a binary float a program writes out.
@@ -266,7 +268,8 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
             ("run", "mode") => match unquote(raw) {
                 Some("vm") => project.engine = Engine::Vm,
                 Some("whole") => project.engine = Engine::Whole,
-                _ => errors.push(bad_value(key, raw, span, "`\"vm\"` or `\"whole\"`")),
+                Some("hot") => project.engine = Engine::Hot,
+                _ => errors.push(bad_value(key, raw, span, "`\"vm\"`, `\"whole\"` or `\"hot\"`")),
             },
             ("gc", "mode") => match unquote(raw) {
                 Some("off") => project.gc = Collect::Off,
@@ -373,10 +376,10 @@ mod tests {
         assert_eq!(Project::default().engine, Engine::Vm, "the VM unless asked otherwise");
         assert_eq!(clean("[run]\nmode = \"vm\"\n").engine, Engine::Vm);
         assert_eq!(clean("[run]\nmode = \"whole\"\n").engine, Engine::Whole);
+        assert_eq!(clean("[run]\nmode = \"hot\"\n").engine, Engine::Hot);
 
-        // `hot` is the next engine and does not exist. Naming it in a project file should
-        // say so, not quietly do something else.
-        let (_, errors) = read("[run]\nmode = \"hot\"\n");
+        // An engine that does not exist should say so, not quietly do something else.
+        let (_, errors) = read("[run]\nmode = \"warm\"\n");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, "C0005");
     }

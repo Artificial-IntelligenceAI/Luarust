@@ -3,7 +3,7 @@ Project under development, stable use not recommended, stability is **not a guar
 
 **Luarust** is a **Lua ripoff** focused on performance, device support, explicit syntax, and very helpful error messages (unlike fucking `C`, joking 😂).
 
-Luarust's method is compile once to a `.lrc` that runs anywhere (Like Java's), and the project picks how it runs there: the **bytecode VM**, or the **whole-chunk JIT**, with a **hot JIT** planned. **Native** output trades the anywhere for a binary that needs nothing on the machine it lands on. **LLVM** does the code generation. The final product only contains what is needed (unlike fucking `Go`, joking, again 😂)
+Luarust's method is compile once to a `.lrc` that runs anywhere (Like Java's), and the project picks how it runs there: the **bytecode VM**, or the **whole-chunk JIT**, or the **hot JIT** that starts interpreting and compiles a loop once it proves itself. **Native** output trades the anywhere for a binary that needs nothing on the machine it lands on. **LLVM** does the code generation. The final product only contains what is needed (unlike fucking `Go`, joking, again 😂)
 
 Putting it simply: **Luarust** is/will be a language that **could be compiled in many methods**, so you could **choose what is best for you**.
 
@@ -451,7 +451,7 @@ asked for**:
 mode = "silent"
 
 [run]
-mode = "whole"
+mode = "hot"
 ```
 
 `"off"` never collects, `"silent"` collects when a megabyte has been handed out since the
@@ -752,22 +752,35 @@ its project file and carried in the chunk:
 [run]
 mode = "vm"      # the bytecode, interpreted; nothing is compiled
 mode = "whole"   # all of it through LLVM before it starts
+mode = "hot"     # interpreted until a loop proves itself, compiled from there
 ```
 
 A program that starts, does a little and exits wants `"vm"`, where nothing is spent
-compiling. A program that runs for hours wants `"whole"`, where 25 ms of LLVM buys several
-times the speed for the rest of the day. Neither is the development answer and the other
-the real one. On a twenty-million-iteration loop, the same command and the same file:
+compiling. A program that runs for hours wants `"whole"`, where a few milliseconds of LLVM
+buys several times the speed for the rest of the day. Neither is the development answer
+and the other the real one.
 
-```
-mode = "vm"      2324 ms
-mode = "whole"    260 ms
-```
+`"hot"` is the one that does not need to be told which it is. It interprets, counts how
+often each loop goes round, and when one passes ten thousand it compiles the program and
+**jumps into the middle of that loop** with the registers the VM was holding. Two programs,
+the same command and the same file — one that adds up to a hundred, one that goes round
+twenty million times:
+
+| | adds up to 100 | twenty million iterations |
+|---|---|---|
+| `mode = "vm"` | 4.4 ms | 221 ms |
+| `mode = "whole"` | 6.6 ms | 52 ms |
+| `mode = "hot"` | 4.5 ms | 67 ms |
+
+It costs what the VM costs when nothing is worth compiling, and lands near the whole-chunk
+JIT when something is. The 4.4 ms is a process starting, a file being lexed, parsed,
+checked and compiled to bytecode; `"whole"` pays LLVM on top of it for a loop of a hundred,
+and `"hot"` never asks.
 
 It is a **preference, not an instruction**. `luarust-run` has no JIT linked into it and is
-not meant to, so a chunk asking for `"whole"` runs on the VM there and says nothing about
-it — refusing to run a program because the fastest way of running it is unavailable would
-help nobody. The same happens when the JIT declines a program.
+not meant to, so a chunk asking for `"whole"` or `"hot"` runs on the VM there and says
+nothing about it — refusing to run a program because the fastest way of running it is
+unavailable would help nobody. The same happens when the JIT declines a program.
 
 What the sizes above argue is narrower, and it is the same rule as everywhere else: a
 program that will not use the JIT should not be carrying it. LLVM is fifty times the size

@@ -58,13 +58,43 @@ pub const CONSTANT: u64 = 1 << 63;
 /// exactly what happens in `luarust fuzz`, where all three run in the one process.
 pub fn begin(constants: Vec<Value>, main_frame: Vec<Value>, templates: Vec<Vec<Value>>) {
     luarust_core::heap::clear();
+    resume(constants, main_frame, templates, Instant::now());
+}
+
+/// Take over a program that is already running.
+///
+/// Everything [`begin`] does except the two things that would be lies here. The heap is
+/// left alone, because by now it holds arrays the VM made and the program is still using
+/// them. And the clock is handed in rather than started, because the program started when
+/// it started -- a `time` that reset itself the moment a loop got hot would be reporting
+/// on the compiler rather than on the program.
+pub fn resume(
+    constants: Vec<Value>,
+    main_frame: Vec<Value>,
+    templates: Vec<Vec<Value>>,
+    started: Instant,
+) {
     OUTPUT.with(|out| out.borrow_mut().clear());
-    STARTED.with(|at| *at.borrow_mut() = Some(Instant::now()));
+    STARTED.with(|at| *at.borrow_mut() = Some(started));
     CONSTANTS.with(|table| *table.borrow_mut() = constants);
     TEMPLATES.with(|table| *table.borrow_mut() = templates);
     PENDING.with(|queue| queue.borrow_mut().clear());
     ANSWER.with(|slot| *slot.borrow_mut() = None);
     FRAMES.with(|frames| *frames.borrow_mut() = vec![main_frame]);
+}
+
+/// What a register holds, as the bits a machine register would hold.
+///
+/// Only ever called at an entry the VM handed over: the frame is what the VM was working
+/// with, and this is how each of its values reaches the stack slot compiled code reads it
+/// from. A value that lives in a cell answers nought, because the cell is already holding
+/// it and the slot beside it is never looked at.
+pub extern "C" fn cell_bits(index: u64) -> u64 {
+    match cell(index) {
+        Value::Num { bits, .. } => bits,
+        Value::Bool(answer) => u64::from(answer),
+        _ => 0,
+    }
 }
 
 fn cell(index: u64) -> Value {

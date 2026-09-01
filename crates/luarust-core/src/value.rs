@@ -38,6 +38,10 @@ pub enum Engine {
     /// All of it compiled through LLVM before anything starts. Full speed from the first
     /// iteration, and it pays to compile routines that never run.
     Whole,
+    /// Interpreted until something turns out to be worth compiling, and compiled then.
+    /// Nothing is spent on code that runs once, and a loop that runs a million times
+    /// stops being interpreted part way through the first time round.
+    Hot,
 }
 
 impl Engine {
@@ -45,6 +49,7 @@ impl Engine {
         match self {
             Engine::Vm => 0,
             Engine::Whole => 1,
+            Engine::Hot => 2,
         }
     }
 
@@ -52,6 +57,7 @@ impl Engine {
         Some(match tag {
             0 => Engine::Vm,
             1 => Engine::Whole,
+            2 => Engine::Hot,
             _ => return None,
         })
     }

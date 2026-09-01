@@ -71,14 +71,16 @@ fn celled(ty: Ty) -> bool {
 
 /// Compile a program and run it, or hand it back.
 ///
-/// **Compiled code does not collect yet.** A handle lives in an `i64` register, and by the
-/// time LLVM has finished with it there is no way from Rust to say which registers hold
-/// one -- that is what `gc.statepoint` exists for, and it is not wired up. So a JIT run
-/// keeps every array it makes, exactly as every run did before there was a collector.
+/// **Compiled code collects, conservatively.** A handle lives in an `i64` register and
+/// LLVM will not say which registers hold one -- that is what `gc.statepoint` is for, and
+/// it is not wired up -- so the roots are the cells instead, which is why an array's
+/// handle is put in one. `sweep_if_asked` in the runtime walks them when a new array asks
+/// for room. A cell whose register has since been reused keeps its old array alive, which
+/// holds on to something dead and never frees something live.
 ///
-/// Nothing is unsound about that and nothing disagrees: collecting changes no output, so
-/// the VM sweeping and the JIT not sweeping still produce the same answers, which is what
-/// `luarust fuzz` checks on every program it writes.
+/// Collecting changes no output either way, so the VM sweeping and the JIT sweeping
+/// differently still produce the same answers, which is what `luarust fuzz` checks on
+/// every program it writes.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
     accepts(chunk)?;
     luarust_core::heap::set_threshold(chunk.collect.threshold());
@@ -102,6 +104,53 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, D
     };
 
     runtime::begin(emitter.constants, emitter.main_frame, emitter.templates);
+    let outcome = unsafe { compiled.call() };
+    let _ = out.write_all(&runtime::taken());
+    let _ = out.flush();
+
+    Ok(decode(outcome, &spans))
+}
+
+/// Take over a program the VM has been running, from the head of a loop.
+///
+/// The whole program is compiled -- everything the top level goes on to do, and every
+/// routine it might call -- and then entered at `at` rather than at the beginning, with
+/// the registers the VM was holding. From there compiled code runs to the end, so nothing
+/// comes back: entering at a loop head means running the loop's own exit and everything
+/// after it.
+///
+/// The heap is not cleared and the clock is not restarted. Both belong to the program,
+/// which has been running for a while by the time anything gets here.
+pub fn resume(
+    chunk: &Chunk,
+    at: usize,
+    registers: &[Value],
+    started: std::time::Instant,
+    out: &mut dyn Write,
+) -> Result<Result<(), Stopped>, Declined> {
+    accepts(chunk)?;
+
+    let context = Context::create();
+    let module = context.create_module("luarust");
+    let engine = module
+        .create_jit_execution_engine(OptimizationLevel::Aggressive)
+        .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
+
+    let mut emitter = Emitter::new(&context, &module, &engine, chunk);
+    emitter.entry_at = at;
+    emitter.emit(chunk, &module);
+    optimise(&module);
+    let spans = std::mem::take(&mut emitter.spans);
+
+    let compiled = unsafe {
+        engine
+            .get_function::<unsafe extern "C" fn() -> i64>("luarust_main")
+            .map_err(|why| Declined { because: format!("the compiled program was lost: {why}") })?
+    };
+
+    // The frame the VM was filling in, not the empty one the emitter laid out: these are
+    // the values the loop is going round with.
+    runtime::resume(emitter.constants, registers.to_vec(), emitter.templates, started);
     let outcome = unsafe { compiled.call() };
     let _ = out.write_all(&runtime::taken());
     let _ = out.flush();
@@ -274,6 +323,9 @@ struct Emitter<'ctx> {
     spans: Vec<Span>,
     overflow: Overflow,
     division: Division,
+    /// Which instruction the top level is entered at. Nought for a program being started,
+    /// and a loop's first instruction for one the VM has been running and handed over.
+    entry_at: usize,
     helpers: Helpers<'ctx>,
 }
 
@@ -283,6 +335,7 @@ struct Helpers<'ctx> {
     time_now: FunctionValue<'ctx>,
     compare: FunctionValue<'ctx>,
     fallback: FunctionValue<'ctx>,
+    cell_bits: FunctionValue<'ctx>,
     cell_move: FunctionValue<'ctx>,
     cell_binary: FunctionValue<'ctx>,
     cell_neg: FunctionValue<'ctx>,
@@ -515,6 +568,10 @@ impl<'ctx> Emitter<'ctx> {
             module.add_function("luarust_print_cell", void_t.fn_type(&[i64_t.into()], false), None);
         engine.add_global_mapping(&print_cell, runtime::print_cell as *const () as usize);
 
+        let cell_bits =
+            module.add_function("luarust_cell_bits", i64_t.fn_type(&[i64_t.into()], false), None);
+        engine.add_global_mapping(&cell_bits, runtime::cell_bits as *const () as usize);
+
         let main = module.add_function("luarust_main", i64_t.fn_type(&[], false), None);
         let entry = context.append_basic_block(main, "entry");
         let builder = context.create_builder();
@@ -544,6 +601,7 @@ impl<'ctx> Emitter<'ctx> {
             spans: Vec::new(),
             overflow: chunk.overflow,
             division: chunk.division,
+            entry_at: 0,
             funcs: Vec::new(),
             constants: Vec::new(),
             frame: Vec::new(),
@@ -555,6 +613,7 @@ impl<'ctx> Emitter<'ctx> {
                 time_now,
                 compare,
                 fallback,
+                cell_bits,
                 cell_move,
                 cell_binary,
                 cell_neg,
@@ -644,7 +703,27 @@ impl<'ctx> Emitter<'ctx> {
         self.builder
             .position_at_end(self.main.get_last_basic_block().expect("main has its entry"));
         self.frame = vec![Value::Bool(false); chunk.registers];
-        self.walk(chunk, &chunk.code, &chunk.spans, false);
+        // Every register a machine register can hold starts from what the VM left in it.
+        // Coming in at nought there is nothing to carry: the checker has proved every
+        // register is written before it is read, and the program has not run yet. Coming
+        // in at a loop head, everything the program did before the loop is in there.
+        if self.entry_at != 0 {
+            for index in 0..chunk.registers {
+                let bits = self
+                    .builder
+                    .build_call(
+                        self.helpers.cell_bits,
+                        &[self.cell_number(index as u64).into()],
+                        "carried",
+                    )
+                    .expect("a call")
+                    .try_as_basic_value()
+                    .expect_basic("it answers the bits")
+                    .into_int_value();
+                self.builder.build_store(self.regs[index], bits).expect("a store");
+            }
+        }
+        self.walk(chunk, &chunk.code, &chunk.spans, false, self.entry_at);
         self.main_frame = std::mem::take(&mut self.frame);
     }
 
@@ -706,7 +785,7 @@ impl<'ctx> Emitter<'ctx> {
 
         let span = routine.spans.first().copied().unwrap_or_default();
         self.guard_depth(span);
-        self.walk(chunk, &routine.code, &routine.spans, true);
+        self.walk(chunk, &routine.code, &routine.spans, true, 0);
 
         self.templates.push(std::mem::take(&mut self.frame));
         self.frame = outer_frame;
@@ -717,7 +796,7 @@ impl<'ctx> Emitter<'ctx> {
     }
 
     /// Walk a run of instructions, emitting each into the block it belongs to.
-    fn walk(&mut self, chunk: &Chunk, code: &[Op], spans: &[Span], inside: bool) {
+    fn walk(&mut self, chunk: &Chunk, code: &[Op], spans: &[Span], inside: bool, entry: usize) {
         let made: std::collections::BTreeMap<usize, inkwell::basic_block::BasicBlock<'ctx>> =
             blocks::leaders(code)
                 .iter()
@@ -725,8 +804,10 @@ impl<'ctx> Emitter<'ctx> {
                 .collect();
         self.landings = made.clone();
 
-        // Out of the entry block, where the allocas live, and into the first real one.
-        self.builder.build_unconditional_branch(made[&0]).expect("a branch");
+        // Out of the entry block, where the allocas live, and into the first real one --
+        // which is the first instruction of the program, or the head of the loop the VM
+        // was going round when it handed this over.
+        self.builder.build_unconditional_branch(made[&entry]).expect("a branch");
 
         for (at, op) in code.iter().enumerate() {
             if let Some(block) = made.get(&at) {

@@ -44,7 +44,7 @@
       }
     },
     "value": {
-      "match": "\"(vm|whole|exact|shortest|wrap|trap|floored|truncated|euclidean|restricted|error|bid|dpd|off|silent|aggressive)\"",
+      "match": "\"(vm|whole|hot|exact|shortest|wrap|trap|floored|truncated|euclidean|restricted|error|bid|dpd|off|silent|aggressive)\"",
       "name": "constant.language.luarust-toml"
     },
     "boolean": {
