@@ -419,6 +419,33 @@ struct Split {
 }
 
 impl Split {
+    /// A register's word, and a register's word written, without a bounds check.
+    ///
+    /// The promise this rests on is not made here and is not new: `serialize::check`
+    /// says the VM "indexes registers, constants, text and instructions without
+    /// checking, because the compiler never produces an index that is wrong", and then
+    /// holds every register in every instruction of every routine against that
+    /// routine's own register count before the chunk is handed back. A frame is made
+    /// exactly `registers` wide from the same number. So the index is proved, once per
+    /// instruction in the file, rather than once per instruction executed -- and the
+    /// loop was still paying the second one.
+    ///
+    /// The *instruction* index is left checked, deliberately. `check` proves every jump
+    /// target lands on a real instruction, and that a `Halt` exists somewhere, but not
+    /// that control reaches it: a chunk ending in something other than a stop runs off
+    /// the end of its own code. That is a panic today and would be worse than a panic
+    /// here, so the fetch keeps its check until the chunk format demands a last word.
+    #[inline(always)]
+    fn word(&self, at: chunk::Reg) -> u64 {
+        // SAFETY: see above -- `at` was proved below `raw.len()` when the chunk loaded.
+        unsafe { *self.raw.get_unchecked(at as usize) }
+    }
+    #[inline(always)]
+    fn set_word(&mut self, at: chunk::Reg, bits: u64) {
+        // SAFETY: as `word`.
+        unsafe { *self.raw.get_unchecked_mut(at as usize) = bits }
+    }
+
     fn cells_now(&mut self) -> &mut Vec<Value> {
         if self.cells.len() < self.raw.len() {
             self.cells.resize(self.raw.len(), Value::Bool(false));
@@ -437,33 +464,33 @@ impl File for Split {
         Split { raw: vec![0; count], cells: Vec::new() }
     }
     fn bits(&self, at: chunk::Reg) -> Option<u64> {
-        Some(self.raw[at as usize])
+        Some(self.word(at))
     }
     fn set_bits(&mut self, at: chunk::Reg, _ty: Ty, bits: u64) {
-        self.raw[at as usize] = bits;
+        self.set_word(at, bits);
     }
     fn truth(&self, at: chunk::Reg) -> Option<bool> {
-        Some(self.raw[at as usize] != 0)
+        Some(self.word(at) != 0)
     }
     fn handle(&self, at: chunk::Reg) -> Option<u32> {
-        Some(self.raw[at as usize] as u32)
+        Some(self.word(at) as u32)
     }
     fn index(&self, at: chunk::Reg) -> i128 {
-        i128::from(self.raw[at as usize])
+        i128::from(self.word(at))
     }
     fn index_word(&self, at: chunk::Reg) -> i64 {
         // An index is `u32` by the checker's own rule, and a chunk demonstrated it.
-        self.raw[at as usize].min(i64::MAX as u64) as i64
+        self.word(at).min(i64::MAX as u64) as i64
     }
     fn value(&self, at: chunk::Reg, ty: Ty) -> Value {
         if celled(ty) {
             self.cells.get(at as usize).cloned().unwrap_or(Value::Bool(false))
         } else if ty == Ty::Bool {
-            Value::Bool(self.raw[at as usize] != 0)
+            Value::Bool(self.word(at) != 0)
         } else {
             // Arrays come this way too: the word is the handle, and `Num` around it is
             // exactly the value the boxed file would have held.
-            Value::Num { ty, bits: self.raw[at as usize] }
+            Value::Num { ty, bits: self.word(at) }
         }
     }
     fn put(&mut self, at: chunk::Reg, value: Value) {
@@ -472,11 +499,11 @@ impl File for Split {
             // is what the collector reads. Written here, at the sites that make or
             // move an array, never in the loop that reads one.
             Value::Num { ty: ty @ Ty::Array(_), bits } => {
-                self.raw[at as usize] = bits;
+                self.set_word(at, bits);
                 self.cells_now()[at as usize] = Value::Num { ty, bits };
             }
-            Value::Num { ty, bits } if !celled(ty) => self.raw[at as usize] = bits,
-            Value::Bool(answer) => self.raw[at as usize] = u64::from(answer),
+            Value::Num { ty, bits } if !celled(ty) => self.set_word(at, bits),
+            Value::Bool(answer) => self.set_word(at, u64::from(answer)),
             value => self.cells_now()[at as usize] = value,
         }
     }
@@ -492,7 +519,7 @@ impl File for Split {
             if matches!(element, Ty::Array(_)) {
                 self.put(dst, Value::Num { ty: element, bits });
             } else {
-                self.raw[dst as usize] = bits;
+                self.set_word(dst, bits);
             }
             return true;
         }
@@ -706,8 +733,16 @@ fn engine<F: File>(
                     );
                     // The jump back was left in the slot beside this one, unreachable
                     // except from here.
+                    //
+                    // `widen` is the only thing that makes a `Tail`, and it makes one
+                    // only from the exact three instructions `compile` emits, with this
+                    // jump the third -- so the tag is known before the fetch. Saying so
+                    // costs the hottest instruction in the language a tag test and a
+                    // panic path it can never take.
                     let Micro::Other(Op::Jump { target }) = code[at + 1] else {
-                        unreachable!("a fused tail keeps its jump beside it");
+                        // SAFETY: a fused tail keeps its jump beside it, by construction
+                        // in `widen`, which is the only maker of `Micro::Tail`.
+                        unsafe { std::hint::unreachable_unchecked() }
                     };
                     at = target as usize;
                 }
