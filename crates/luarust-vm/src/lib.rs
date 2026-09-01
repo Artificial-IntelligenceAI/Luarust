@@ -305,6 +305,10 @@ trait File {
     fn value(&self, at: chunk::Reg, ty: Ty) -> Value;
     /// A value that says what it is, put where it belongs.
     fn put(&mut self, at: chunk::Reg, value: Value);
+    /// One element out of an array and into a register, each arrangement its own way —
+    /// the word file straight from the stored bits, the boxed one through the `Value`
+    /// it keeps anyway. `false` when there is no such element.
+    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize) -> bool;
     /// One argument, caller's register to callee's, whatever it holds.
     fn argument(&mut self, at: usize, from: &Self, src: usize);
     /// Every root a collection must see.
@@ -366,6 +370,15 @@ impl File for Boxed {
                 *b = bits;
             }
             (slot, value) => *slot = value,
+        }
+    }
+    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize) -> bool {
+        match heap::read(handle, index) {
+            Some(held) => {
+                self.put(dst, held);
+                true
+            }
+            None => false,
         }
     }
     fn argument(&mut self, at: usize, from: &Self, src: usize) {
@@ -462,6 +475,21 @@ impl File for Split {
             Value::Num { ty, bits } if !celled(ty) => self.raw[at as usize] = bits,
             Value::Bool(answer) => self.raw[at as usize] = u64::from(answer),
             value => self.cells_now()[at as usize] = value,
+        }
+    }
+    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize) -> bool {
+        // Bits straight to the word, which is nearly every array there is; a wide,
+        // text or exact element goes the Value way, and out-of-range says so.
+        if let Some(bits) = heap::read_bits(handle, index) {
+            self.raw[dst as usize] = bits;
+            return true;
+        }
+        match heap::read(handle, index) {
+            Some(held) => {
+                self.put(dst, held);
+                true
+            }
+            None => false,
         }
     }
     fn argument(&mut self, at: usize, from: &Self, src: usize) {
@@ -626,13 +654,12 @@ fn engine<F: File>(
                 };
                 let index = offset(shapes[shape as usize].dims(), handle, file, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                let held = heap::read(handle, index).ok_or_else(|| Stopped {
-                    fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
-                    span: spans[here],
-                })?;
-                // Put a field at a time, for the reason the arithmetic writes narrow: an
-                // array of numbers read in a loop writes the same register every pass.
-                file.put(dst, held);
+                if !file.load_element(dst, handle, index) {
+                    return Err(Stopped {
+                        fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
+                        span: spans[here],
+                    });
+                }
             }
             Micro::Add { ty, dst, lhs, rhs } => {
                 int_arm!(BinOp::Add, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)

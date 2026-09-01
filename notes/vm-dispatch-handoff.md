@@ -70,6 +70,14 @@ run the benchmark in-process so one binary measures both arrangements; use hardw
 counters rather than wall clock; or take many more samples and compare distributions
 rather than minima.
 
+**Two instruments, and neither answers the other's question.** An in-binary A/B
+prices two arrangements against each other, and only an end-to-end comparison prices
+a branch against main — because the in-binary baseline drifts with the branch that
+carries it. The register-file work measured -32% on one and +11% on the other, both
+correctly: the branch's boxed arrangement had drifted under the same refactor the
+split rode in on. Keep both: the A/B to develop against, layout-noise-free; the
+end-to-end ladder to decide a merge with.
+
 **Fixed, the first way.** `run_widened` in `luarust-vm` takes the arrangement as a
 parameter, and `tails_fused_against_not` (ignored, `--nocapture`) times both from one
 binary, interleaved, minima — layout cancels because there is one layout. Its unfused

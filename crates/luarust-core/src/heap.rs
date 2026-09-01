@@ -355,6 +355,30 @@ pub fn read(index: u32, at: usize) -> Option<Value> {
     })
 }
 
+/// The stored bits of element `at`, for a reader that already knows what they are.
+///
+/// `None` where there is no such element — and where the element is not bits-shaped,
+/// which a reader treats as "go the [`read`] way", not as missing. Skipping the
+/// `Value` in between matters to a register file made of words: element loops were
+/// building one here and taking it apart one call later.
+pub fn read_bits(index: u32, at: usize) -> Option<u64> {
+    HEAP.with(|heap| {
+        // Read without the borrow flag, for the reasons `read` gives.
+        //
+        // # Safety
+        // As for `read`: the heap is one thread's, and no `&mut` can be live here.
+        let heap = unsafe { &*heap.as_ptr() };
+        let array = heap.get(index as usize)?;
+        match &array.store {
+            Store::Byte(v) => Some(u64::from(*v.get(at)?)),
+            Store::Half(v) => Some(u64::from(*v.get(at)?)),
+            Store::Word(v) => Some(u64::from(*v.get(at)?)),
+            Store::Long(v) => v.get(at).copied(),
+            _ => None,
+        }
+    })
+}
+
 /// Put a value in element `at`. `false` when there is no such element.
 pub fn store(index: u32, at: usize, value: &Value) -> bool {
     HEAP.with(|heap| {
