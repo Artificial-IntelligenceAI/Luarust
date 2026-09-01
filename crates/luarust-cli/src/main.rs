@@ -23,6 +23,7 @@ luarust — a language that would rather not guess
 const JIT_USAGE: &str = "\
     luarust jit <file.lr>       compile it with LLVM, in memory, and run it
     luarust ir <file.lr>        show the LLVM IR
+    luarust native <file.lr>    compile it to a program that runs on its own
 ";
 
 /// What to do once a file has checked out.
@@ -37,6 +38,8 @@ enum Then {
     Jit,
     #[cfg(feature = "jit")]
     Ir,
+    #[cfg(feature = "jit")]
+    Native,
 }
 
 fn main() -> ExitCode {
@@ -54,13 +57,15 @@ fn main() -> ExitCode {
         Some("jit") => Then::Jit,
         #[cfg(feature = "jit")]
         Some("ir") => Then::Ir,
+        #[cfg(feature = "jit")]
+        Some("native") => Then::Native,
         Some("check") => Then::Nothing,
 
         // A build without the JIT still knows the word, so that asking for something it
         // was built without is answered rather than met with the usage text. Printing the
         // usage says "you typed something wrong", and the typing was fine.
         #[cfg(not(feature = "jit"))]
-        Some(asked @ ("jit" | "ir")) => {
+        Some(asked @ ("jit" | "ir" | "native")) => {
             eprintln!(
                 "this build has no JIT, so it cannot `{asked}`. It was built without the \
                  `jit` feature:\n\n    \
@@ -198,6 +203,12 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         Then::Disassemble => {
             print!("{}", luarust_vm::compile(&program).disassemble());
             ExitCode::SUCCESS
+        }
+
+        #[cfg(feature = "jit")]
+        Then::Native => {
+            let chunk = luarust_vm::compile(&program);
+            native(&chunk, &path)
         }
 
         Then::Build => {
@@ -558,17 +569,34 @@ fn fuzz(count: u64) -> ExitCode {
 
         let lexed = luarust_lex::lex(source.text());
         let parsed = luarust_parse::parse(source.text(), &lexed.tokens);
-        // The convention this seed runs under, so a sweep covers all three: every path
-        // is told the same one, so it varies what the answer is, never who agrees.
-        let division = match seed % 3 {
-            0 => luarust_core::value::Division::Floored,
-            1 => luarust_core::value::Division::Truncated,
-            _ => luarust_core::value::Division::Euclidean,
+        // The settings this seed runs under, so a sweep covers the combinations rather
+        // than one corner of them. Every path is told the same thing, so this varies what
+        // the answer is and never who agrees about it. `overflow` matters most: under
+        // `trap` the JIT stops compiling arithmetic and calls back for every operation.
+        let start = luarust_check::Start {
+            overflow: if seed.is_multiple_of(5) {
+                luarust_core::value::Overflow::Trap
+            } else {
+                luarust_core::value::Overflow::Wrap
+            },
+            collect: match (seed / 5) % 3 {
+                0 => luarust_core::heap::Collect::Off,
+                1 => luarust_core::heap::Collect::Silent,
+                _ => luarust_core::heap::Collect::Aggressive,
+            },
+            floats: if (seed / 15).is_multiple_of(2) {
+                luarust_core::value::Floats::Exact
+            } else {
+                luarust_core::value::Floats::Shortest
+            },
+            division: match (seed / 30) % 3 {
+                0 => luarust_core::value::Division::Floored,
+                1 => luarust_core::value::Division::Truncated,
+                _ => luarust_core::value::Division::Euclidean,
+            },
+            ..luarust_check::Start::default()
         };
-        let (program, errors) = luarust_check::check_with(
-            &parsed.program,
-            luarust_check::Start { division, ..luarust_check::Start::default() },
-        );
+        let (program, errors) = luarust_check::check_with(&parsed.program, start);
         let refused: Vec<_> =
             lexed.errors.into_iter().chain(parsed.errors).chain(errors).collect();
         if !refused.is_empty() {
@@ -650,4 +678,69 @@ fn ending(outcome: &Result<(), luarust_check::value::Stopped>) -> String {
         Ok(()) => "ran to the end".to_string(),
         Err(stopped) => format!("stopped with {}", stopped.fault.code),
     }
+}
+
+/// Compile a chunk to a program that runs on its own.
+///
+/// Two steps and one outside tool. LLVM writes an object; the system linker joins it to
+/// `luarust-native`, which is the runtime with no compiler in it. What comes out needs
+/// nothing installed on the machine it lands on -- no LLVM, no `luarust`, no chunk file.
+///
+/// The linker is `cc`, which is the one thing this asks of the machine *building* the
+/// program. That is the ordinary bargain for compiling ahead of time, and it is the
+/// machine that already has a Luarust toolchain on it.
+#[cfg(feature = "jit")]
+fn native(chunk: &luarust_vm::Chunk, path: &Path) -> ExitCode {
+    let object = path.with_extension("o");
+    if let Err(declined) = luarust_jit::write_object(chunk, &object) {
+        eprintln!("this could not be compiled ahead of time: {}", declined.because);
+        return ExitCode::from(2);
+    }
+
+    let Some(archive) = runtime_archive() else {
+        eprintln!(
+            "the runtime archive was not found. Build it with `cargo build --release -p \
+             luarust-native`, or name it in LUARUST_RUNTIME."
+        );
+        return ExitCode::from(2);
+    };
+
+    let out = path.with_extension("");
+    let linked = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(&out)
+        .arg(&object)
+        .arg(&archive)
+        .status();
+    let _ = std::fs::remove_file(&object);
+    match linked {
+        Ok(status) if status.success() => {
+            let size = std::fs::metadata(&out).map(|it| it.len()).unwrap_or(0);
+            println!("{} — {size} bytes", out.display());
+            ExitCode::SUCCESS
+        }
+        Ok(status) => {
+            eprintln!("the linker refused it: {status}");
+            ExitCode::from(2)
+        }
+        Err(why) => {
+            eprintln!("`cc` could not be run: {why}. A linker is needed to finish the program.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Where the runtime archive is.
+///
+/// Named outright in `LUARUST_RUNTIME` if the machine wants to say; otherwise beside this
+/// executable, which is where a built workspace leaves it.
+#[cfg(feature = "jit")]
+fn runtime_archive() -> Option<PathBuf> {
+    if let Some(named) = std::env::var_os("LUARUST_RUNTIME") {
+        let named = PathBuf::from(named);
+        return named.exists().then_some(named);
+    }
+    let here = std::env::current_exe().ok()?;
+    let beside = here.parent()?.join("libluarust_native.a");
+    beside.exists().then_some(beside)
 }

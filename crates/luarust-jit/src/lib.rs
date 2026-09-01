@@ -16,7 +16,7 @@
 //! months later.
 
 pub mod blocks;
-mod runtime;
+use luarust_runtime as runtime;
 
 use inkwell::OptimizationLevel;
 use inkwell::builder::Builder;
@@ -27,7 +27,7 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
-use luarust_check::value::{Division, Fault, Overflow, Stopped, Value};
+use luarust_check::value::{Division, Overflow, Stopped, Value};
 use luarust_vm::chunk::{Chunk, Op, Routine};
 use luarust_diag::Span;
 use luarust_parse::ast::{BinOp, CmpOp, Ty};
@@ -199,7 +199,7 @@ pub fn compile_routine(chunk: &Chunk, index: usize) -> Result<CompiledRoutine, D
     let engine = module
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
-    let mut emitter = Emitter::new(context, &module, &engine, chunk, Entry::Routine { index, at: 0 });
+    let mut emitter = Emitter::new(context, &module, Some(&engine), chunk, Entry::Routine { index, at: 0 });
     emitter.emit(chunk, &module);
     optimise(&module);
     let entry = engine
@@ -304,7 +304,7 @@ fn compile_and_run(
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
 
-    let mut emitter = Emitter::new(&context, &module, &engine, chunk, entry);
+    let mut emitter = Emitter::new(&context, &module, Some(&engine), chunk, entry);
     emitter.emit(chunk, &module);
     optimise(&module);
     let spans = std::mem::take(&mut emitter.spans);
@@ -362,6 +362,147 @@ fn compile_and_run(
     })
 }
 
+/// Compile a chunk to an object file, for linking into a program that runs by itself.
+///
+/// The same emitter, the same passes, the same machine code as the in-memory JIT -- what
+/// differs is where it goes and what happens around it. In memory, Rust hands the runtime
+/// its tables and reads the answer back from a function call. In a file there is no Rust
+/// to do either, so this generates a `main` that does it: the tables travel in the object
+/// as bytes, `luarust_start` lays them out, `luarust_main` runs, and `luarust_finish`
+/// prints whatever the program printed and turns a fault code into an exit status.
+///
+/// Nothing about LLVM survives into the result. The object links against `luarust-native`,
+/// which is the runtime and no compiler at all -- which is the whole point: thirty-two
+/// megabytes belongs to the machine that built the program, not the one that runs it.
+pub fn write_object(chunk: &Chunk, to: &std::path::Path) -> Result<(), Declined> {
+    let context = Context::create();
+    let module = context.create_module("luarust");
+    native_module(&context, &module, chunk)?;
+    write_out(&module, to)
+}
+
+/// The ahead-of-time module's optimised IR, for looking at and for guarding.
+pub fn emit_native_ir(chunk: &Chunk) -> Result<String, Declined> {
+    let context = Context::create();
+    let module = context.create_module("luarust");
+    native_module(&context, &module, chunk)?;
+    Ok(module.print_to_string().to_string())
+}
+
+fn native_module<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    chunk: &Chunk,
+) -> Result<(), Declined> {
+    accepts(chunk)?;
+    let mut emitter = Emitter::new(context, module, None, chunk, Entry::Start);
+    emitter.emit(chunk, module);
+
+    // Everything the runtime would have been handed, as bytes it can be handed instead.
+    let tables = luarust_vm::serialize::write_tables(
+        &emitter.constants,
+        &emitter.main_frame,
+        &emitter.templates,
+        // The decimal encoding is a property of a written file, and this table is being
+        // read back by the same build that wrote it, so either encoding round-trips.
+        false,
+    );
+    main_calling_into_the_runtime(context, module, chunk, &tables);
+
+    // The same call every path to machine code makes. Forgetting it costs 43% and fails
+    // no test -- see notes/every-path-calls-optimise.md.
+    optimise(module);
+    Ok(())
+}
+
+/// Write a module out as an object file for this machine.
+fn write_out(module: &Module<'_>, to: &std::path::Path) -> Result<(), Declined> {
+    if Target::initialize_native(&InitializationConfig::default()).is_err() {
+        return Err(Declined { because: "LLVM has no back end for this machine".into() });
+    }
+    let triple = TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple)
+        .map_err(|why| Declined { because: format!("no target for this machine: {why}") })?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            &TargetMachine::get_host_cpu_name().to_string(),
+            &TargetMachine::get_host_cpu_features().to_string(),
+            OptimizationLevel::Aggressive,
+            // Position-independent and the ordinary code model, because this is going into
+            // a real executable rather than into memory the JIT already owns.
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
+        .ok_or(Declined { because: "LLVM would not make a target machine".into() })?;
+    machine
+        .write_to_file(module, inkwell::targets::FileType::Object, to)
+        .map_err(|why| Declined { because: format!("the object could not be written: {why}") })
+}
+
+/// The `main` a compiled program starts at.
+///
+/// Three calls: lay out the tables, run the program, say what happened. The settings the
+/// chunk carries go in as constants, so a program keeps its project's answers with nothing
+/// to read them from.
+fn main_calling_into_the_runtime<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    chunk: &Chunk,
+    tables: &[u8],
+) {
+    let i8_t = context.i8_type();
+    let i32_t = context.i32_type();
+    let i64_t = context.i64_type();
+    let ptr_t = context.ptr_type(Default::default());
+
+    // The tables, as a constant array the program carries with it.
+    let bytes: Vec<_> = tables.iter().map(|b| i8_t.const_int(u64::from(*b), false)).collect();
+    let held = module.add_global(i8_t.array_type(tables.len() as u32), None, "luarust_tables");
+    held.set_initializer(&i8_t.const_array(&bytes));
+    held.set_constant(true);
+
+    let start = module.add_function(
+        "luarust_start",
+        context.void_type().fn_type(
+            &[ptr_t.into(), i64_t.into(), i32_t.into(), i32_t.into(), i32_t.into()],
+            false,
+        ),
+        None,
+    );
+    let finish =
+        module.add_function("luarust_finish", i32_t.fn_type(&[i64_t.into()], false), None);
+    let luarust_main = module.get_function("luarust_main").expect("the emitter made it");
+
+    let main = module.add_function("main", i32_t.fn_type(&[], false), None);
+    let builder = context.create_builder();
+    builder.position_at_end(context.append_basic_block(main, "entry"));
+    builder
+        .build_call(
+            start,
+            &[
+                held.as_pointer_value().into(),
+                i64_t.const_int(tables.len() as u64, false).into(),
+                i32_t.const_int(u64::from(chunk.collect.tag()), false).into(),
+                i32_t.const_int(u64::from(chunk.floats.tag()), false).into(),
+                i32_t.const_int(u64::from(chunk.division.tag()), false).into(),
+            ],
+            "",
+        )
+        .expect("a call");
+    let outcome = builder
+        .build_call(luarust_main, &[], "outcome")
+        .expect("a call")
+        .try_as_basic_value()
+        .expect_basic("it answers a fault code");
+    let status = builder
+        .build_call(finish, &[outcome.into()], "status")
+        .expect("a call")
+        .try_as_basic_value()
+        .expect_basic("it answers an exit status");
+    builder.build_return(Some(&status)).expect("a return");
+}
+
 /// The LLVM IR, for looking at.
 pub fn emit_ir(chunk: &Chunk) -> Result<String, Declined> {
     accepts(chunk)?;
@@ -370,7 +511,7 @@ pub fn emit_ir(chunk: &Chunk) -> Result<String, Declined> {
     let engine = module
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
-    let mut emitter = Emitter::new(&context, &module, &engine, chunk, Entry::Start);
+    let mut emitter = Emitter::new(&context, &module, Some(&engine), chunk, Entry::Start);
     emitter.emit(chunk, &module);
     // Optimised, because that is what actually runs. `dis` is where the unoptimised
     // shape of a program is on show.
@@ -421,75 +562,10 @@ fn decode(outcome: i64, spans: &[Span]) -> Result<(), Stopped> {
     if outcome == runtime::OK {
         return Ok(());
     }
-    let code = outcome & 0xff;
+    // The code says what went wrong; this table says where. A compiled-ahead-of-time
+    // program has the first and not the second, which is why they are separate.
     let span = spans.get((outcome >> 8) as usize).copied().unwrap_or_default();
-    let fault = match code {
-        runtime::DIVIDE_BY_ZERO => Fault {
-            code: "R0002",
-            message: "this divides a whole number by zero.".into(),
-            rule: "an integer has no way to express what dividing by zero would give",
-            fix: "check the divisor before dividing, or use a float type, where it is an infinity."
-                .into(),
-        },
-        runtime::REMAINDER_BY_ZERO => Fault {
-            code: "R0003",
-            message: "this takes a remainder against zero.".into(),
-            rule: "a remainder against zero is not a number",
-            fix: "check the divisor before taking a remainder.".into(),
-        },
-        runtime::OUT_OF_RANGE => {
-            let (at, length) = runtime::reached();
-            Fault {
-                code: "R0015",
-                message: format!("there is no element {at} here."),
-                rule: "an array is counted from one, up to how many it holds",
-                fix: if length == 0 {
-                    "this one holds nothing at all.".to_string()
-                } else {
-                    format!("this one holds {length}, so the last is {length} and the first is 1.")
-                },
-            }
-        }
-        runtime::FRACTIONAL_POWER => Fault {
-            code: "R0012",
-            message: "this raises an exact number to a power that is not whole.".into(),
-            rule: "a ratio raised to a whole power is a ratio, and raised to anything else usually is not",
-            fix: "use a whole exponent, or a float type, where the answer can be approximated."
-                .into(),
-        },
-        runtime::POWER_TOO_LARGE => Fault {
-            code: "R0013",
-            message: format!(
-                "this raises an exact number to a power above {}.",
-                luarust_num::Exact::POWER_LIMIT
-            ),
-            rule: "an exact answer has to be written down, and that one would not fit anywhere",
-            fix: "use a smaller exponent, or a float type, where the answer is rounded to a width."
-                .into(),
-        },
-        runtime::TOO_DEEP => Fault {
-            code: "R0011",
-            message: format!(
-                "this has called itself {} deep.",
-                luarust_check::value::DEPTH_LIMIT
-            ),
-            rule: "a call may only go so deep before the program is stopped",
-            fix: "give the recursion a case that stops, or write it as a loop.".into(),
-        },
-        runtime::DOES_NOT_FIT => Fault {
-            code: "R0005",
-            message: "this does not fit the width it is stored at.".into(),
-            rule: "with overflow set to trap, a whole number must fit the width it is stored at",
-            fix: "use a wider type, or let overflow wrap.".into(),
-        },
-        _ => Fault {
-            code: "R0011",
-            message: "the compiled program stopped.".into(),
-            rule: "a program stops when an operation has no answer",
-            fix: "run it with `luarust interp` to find out what happened.".into(),
-        },
-    };
-    Err(Stopped { fault: Box::new(fault), span })
+    Err(Stopped { fault: Box::new(runtime::fault_of(outcome)), span })
 }
 
 
@@ -568,7 +644,7 @@ impl<'ctx> Emitter<'ctx> {
     fn new(
         context: &'ctx Context,
         module: &Module<'ctx>,
-        engine: &ExecutionEngine<'ctx>,
+        engine: Option<&ExecutionEngine<'ctx>>,
         chunk: &Chunk,
         entry: Entry,
     ) -> Self {
@@ -581,22 +657,30 @@ impl<'ctx> Emitter<'ctx> {
         // Rust functions the other two paths already use.
         let print_text =
             module.add_function("luarust_print_text", void_t.fn_type(&[ptr_t.into(), i64_t.into()], false), None);
-        engine.add_global_mapping(&print_text, runtime::print_text as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&print_text, runtime::print_text as *const () as usize);
+        }
 
         let print_value =
             module.add_function("luarust_print_value", void_t.fn_type(&[i64_t.into(), i32_t.into()], false), None);
-        engine.add_global_mapping(&print_value, runtime::print_value as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&print_value, runtime::print_value as *const () as usize);
+        }
 
         let time_now =
             module.add_function("luarust_time_now", i64_t.fn_type(&[i32_t.into()], false), None);
-        engine.add_global_mapping(&time_now, runtime::time_now as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&time_now, runtime::time_now as *const () as usize);
+        }
 
         let compare = module.add_function(
             "luarust_compare",
             i32_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&compare, runtime::compare_values as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&compare, runtime::compare_values as *const () as usize);
+        }
 
         let fallback = module.add_function(
             "luarust_fallback",
@@ -613,13 +697,17 @@ impl<'ctx> Emitter<'ctx> {
             ),
             None,
         );
-        engine.add_global_mapping(&fallback, runtime::fallback as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&fallback, runtime::fallback as *const () as usize);
+        }
 
         // The cells: everything done to one is a call, because everything done to one was
         // always going to be.
         let cell_move =
             module.add_function("luarust_cell_move", void_t.fn_type(&[i64_t.into(), i64_t.into()], false), None);
-        engine.add_global_mapping(&cell_move, runtime::cell_move as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_move, runtime::cell_move as *const () as usize);
+        }
 
         let cell_binary = module.add_function(
             "luarust_cell_binary",
@@ -629,119 +717,153 @@ impl<'ctx> Emitter<'ctx> {
             ),
             None,
         );
-        engine.add_global_mapping(&cell_binary, runtime::cell_binary as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_binary, runtime::cell_binary as *const () as usize);
+        }
 
         let cell_neg = module.add_function(
             "luarust_cell_neg",
             i64_t.fn_type(&[i64_t.into(), i64_t.into(), i32_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cell_neg, runtime::cell_neg as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_neg, runtime::cell_neg as *const () as usize);
+        }
 
         let cell_compare = module.add_function(
             "luarust_cell_compare",
             i32_t.fn_type(&[i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cell_compare, runtime::cell_compare as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_compare, runtime::cell_compare as *const () as usize);
+        }
 
         let cell_time_now = module.add_function(
             "luarust_cell_time_now",
             void_t.fn_type(&[i64_t.into(), i32_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cell_time_now, runtime::cell_time_now as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_time_now, runtime::cell_time_now as *const () as usize);
+        }
 
         let cell_stage = module.add_function(
             "luarust_cell_stage",
             void_t.fn_type(&[i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cell_stage, runtime::cell_stage as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_stage, runtime::cell_stage as *const () as usize);
+        }
 
         let cells_enter = module.add_function(
             "luarust_cells_enter",
             void_t.fn_type(&[i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cells_enter, runtime::cells_enter as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cells_enter, runtime::cells_enter as *const () as usize);
+        }
 
         let cells_leave =
             module.add_function("luarust_cells_leave", void_t.fn_type(&[], false), None);
-        engine.add_global_mapping(&cells_leave, runtime::cells_leave as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cells_leave, runtime::cells_leave as *const () as usize);
+        }
 
         let cells_leave_with = module.add_function(
             "luarust_cells_leave_with",
             void_t.fn_type(&[i64_t.into()], false),
             None,
         );
-        engine
-            .add_global_mapping(&cells_leave_with, runtime::cells_leave_with as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cells_leave_with, runtime::cells_leave_with as *const () as usize);
+        }
 
         let cell_unstage = module.add_function(
             "luarust_cell_unstage",
             void_t.fn_type(&[i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cell_unstage, runtime::cell_unstage as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_unstage, runtime::cell_unstage as *const () as usize);
+        }
 
         let cell_take_answer = module.add_function(
             "luarust_cell_take_answer",
             void_t.fn_type(&[i64_t.into()], false),
             None,
         );
-        engine
-            .add_global_mapping(&cell_take_answer, runtime::cell_take_answer as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_take_answer, runtime::cell_take_answer as *const () as usize);
+        }
 
         let call_depth =
             module.add_function("luarust_call_depth", i64_t.fn_type(&[], false), None);
-        engine.add_global_mapping(&call_depth, runtime::call_depth as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&call_depth, runtime::call_depth as *const () as usize);
+        }
 
         let array_base = module.add_function(
             "luarust_array_base",
             ptr_t.fn_type(&[i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&array_base, runtime::array_base as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&array_base, runtime::array_base as *const () as usize);
+        }
 
         let array_len =
             module.add_function("luarust_array_len", i64_t.fn_type(&[i64_t.into()], false), None);
-        engine.add_global_mapping(&array_len, runtime::array_len as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&array_len, runtime::array_len as *const () as usize);
+        }
 
         let array_new = module.add_function(
             "luarust_array_new",
             i64_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&array_new, runtime::array_new as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&array_new, runtime::array_new as *const () as usize);
+        }
 
         let array_filled = module.add_function(
             "luarust_array_filled",
             i64_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&array_filled, runtime::array_filled as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&array_filled, runtime::array_filled as *const () as usize);
+        }
 
         let array_get = module.add_function(
             "luarust_array_get",
             void_t.fn_type(&[i64_t.into(), i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&array_get, runtime::array_get as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&array_get, runtime::array_get as *const () as usize);
+        }
 
         let array_put = module.add_function(
             "luarust_array_put",
             void_t.fn_type(&[i64_t.into(), i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&array_put, runtime::array_put as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&array_put, runtime::array_put as *const () as usize);
+        }
 
         let cell_from_bits = module.add_function(
             "luarust_cell_from_bits",
             void_t.fn_type(&[i64_t.into(), i64_t.into(), i32_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&cell_from_bits, runtime::cell_from_bits as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_from_bits, runtime::cell_from_bits as *const () as usize);
+        }
 
         let note_handle = module.add_function(
             "luarust_note_handle",
@@ -751,29 +873,39 @@ impl<'ctx> Emitter<'ctx> {
             ),
             None,
         );
-        engine.add_global_mapping(&note_handle, runtime::note_handle as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&note_handle, runtime::note_handle as *const () as usize);
+        }
 
         let print_array = module.add_function(
             "luarust_print_array",
             void_t.fn_type(&[i64_t.into(), i32_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&print_array, runtime::print_array as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&print_array, runtime::print_array as *const () as usize);
+        }
 
         let note_index = module.add_function(
             "luarust_note_index",
             void_t.fn_type(&[i64_t.into(), i64_t.into()], false),
             None,
         );
-        engine.add_global_mapping(&note_index, runtime::note_index as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&note_index, runtime::note_index as *const () as usize);
+        }
 
         let print_cell =
             module.add_function("luarust_print_cell", void_t.fn_type(&[i64_t.into()], false), None);
-        engine.add_global_mapping(&print_cell, runtime::print_cell as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&print_cell, runtime::print_cell as *const () as usize);
+        }
 
         let cell_bits =
             module.add_function("luarust_cell_bits", i64_t.fn_type(&[i64_t.into()], false), None);
-        engine.add_global_mapping(&cell_bits, runtime::cell_bits as *const () as usize);
+        if let Some(engine) = engine {
+            engine.add_global_mapping(&cell_bits, runtime::cell_bits as *const () as usize);
+        }
 
         // Entered inside a routine, `main` *is* that routine: same code, same registers,
         // same way of handing an answer back -- a pointer to write it through, which is

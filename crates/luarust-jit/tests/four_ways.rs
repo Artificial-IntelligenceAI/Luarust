@@ -11,7 +11,9 @@
 //! somewhere awkward on purpose: partway through a loop, with registers holding whatever
 //! the first few passes left in them.
 
-use luarust_core::value::{Engine, Value};
+use luarust_check::Start;
+use luarust_core::heap::Collect;
+use luarust_core::value::{Division, Engine, Floats, Overflow, Value};
 use luarust_diag::SourceFile;
 use luarust_vm::{Chunk, Taken, Tier};
 
@@ -108,18 +110,23 @@ fn four_ways(source: &str, after: u32) -> bool {
 /// The same, saying both whether anything switched and whether any of it was inside a
 /// routine.
 fn four_ways_reporting(source: &str, after: u32) -> (bool, bool) {
-    let tier = four_ways_told(source, after);
+    four_ways_under(source, after, Start::default())
+}
+
+/// The same, under one particular set of project settings.
+fn four_ways_under(source: &str, after: u32, start: Start) -> (bool, bool) {
+    let tier = four_ways_told(source, after, start);
     (tier.switched, tier.inside)
 }
 
 /// The whole harness, handing the tier back for whatever a test wants to know of it.
-fn four_ways_told(source: &str, after: u32) -> Eagerly {
+fn four_ways_told(source: &str, after: u32, start: Start) -> Eagerly {
     let file = SourceFile::new("test.lr", source);
     let lexed = luarust_lex::lex(source);
     assert!(lexed.ok(), "{}", luarust_diag::report(&file, &lexed.errors));
     let parsed = luarust_parse::parse(source, &lexed.tokens);
     assert!(parsed.ok(), "{}", luarust_diag::report(&file, &parsed.errors));
-    let (program, errors) = luarust_check::check(&parsed.program);
+    let (program, errors) = luarust_check::check_with(&parsed.program, start);
     assert!(errors.is_empty(), "{}", luarust_diag::report(&file, &errors));
 
     let mut out = Vec::new();
@@ -214,7 +221,7 @@ fn a_call_after_the_hot_one_runs_on_kept_code() {
                   var.local.i64 ['a'] = [work[|5|]];\n\
                   var.local.i64 ['b'] = [work[|7|]];\n\
                   print['a' \" \" 'b' \\n];\n";
-    let tier = four_ways_told(source, 1);
+    let tier = four_ways_told(source, 1, Start::default());
     assert!(tier.inside, "the first call was meant to go hot inside the routine");
     assert!(tier.served, "the second call was meant to run on the kept code");
 }
@@ -331,9 +338,24 @@ fn generated_programs_agree_four_ways() {
 #[ignore = "a deep sweep for changes to the handover, not for every gate"]
 fn twenty_thousand_agree_four_ways() {
     let (mut switched, mut inside) = (0, 0);
-    for seed in 1..=20_000 {
+    for seed in 1..=20_000u64 {
+        let start = Start {
+            overflow: if seed.is_multiple_of(5) { Overflow::Trap } else { Overflow::Wrap },
+            collect: match (seed / 5) % 3 {
+                0 => Collect::Off,
+                1 => Collect::Silent,
+                _ => Collect::Aggressive,
+            },
+            floats: if (seed / 15).is_multiple_of(2) { Floats::Exact } else { Floats::Shortest },
+            division: match (seed / 30) % 3 {
+                0 => Division::Floored,
+                1 => Division::Truncated,
+                _ => Division::Euclidean,
+            },
+            ..Start::default()
+        };
         let (took, in_routine) =
-            four_ways_reporting(&luarust_gen::program(seed).source, 1 + seed as u32 % 5);
+            four_ways_under(&luarust_gen::program(seed).source, 1 + seed as u32 % 5, start);
         switched += usize::from(took);
         inside += usize::from(in_routine);
     }

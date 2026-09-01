@@ -1,0 +1,18 @@
+[package]
+name = "luarust-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# A static archive, because the thing that links against it is a `.o` LLVM wrote and not
+# another Rust crate. Everything a compiled program needs at run time is in here: the
+# arithmetic, the heap, the printing, and the entry and exit points its `main` calls.
+[lib]
+name = "luarust_native"
+crate-type = ["staticlib"]
+
+[dependencies]
+luarust-core = { path = "../luarust-core" }
+luarust-runtime = { path = "../luarust-runtime" }
+luarust-vm = { path = "../luarust-vm" }

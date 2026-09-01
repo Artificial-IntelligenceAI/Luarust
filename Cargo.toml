@@ -11,8 +11,10 @@ members = [
     "crates/luarust-jit",
     "crates/luarust-lex",
     "crates/luarust-num",
+    "crates/luarust-native",
     "crates/luarust-parse",
     "crates/luarust-run",
+    "crates/luarust-runtime",
     "crates/luarust-vm",
 ]
 
@@ -26,8 +28,10 @@ default-members = [
     "crates/luarust-interp",
     "crates/luarust-lex",
     "crates/luarust-num",
+    "crates/luarust-native",
     "crates/luarust-parse",
     "crates/luarust-run",
+    "crates/luarust-runtime",
     "crates/luarust-vm",
 ]
 

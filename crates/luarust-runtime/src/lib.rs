@@ -5,7 +5,7 @@
 //! functions the interpreter and the VM use. That is not a shortcut: it is what keeps the
 //! three paths giving the same answers instead of nearly the same ones.
 
-use luarust_check::value::{Overflow, Value, binary_op, compare, format_of, negate};
+use luarust_check::value::{Fault, Overflow, Value, binary_op, compare, format_of, negate};
 use luarust_num::binary::{self, Comparison, Round};
 use luarust_parse::ast::{BinOp, Ty};
 use std::cell::RefCell;
@@ -153,6 +153,7 @@ pub fn retire() {
 /// with, and this is how each of its values reaches the stack slot compiled code reads it
 /// from. A value that lives in a cell answers nought, because the cell is already holding
 /// it and the slot beside it is never looked at.
+#[unsafe(export_name = "luarust_cell_bits")]
 pub extern "C" fn cell_bits(index: u64) -> u64 {
     match cell(index) {
         Value::Num { bits, .. } => bits,
@@ -178,6 +179,7 @@ fn put(index: u64, value: Value) {
 }
 
 /// Stage one celled argument, read from the caller's frame.
+#[unsafe(export_name = "luarust_cell_stage")]
 pub extern "C" fn cell_stage(index: u64) {
     let value = cell(index);
     PENDING.with(|queue| queue.borrow_mut().push(value));
@@ -188,12 +190,14 @@ pub extern "C" fn cell_stage(index: u64) {
 /// They wait rather than being placed, because where they belong is a matter for the
 /// callee: a celled parameter lives in the cell of whichever register it was given, and
 /// the caller has no way to know which that is.
+#[unsafe(export_name = "luarust_cells_enter")]
 pub extern "C" fn cells_enter(routine: u64) {
     let frame = TEMPLATES.with(|table| table.borrow()[routine as usize].clone());
     FRAMES.with(|frames| frames.borrow_mut().push(frame));
 }
 
 /// Take the next staged argument into a cell of the frame just entered.
+#[unsafe(export_name = "luarust_cell_unstage")]
 pub extern "C" fn cell_unstage(dst: u64) {
     let value = PENDING.with(|queue| {
         let mut queue = queue.borrow_mut();
@@ -205,6 +209,7 @@ pub extern "C" fn cell_unstage(dst: u64) {
 }
 
 /// Leave a function, keeping one cell's value for whoever asked.
+#[unsafe(export_name = "luarust_cells_leave_with")]
 pub extern "C" fn cells_leave_with(index: u64) {
     let value = cell(index);
     ANSWER.with(|slot| *slot.borrow_mut() = Some(value));
@@ -214,6 +219,7 @@ pub extern "C" fn cells_leave_with(index: u64) {
 }
 
 /// Leave a function that had nothing to give back.
+#[unsafe(export_name = "luarust_cells_leave")]
 pub extern "C" fn cells_leave() {
     FRAMES.with(|frames| {
         frames.borrow_mut().pop();
@@ -221,7 +227,7 @@ pub extern "C" fn cells_leave() {
 }
 
 /// A machine value, as the `Value` the VM holds. The one place the two shapes meet.
-pub(crate) fn held(ty: Ty, bits: u64) -> Value {
+pub fn held(ty: Ty, bits: u64) -> Value {
     match ty {
         Ty::Bool => Value::Bool(bits != 0),
         ty => Value::Num { ty, bits },
@@ -237,6 +243,7 @@ pub fn answer() -> Option<Value> {
 }
 
 /// Take the answer a call left, into a cell of the frame that asked for it.
+#[unsafe(export_name = "luarust_cell_take_answer")]
 pub extern "C" fn cell_take_answer(dst: u64) {
     let value = ANSWER.with(|slot| slot.borrow_mut().take()).expect("a call left an answer");
     put(dst, value);
@@ -244,12 +251,14 @@ pub extern "C" fn cell_take_answer(dst: u64) {
 
 /// How deep the frames go, so compiled code can stop where the other two paths stop.
 /// The borrowed frames are calls the caller has open, so they count.
+#[unsafe(export_name = "luarust_call_depth")]
 pub extern "C" fn call_depth() -> u64 {
     let borrowed = BORROWED.with(|callers| callers.borrow().len() as u64);
     borrowed + FRAMES.with(|frames| frames.borrow().len() as u64)
 }
 
 /// Copy one cell into another.
+#[unsafe(export_name = "luarust_cell_move")]
 pub extern "C" fn cell_move(dst: u64, src: u64) {
     let value = cell(src);
     put(dst, value);
@@ -257,6 +266,7 @@ pub extern "C" fn cell_move(dst: u64, src: u64) {
 
 /// Arithmetic on two cells, into a third. Reading happens before writing, so the
 /// destination may be one of the sources.
+#[unsafe(export_name = "luarust_cell_binary")]
 pub extern "C" fn cell_binary(op: u32, dst: u64, a: u64, b: u64, trapping: u32) -> i64 {
     let overflow = if trapping == 0 { Overflow::Wrap } else { Overflow::Trap };
     let (x, y) = (cell(a), cell(b));
@@ -270,6 +280,7 @@ pub extern "C" fn cell_binary(op: u32, dst: u64, a: u64, b: u64, trapping: u32) 
 }
 
 /// Negate a cell into another.
+#[unsafe(export_name = "luarust_cell_neg")]
 pub extern "C" fn cell_neg(dst: u64, src: u64, trapping: u32) -> i64 {
     let overflow = if trapping == 0 { Overflow::Wrap } else { Overflow::Trap };
     match negate(&cell(src), overflow) {
@@ -282,6 +293,7 @@ pub extern "C" fn cell_neg(dst: u64, src: u64, trapping: u32) -> i64 {
 }
 
 /// How two cells order, the way every other execution path orders them.
+#[unsafe(export_name = "luarust_cell_compare")]
 pub extern "C" fn cell_compare(a: u64, b: u64) -> i32 {
     match compare(&cell(a), &cell(b)) {
         Comparison::Less => 0,
@@ -292,12 +304,14 @@ pub extern "C" fn cell_compare(a: u64, b: u64) -> i32 {
 }
 
 /// Print a cell, the way every other execution path prints one.
+#[unsafe(export_name = "luarust_print_cell")]
 pub extern "C" fn print_cell(index: u64) {
     let text = cell(index).to_string();
     OUTPUT.with(|out| out.borrow_mut().extend_from_slice(text.as_bytes()));
 }
 
 /// Read the clock into a cell, in whichever float format it was asked for.
+#[unsafe(export_name = "luarust_cell_time_now")]
 pub extern "C" fn cell_time_now(dst: u64, tag: u32) {
     let ty = untag(tag);
     let seconds = STARTED.with(|at| {
@@ -365,7 +379,7 @@ fn untag(tag: u32) -> Ty {
 }
 
 /// Rebuild a value from the bits compiled code was holding it in.
-pub(crate) fn value_of(tag: u32, bits: u64) -> Value {
+pub fn value_of(tag: u32, bits: u64) -> Value {
     match untag(tag) {
         Ty::Bool => Value::Bool(bits != 0),
         ty => Value::Num { ty, bits },
@@ -410,12 +424,14 @@ pub const OUT_OF_RANGE: i64 = 8;
 ///
 /// # Safety
 /// `ptr` must point at `len` readable bytes of UTF-8, which is what the compiler emits.
+#[unsafe(export_name = "luarust_print_text")]
 pub unsafe extern "C" fn print_text(ptr: *const u8, len: u64) {
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     OUTPUT.with(|out| out.borrow_mut().extend_from_slice(bytes));
 }
 
 /// Print a number, the way every other execution path prints one.
+#[unsafe(export_name = "luarust_print_value")]
 pub extern "C" fn print_value(bits: u64, tag: u32) {
     let text = value_of(tag, bits).to_string();
     OUTPUT.with(|out| out.borrow_mut().extend_from_slice(text.as_bytes()));
@@ -425,6 +441,7 @@ pub extern "C" fn print_value(bits: u64, tag: u32) {
 ///
 /// Takes the type rather than always answering in `b64`, because a `b32` variable holding
 /// a `b64`'s bits is a value that is not what it says it is.
+#[unsafe(export_name = "luarust_time_now")]
 pub extern "C" fn time_now(tag: u32) -> u64 {
     let seconds = STARTED.with(|at| {
         at.borrow().map(|started| started.elapsed().as_secs_f64()).unwrap_or(0.0)
@@ -440,6 +457,7 @@ pub extern "C" fn time_now(tag: u32) -> u64 {
 /// Compiled code does this itself for the types where an integer or a float comparison is
 /// exactly right. `b16` is not one of those: its values are sign-and-magnitude in sixteen
 /// bits, which is neither.
+#[unsafe(export_name = "luarust_compare")]
 pub extern "C" fn compare_values(tag: u32, a: u64, b: u64) -> i32 {
     match compare(&value_of(tag, a), &value_of(tag, b)) {
         Comparison::Less => 0,
@@ -458,6 +476,7 @@ pub const GREATER: u64 = 2;
 ///
 /// # Safety
 /// `out` must point at a writable `u64`.
+#[unsafe(export_name = "luarust_fallback")]
 pub unsafe extern "C" fn fallback(
     op: u32,
     tag: u32,
@@ -482,11 +501,13 @@ pub unsafe extern "C" fn fallback(
 // ---- arrays ---------------------------------------------------------------------
 
 /// Where an array's elements are. Compiled code takes this and does its own arithmetic.
+#[unsafe(export_name = "luarust_array_base")]
 pub extern "C" fn array_base(handle: u64) -> *mut u8 {
     luarust_core::heap::base_of(handle as u32).0
 }
 
 /// How many elements an array holds.
+#[unsafe(export_name = "luarust_array_len")]
 pub extern "C" fn array_len(handle: u64) -> u64 {
     luarust_core::heap::length(handle as u32) as u64
 }
@@ -519,6 +540,7 @@ fn sweep_if_asked() {
     });
 }
 
+#[unsafe(export_name = "luarust_array_new")]
 pub extern "C" fn array_new(element: u32, first: u64, count: u64) -> u64 {
     sweep_if_asked();
     let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
@@ -527,6 +549,7 @@ pub extern "C" fn array_new(element: u32, first: u64, count: u64) -> u64 {
 }
 
 /// A new array of `count` elements, every one of them what is in `fill`.
+#[unsafe(export_name = "luarust_array_filled")]
 pub extern "C" fn array_filled(element: u32, count: u64, fill: u64) -> u64 {
     sweep_if_asked();
     let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
@@ -534,6 +557,7 @@ pub extern "C" fn array_filled(element: u32, count: u64, fill: u64) -> u64 {
 }
 
 /// One element into a cell, for the kinds compiled code cannot hold.
+#[unsafe(export_name = "luarust_array_get")]
 pub extern "C" fn array_get(handle: u64, at: u64, dst: u64) {
     let value = luarust_core::heap::read(handle as u32, at as usize)
         .expect("compiled code checks the range before asking");
@@ -541,12 +565,14 @@ pub extern "C" fn array_get(handle: u64, at: u64, dst: u64) {
 }
 
 /// A cell into one element, likewise.
+#[unsafe(export_name = "luarust_array_put")]
 pub extern "C" fn array_put(handle: u64, at: u64, src: u64) {
     let value = cell(src);
     luarust_core::heap::store(handle as u32, at as usize, &value);
 }
 
 /// A packed value into a cell, for the times compiled code has to hand one over.
+#[unsafe(export_name = "luarust_cell_from_bits")]
 pub extern "C" fn cell_from_bits(dst: u64, bits: u64, tag: u32) {
     let ty = Ty::from_tag(tag as u8).expect("a tag came from a type");
     let value = if ty == Ty::Bool {
@@ -565,6 +591,7 @@ pub extern "C" fn cell_from_bits(dst: u64, bits: u64, tag: u32) {
 /// has none -- `Ty::tag` answers `u8::MAX` for one, and there is nowhere in a byte to put
 /// a shape as well as a type. So the shape index travels instead, which is all
 /// `Ty::Array` is made of.
+#[unsafe(export_name = "luarust_note_handle")]
 pub extern "C" fn note_handle(dst: u64, bits: u64, shape: u32) {
     put(dst, Value::Num { ty: Ty::Array(shape as u8), bits });
 }
@@ -573,6 +600,7 @@ pub extern "C" fn note_handle(dst: u64, bits: u64, shape: u32) {
 ///
 /// The handle is not what anybody wants to see, and the elements are packed rather than
 /// being values, so this is the one thing about an array that has to come back here.
+#[unsafe(export_name = "luarust_print_array")]
 pub extern "C" fn print_array(handle: u64, element: u32) {
     let element = Ty::from_tag(element as u8).expect("an element tag came from a type");
     let ty = luarust_core::ty::growable(element).expect("the type was already named");
@@ -581,6 +609,7 @@ pub extern "C" fn print_array(handle: u64, element: u32) {
 }
 
 /// Remember an index that was out of range, so the fault can name it.
+#[unsafe(export_name = "luarust_note_index")]
 pub extern "C" fn note_index(at: u64, length: u64) {
     REACHED.with(|held| *held.borrow_mut() = (at as i64 as i128, length as i128));
 }
@@ -588,4 +617,88 @@ pub extern "C" fn note_index(at: u64, length: u64) {
 /// The index that was out of range, and how many there were.
 pub fn reached() -> (i128, i128) {
     REACHED.with(|held| *held.borrow())
+}
+
+
+/// What a fault code means, without reference to where it happened.
+///
+/// The code and the place are separate on purpose. Compiled code carries a code out in its
+/// return value; the *place* lives in a span table the emitter built, which the in-memory
+/// JIT still has and a program compiled to a file does not. So a native binary can say
+/// what went wrong even though it cannot yet say which line.
+pub fn fault_of(outcome: i64) -> Fault {
+    let code = outcome & 0xff;
+    match code {
+        DIVIDE_BY_ZERO => Fault {
+            code: "R0002",
+            message: "this divides a whole number by zero.".into(),
+            rule: "an integer has no way to express what dividing by zero would give",
+            fix: "check the divisor before dividing, or use a float type, where it is an infinity."
+                .into(),
+        },
+        REMAINDER_BY_ZERO => Fault {
+            code: "R0003",
+            message: "this takes a remainder against zero.".into(),
+            rule: "a remainder against zero is not a number",
+            fix: "check the divisor before taking a remainder.".into(),
+        },
+        OUT_OF_RANGE => {
+            let (at, length) = reached();
+            Fault {
+                code: "R0015",
+                message: format!("there is no element {at} here."),
+                rule: "an array is counted from one, up to how many it holds",
+                fix: if length == 0 {
+                    "this one holds nothing at all.".to_string()
+                } else {
+                    format!("this one holds {length}, so the last is {length} and the first is 1.")
+                },
+            }
+        }
+        FRACTIONAL_POWER => Fault {
+            code: "R0012",
+            message: "this raises an exact number to a power that is not whole.".into(),
+            rule: "a ratio raised to a whole power is a ratio, and raised to anything else usually is not",
+            fix: "use a whole exponent, or a float type, where the answer can be approximated."
+                .into(),
+        },
+        POWER_TOO_LARGE => Fault {
+            code: "R0013",
+            message: format!(
+                "this raises an exact number to a power above {}.",
+                luarust_num::Exact::POWER_LIMIT
+            ),
+            rule: "an exact answer has to be written down, and that one would not fit anywhere",
+            fix: "use a smaller exponent, or a float type, where the answer is rounded to a width."
+                .into(),
+        },
+        TOO_DEEP => Fault {
+            code: "R0011",
+            message: format!(
+                "this has called itself {} deep.",
+                luarust_check::value::DEPTH_LIMIT
+            ),
+            rule: "a call may only go so deep before the program is stopped",
+            fix: "give the recursion a case that stops, or write it as a loop.".into(),
+        },
+        DOES_NOT_FIT => Fault {
+            code: "R0005",
+            message: "this does not fit the width it is stored at.".into(),
+            rule: "with overflow set to trap, a whole number must fit the width it is stored at",
+            fix: "use a wider type, or let overflow wrap.".into(),
+        },
+        _ => Fault {
+            code: "R0011",
+            message: "the compiled program stopped.".into(),
+            rule: "a program stops when an operation has no answer",
+            fix: "run it with `luarust interp` to find out what happened.".into(),
+        },
+    }
+}
+
+/// One line saying what went wrong, for a program with no diagnostics machinery linked in.
+pub fn fault_text(outcome: i64) -> String {
+    let fault = fault_of(outcome);
+    format!("{}\n\n{}\nRule(s) broken: {}\nSuggested fix(s): {}",
+            fault.code, fault.message, fault.rule, fault.fix)
 }

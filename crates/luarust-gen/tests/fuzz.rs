@@ -4,17 +4,35 @@
 //! cases somebody thought of; these cover the ones nobody did.
 
 use luarust_check::Start;
-use luarust_core::value::Division;
+use luarust_core::heap::Collect;
+use luarust_core::value::{Division, Floats, Overflow};
 use luarust_diag::SourceFile;
-/// The convention this seed runs under. A generated program is run under one setting at a
-/// time, and the seed picks which -- so a sweep covers all three, and a divergence that
-/// only appears in one of them has somewhere to show up. Each path is told the same
-/// thing, so this varies what the answer should be, never who agrees about it.
-fn division_for(seed: u64) -> Division {
-    match seed % 3 {
-        0 => Division::Floored,
-        1 => Division::Truncated,
-        _ => Division::Euclidean,
+
+/// The project settings this seed runs under.
+///
+/// A generated program is run under one set of settings at a time and the seed picks
+/// which, so a sweep covers the combinations rather than one corner of them. Every path
+/// is told the same thing, so this varies what the answer should be and never who agrees
+/// about it.
+///
+/// `overflow` is the one that changes most: under `trap` the JIT stops compiling
+/// arithmetic and calls back into the runtime for every operation, which is a different
+/// body of machine code entirely and was never once fuzzed while this said `wrap`.
+fn settings_for(seed: u64) -> Start {
+    Start {
+        overflow: if seed.is_multiple_of(5) { Overflow::Trap } else { Overflow::Wrap },
+        collect: match (seed / 5) % 3 {
+            0 => Collect::Off,
+            1 => Collect::Silent,
+            _ => Collect::Aggressive,
+        },
+        floats: if (seed / 15).is_multiple_of(2) { Floats::Exact } else { Floats::Shortest },
+        division: match (seed / 30) % 3 {
+            0 => Division::Floored,
+            1 => Division::Truncated,
+            _ => Division::Euclidean,
+        },
+        ..Start::default()
     }
 }
 
@@ -45,7 +63,7 @@ fn agree(source: &str, seed: u64) -> Outcome {
     }
     let (program, errors) = luarust_check::check_with(
         &parsed.program,
-        Start { division: division_for(seed), ..Start::default() },
+        settings_for(seed),
     );
     if !errors.is_empty() {
         complain("check", &errors);

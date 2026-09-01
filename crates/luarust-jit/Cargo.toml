@@ -14,6 +14,7 @@ luarust-core = { path = "../luarust-core" }
 luarust-diag = { path = "../luarust-diag" }
 luarust-num = { path = "../luarust-num" }
 luarust-parse = { path = "../luarust-parse" }
+luarust-runtime = { path = "../luarust-runtime" }
 luarust-vm = { path = "../luarust-vm" }
 
 [dev-dependencies]

@@ -1,0 +1,16 @@
+[package]
+name = "luarust-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# What compiled code calls back into, and deliberately not where the compiler lives. LLVM
+# is thirty-two megabytes and belongs to the machine that *builds* a program; a machine
+# that only runs one needs the arithmetic, the heap and the printing, which is this. Keeping
+# them apart is what lets an ahead-of-time binary link the second without the first.
+[dependencies]
+luarust-check = { path = "../luarust-check" }
+luarust-core = { path = "../luarust-core" }
+luarust-num = { path = "../luarust-num" }
+luarust-parse = { path = "../luarust-parse" }

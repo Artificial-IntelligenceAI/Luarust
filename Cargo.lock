@@ -165,6 +165,7 @@ dependencies = [
  "luarust-lex",
  "luarust-num",
  "luarust-parse",
+ "luarust-runtime",
  "luarust-vm",
 ]
 
@@ -173,6 +174,15 @@ name = "luarust-lex"
 version = "0.0.0"
 dependencies = [
  "luarust-diag",
+]
+
+[[package]]
+name = "luarust-native"
+version = "0.0.0"
+dependencies = [
+ "luarust-core",
+ "luarust-runtime",
+ "luarust-vm",
 ]
 
 [[package]]
@@ -194,6 +204,16 @@ version = "0.0.0"
 dependencies = [
  "luarust-diag",
  "luarust-vm",
+]
+
+[[package]]
+name = "luarust-runtime"
+version = "0.0.0"
+dependencies = [
+ "luarust-check",
+ "luarust-core",
+ "luarust-num",
+ "luarust-parse",
 ]
 
 [[package]]

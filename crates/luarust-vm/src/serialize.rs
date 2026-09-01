@@ -1017,3 +1017,65 @@ impl<'a> Cursor<'a> {
         })
     }
 }
+
+/// The tables compiled code needs before it can run, written out and read back.
+///
+/// The in-memory JIT hands these to the runtime as live Rust values. Machine code written
+/// to a file has nobody to hand them to, so it carries them: the emitter builds them while
+/// it compiles, they go into the object as bytes, and the runtime rebuilds them at startup.
+///
+/// Not a chunk. A chunk is a program to be run; this is what one particular compilation of
+/// that program needs beside it -- constant cells in the order the emitter happened to make
+/// them, the frame the top level starts in, and a template frame per routine. Reproducing
+/// them means running the emitter, which a program that is already compiled cannot do.
+pub fn write_tables(
+    constants: &[Value],
+    frame: &[Value],
+    templates: &[Vec<Value>],
+    dpd: bool,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_u32(&mut out, constants.len() as u32);
+    for value in constants {
+        put_value(&mut out, value, dpd);
+    }
+    put_u32(&mut out, frame.len() as u32);
+    for value in frame {
+        put_value(&mut out, value, dpd);
+    }
+    put_u32(&mut out, templates.len() as u32);
+    for template in templates {
+        put_u32(&mut out, template.len() as u32);
+        for value in template {
+            put_value(&mut out, value, dpd);
+        }
+    }
+    out
+}
+
+/// What [`write_tables`] wrote.
+type Tables = (Vec<Value>, Vec<Value>, Vec<Vec<Value>>);
+
+/// Read back what [`write_tables`] wrote.
+///
+/// Checked the way a chunk is checked, and for the same reason: these bytes are inside an
+/// executable that arrived from somewhere, and a corrupt count must be a complaint rather
+/// than a request for four billion values.
+pub fn read_tables(bytes: &[u8]) -> Result<Tables, Broken> {
+    let mut cursor = Cursor { bytes, at: 0 };
+    let values = |cursor: &mut Cursor<'_>| -> Result<Vec<Value>, Broken> {
+        let count = cursor.u32()? as usize;
+        if count > cursor.bytes.len() {
+            return Err(Broken::OutOfRange { what: "values in a table", index: count as u64, of: cursor.bytes.len() });
+        }
+        (0..count).map(|_| cursor.value()).collect()
+    };
+    let constants = values(&mut cursor)?;
+    let frame = values(&mut cursor)?;
+    let count = cursor.u32()? as usize;
+    if count > cursor.bytes.len() {
+        return Err(Broken::OutOfRange { what: "template frames", index: count as u64, of: cursor.bytes.len() });
+    }
+    let templates = (0..count).map(|_| values(&mut cursor)).collect::<Result<_, _>>()?;
+    Ok((constants, frame, templates))
+}
