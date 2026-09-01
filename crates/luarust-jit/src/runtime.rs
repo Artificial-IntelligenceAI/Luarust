@@ -69,10 +69,45 @@ pub fn resume(
     templates: Vec<Vec<Value>>,
     started: Instant,
 ) {
+    // Tables installed by hand belong to no kept module, so the next kept call must
+    // install its own rather than trust what a one-shot module left here.
+    INSTALLED.with(|token| token.set(0));
     OUTPUT.with(|out| out.borrow_mut().clear());
     STARTED.with(|at| *at.borrow_mut() = Some(started));
     CONSTANTS.with(|table| *table.borrow_mut() = constants);
     TEMPLATES.with(|table| *table.borrow_mut() = templates);
+    PENDING.with(|queue| queue.borrow_mut().clear());
+    ANSWER.with(|slot| *slot.borrow_mut() = None);
+    FRAMES.with(|open| *open.borrow_mut() = frames);
+}
+
+thread_local! {
+    /// Which kept module's constants and templates are installed, `0` for none. The
+    /// tables never change for a given module, so a call entering the module that is
+    /// already installed pays a comparison where it used to pay two clones.
+    static INSTALLED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`resume`], for a kept module that is entered over and over.
+///
+/// `module` never being nought is the caller's business; a nought would alias the
+/// nothing-installed state and reinstall on every call, which is slow rather than wrong.
+pub fn reenter(
+    module: u64,
+    constants: &[Value],
+    templates: &[Vec<Value>],
+    frames: Vec<Vec<Value>>,
+    started: Instant,
+) {
+    INSTALLED.with(|token| {
+        if token.get() != module {
+            CONSTANTS.with(|table| *table.borrow_mut() = constants.to_vec());
+            TEMPLATES.with(|table| *table.borrow_mut() = templates.to_vec());
+            token.set(module);
+        }
+    });
+    OUTPUT.with(|out| out.borrow_mut().clear());
+    STARTED.with(|at| *at.borrow_mut() = Some(started));
     PENDING.with(|queue| queue.borrow_mut().clear());
     ANSWER.with(|slot| *slot.borrow_mut() = None);
     FRAMES.with(|open| *open.borrow_mut() = frames);

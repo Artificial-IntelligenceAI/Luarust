@@ -181,6 +181,9 @@ pub struct CompiledRoutine {
     _engine: ExecutionEngine<'static>,
     /// Where `luarust_main` landed in memory.
     entry: usize,
+    /// This module's name with the runtime's table cache, never nought. A call entering
+    /// the module already installed skips reinstalling the tables.
+    module: u64,
     constants: Vec<Value>,
     templates: Vec<Vec<Value>>,
     spans: Vec<Span>,
@@ -202,8 +205,10 @@ pub fn compile_routine(chunk: &Chunk, index: usize) -> Result<CompiledRoutine, D
     let entry = engine
         .get_function_address("luarust_main")
         .map_err(|why| Declined { because: format!("the compiled routine was lost: {why}") })?;
+    static NAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     Ok(CompiledRoutine {
         entry,
+        module: NAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         constants: std::mem::take(&mut emitter.constants),
         templates: std::mem::take(&mut emitter.templates),
         spans: std::mem::take(&mut emitter.spans),
@@ -225,7 +230,7 @@ impl CompiledRoutine {
         started: std::time::Instant,
         out: &mut dyn Write,
     ) -> Result<Option<Value>, Stopped> {
-        runtime::resume(self.constants.clone(), frames, self.templates.clone(), started);
+        runtime::reenter(self.module, &self.constants, &self.templates, frames, started);
         let (code, bits) = match self.answers.filter(|ty| !celled(*ty)) {
             // A machine answer comes back through a pointer, a celled one is left where
             // celled answers are always left — the two shapes `compile_and_run` has.
@@ -242,8 +247,13 @@ impl CompiledRoutine {
                 (unsafe { compiled() }, None)
             }
         };
-        let _ = out.write_all(&runtime::taken());
-        let _ = out.flush();
+        // Most calls print nothing, and an empty take costs nothing — it is the write
+        // and the flush that were being paid for no output.
+        let printed = runtime::taken();
+        if !printed.is_empty() {
+            let _ = out.write_all(&printed);
+            let _ = out.flush();
+        }
         decode(code, &self.spans).map(|()| match (self.answers, bits) {
             (None, _) => None,
             (Some(ty), Some(bits)) => Some(runtime::held(ty, bits)),
