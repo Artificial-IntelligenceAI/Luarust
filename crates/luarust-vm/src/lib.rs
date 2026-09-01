@@ -158,6 +158,23 @@ enum Micro {
     Mul { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
     Div { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
     Mod { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    /// One element of a one-dimensional array, read where its index already lives.
+    ///
+    /// `compile` stages an index through a register of its own before every `At`, and
+    /// that copy is load-bearing *for the compiled path*: without it LLVM derives the
+    /// address from the loop counter and stops vectorising the loop, which is worth
+    /// thirteen times on array work — see `compile::arguments`, where taking it out was
+    /// tried and put back. The chunk therefore keeps it, and the JIT keeps its
+    /// vectoriser. The VM has no such need and was paying a whole dispatched
+    /// instruction per element for somebody else's benefit, so `widen` fuses the pair
+    /// and the machine reads the index where the counter already holds it.
+    ///
+    /// The copy is not performed. Its destination is a temp `arguments` claimed and
+    /// released, and the compiler never reads a temp it has not just written — the same
+    /// standing `Tail` swallows its neighbours on, and the same gate proves it: a
+    /// register left stale here is a wrong answer, which the fuzzer and the four-way
+    /// sweep both compare against the tree-walker.
+    AtOne { dst: chunk::Reg, array: chunk::Reg, from: chunk::Reg, shape: u8 },
     /// Reading one element, with the array's shape already looked up.
     ///
     /// `Op::At` carries a type, and a type only *names* a shape -- finding the real one
@@ -228,6 +245,24 @@ fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>, fuse: bool) -> Vec<Mi
                 let counter = counters.len() as u32;
                 counters.push(0);
                 Micro::Back { target, counter }
+            }
+            // The staging copy in front of a one-dimensional index, swallowed. Only
+            // when nothing else can arrive at the `At` it swallows, and only off the
+            // tiered path, which hands its registers to compiled code at a loop head and
+            // wants one `Micro` per `Op` to do it.
+            Op::Move { dst: staged, src: from, .. } if fuse
+                && counters.is_none()
+                && landed.get(here + 1) == Some(&false)
+                && matches!(
+                    code.get(here + 1),
+                    Some(Op::At { at, rank: 1, ty: Ty::Array(_), .. }) if *at == staged
+                ) =>
+            {
+                let Some(&Op::At { dst, array, ty: Ty::Array(shape), .. }) = code.get(here + 1)
+                else {
+                    unreachable!("just matched an at over an array");
+                };
+                Micro::AtOne { dst, array, from, shape }
             }
             Op::At { dst, array, at, rank, ty } => {
                 let Ty::Array(shape) = ty else { return Micro::Other(op) };
@@ -691,6 +726,26 @@ fn engine<F: File>(
                 }
                 at = target as usize;
             }
+            Micro::AtOne { dst, array, from, shape } => {
+                let Some(handle) = file.handle(array) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it indexes an array"),
+                        span: spans[here],
+                    });
+                };
+                let shape = shapes[shape as usize];
+                let index = offset(shape.dims(), handle, file, from, 1)
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
+                if !file.load_element(dst, handle, index, shape.element) {
+                    return Err(Stopped {
+                        fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
+                        span: spans[here],
+                    });
+                }
+                // Past the copy's own `At`, which is left where it was and reached from
+                // nowhere else -- `widen` checked that before fusing.
+                at += 1;
+            }
             Micro::At { dst, array, at, rank, shape } => {
                 let Some(handle) = file.handle(array) else {
                     return Err(Stopped {
@@ -698,9 +753,12 @@ fn engine<F: File>(
                         span: spans[here],
                     });
                 };
-                let index = offset(shapes[shape as usize].dims(), handle, file, at, rank)
+                // Found once. The dimensions and the element type are two fields of one
+                // shape, and this was indexing the table for each of them.
+                let shape = shapes[shape as usize];
+                let index = offset(shape.dims(), handle, file, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                if !file.load_element(dst, handle, index, shapes[shape as usize].element) {
+                if !file.load_element(dst, handle, index, shape.element) {
                     return Err(Stopped {
                         fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
                         span: spans[here],
@@ -1108,7 +1166,27 @@ fn offset<F: File>(
     at: u16,
     rank: u8,
 ) -> Result<usize, Box<Fault>> {
-    let dims = &dims[..dims.iter().position(|d| *d == 0).unwrap_or(dims.len())];
+    // `Shape::dims` hands back `dims[..rank]` and a rank is never zero except on an array
+    // that grows, where the slice is empty. So the trailing zeroes this used to scan for,
+    // on every element read, were never in the slice it was scanning.
+    debug_assert!(!dims.contains(&0), "a shape's dimensions are already trimmed");
+
+    // One dimension, which is most arrays, without the loop that carries the general
+    // case: no accumulator to multiply into, no `get` on a slice of one, and the bound
+    // read straight out rather than through an `Option` per element.
+    if rank == 1 {
+        let held: i64 = file.index_word(at);
+        let past = dims.first().map(|past| i64::from(*past));
+        if held < 1 || past.is_some_and(|past| held > past) {
+            let reported = file.index(at);
+            return Err(out_of_range(
+                reported,
+                past.map_or_else(|| heap::length(handle) as i128, i128::from),
+            ));
+        }
+        return Ok(held as usize - 1);
+    }
+
     let mut flat = 0usize;
 
     for place in 0..rank as usize {
