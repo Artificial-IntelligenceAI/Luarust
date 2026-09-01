@@ -21,6 +21,44 @@ every shipped program. It is `luarust-runtime` now, with no compiler in it at al
 `luarust-jit` depends on it rather than owning it. LLVM belongs to the machine that
 *builds* a program.
 
+**Array loops are level with C, and were ninety times off it until 2026-09-01.** Summing a
+hundred thousand `ui64` elements repeatedly, slope taken between 300 and 3000 rounds so
+process start is out of it:
+
+                        before      after
+    C, clang -O2        0.06 ns     0.05 ns
+    Luarust, native     5.18 ns     0.05 ns
+
+**What was wrong.** A loop over an array made two runtime calls on every element --
+`luarust_array_base` to find where the elements are, `luarust_array_len` to check the
+index. Both were declared with no attributes, so LLVM had to assume each might write any
+memory. Nothing could be hoisted across them and nothing vectorised, and the storage
+underneath was fine the whole time: an array of `ui64` really is a run of 64-bit words and
+the element read really was an ordinary load.
+
+**What took a whole evening.** Saying `readonly` on both is true, lands in the IR, and
+changes nothing. Running the pipeline twice changes nothing. Setting the loop-vectorisation
+and unrolling tuning options changes nothing. Setting the module triple changes nothing.
+And all the while `opt -passes='default<O3>'` on the *same* module hoisted the call clear
+out to the outermost preheader, and `opt -passes='loop-mssa(licm)'` alone did it too.
+
+The difference was the spelling. `readonly` is the old name for the attribute; LLVM
+upgrades one when it *parses* it, which is why `opt` acted on it and setting the enum
+attribute in-process did not. Nothing modern looks at the legacy name. Setting `memory`
+instead -- the bitmask, two bits a location, `Ref` in every one -- hoists the call and
+vectorises the loop.
+
+Worth knowing for the next time an attribute seems to do nothing: check what the *printed*
+IR calls it, not what you set.
+
+**One caveat on the claim.** `memory(read)` says these calls only read. They also take a
+`RefCell` borrow, which writes a flag -- so it is very slightly stronger than the truth.
+Nothing compiled ever reads that flag, every borrow is balanced inside the call, and the
+ordering that actually matters still holds: the calls that *grow* an array carry no
+attributes, so LLVM treats them as writing everything and will not lift a read across one.
+Making the claim exactly true means reading the base and length without touching the
+`RefCell` -- a small spans table read through a raw pointer -- and is worth doing.
+
 ## Left
 
 **Inline `$bash { }`, gated on native output.** Only meaningful for a program that is
@@ -112,44 +150,6 @@ machinery shared-memory threads would need.
 So the order, if any of it happens: parallel loops first, isolated tasks second, and
 shared-memory threads last if ever, because that one argues with the first line of the
 README.
-
-**Array loops are level with C, and were ninety times off it until 2026-09-01.** Summing a
-hundred thousand `ui64` elements repeatedly, slope taken between 300 and 3000 rounds so
-process start is out of it:
-
-                        before      after
-    C, clang -O2        0.06 ns     0.05 ns
-    Luarust, native     5.18 ns     0.05 ns
-
-**What was wrong.** A loop over an array made two runtime calls on every element --
-`luarust_array_base` to find where the elements are, `luarust_array_len` to check the
-index. Both were declared with no attributes, so LLVM had to assume each might write any
-memory. Nothing could be hoisted across them and nothing vectorised, and the storage
-underneath was fine the whole time: an array of `ui64` really is a run of 64-bit words and
-the element read really was an ordinary load.
-
-**What took a whole evening.** Saying `readonly` on both is true, lands in the IR, and
-changes nothing. Running the pipeline twice changes nothing. Setting the loop-vectorisation
-and unrolling tuning options changes nothing. Setting the module triple changes nothing.
-And all the while `opt -passes='default<O3>'` on the *same* module hoisted the call clear
-out to the outermost preheader, and `opt -passes='loop-mssa(licm)'` alone did it too.
-
-The difference was the spelling. `readonly` is the old name for the attribute; LLVM
-upgrades one when it *parses* it, which is why `opt` acted on it and setting the enum
-attribute in-process did not. Nothing modern looks at the legacy name. Setting `memory`
-instead -- the bitmask, two bits a location, `Ref` in every one -- hoists the call and
-vectorises the loop.
-
-Worth knowing for the next time an attribute seems to do nothing: check what the *printed*
-IR calls it, not what you set.
-
-**One caveat on the claim.** `memory(read)` says these calls only read. They also take a
-`RefCell` borrow, which writes a flag -- so it is very slightly stronger than the truth.
-Nothing compiled ever reads that flag, every borrow is balanced inside the call, and the
-ordering that actually matters still holds: the calls that *grow* an array carry no
-attributes, so LLVM treats them as writing everything and will not lift a read across one.
-Making the claim exactly true means reading the base and length without touching the
-`RefCell` -- a small spans table read through a raw pointer -- and is worth doing.
 
 ## Not iteration 3
 
