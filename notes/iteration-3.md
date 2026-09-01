@@ -93,6 +93,32 @@ attributes, so LLVM treats them as writing everything and will not lift a read a
 Making the claim exactly true means reading the base and length without touching the
 `RefCell` -- a small spans table read through a raw pointer -- and is worth doing.
 
+**What is left in the VM is structural, and three attempts at it made things worse.**
+Tried on 2026-09-01, after the wins above:
+
+- Reading number elements as bare bits, skipping the `Value` the general path builds:
+  **+77%**, and the regression was on the *addition* loop, which has no array in it.
+- The same without the `continue` that seemed the likely culprit: **+77%** again.
+- Moving the whole array-read arm out of the dispatch loop behind `#[inline(never)]`:
+  **+10%**, which is inside the noise below and so proves nothing either way.
+
+The first two are the finding. `run_with` is one very large function and every arm shares
+its registers, so code added to the arm that reads an array made the arm that adds two
+numbers three-quarters slower, with nothing about addition changed. Anything that grows
+that function pays for it everywhere, which rules out superinstructions and typed
+fast-paths as they were sketched, and means the next attempt wants a plan for the whole
+loop rather than another arm.
+
+**And a warning about measuring it.** Two builds of *identical* source, compared with
+best-of-six interleaved, came out 189 ms and 204 ms — eight per cent apart, from code
+layout alone. Anything smaller than about ten per cent cannot be told from that with this
+method, so a change of that size needs either many more samples or a way of measuring that
+does not rebuild.
+
+For scale, on the same loop: Lua 5.5's VM does what takes this one 14.1 ns in 2.5. That
+gap is a computed-goto dispatch over a compact encoding, against a Rust `match` over a
+twelve-byte enum — structure, not a missing trick.
+
 ## Left
 
 **External FFI — calling C from Luarust.** Not the internal boundary that already exists
