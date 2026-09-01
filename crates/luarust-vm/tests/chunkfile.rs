@@ -347,3 +347,47 @@ fn a_division_nothing_could_have_written_is_refused() {
     bytes[division..division + 4].copy_from_slice(&9u32.to_le_bytes());
     assert!(serialize::read(&bytes).is_err(), "an unknown division must be refused");
 }
+
+/// A damaged chunk is refused for being damaged, not for whatever it happens to say.
+///
+/// Before this, every flipped bit had to be caught by whichever field it landed in — and
+/// most were, because every index is range-checked and every tag is looked up. But a bit
+/// that lands in a *value* changes what a program computes, and there was nothing to
+/// notice. A chunk that has been damaged is not a program anybody wrote, and saying so is
+/// better than running something plausible.
+#[test]
+fn a_damaged_chunk_is_refused_for_being_damaged() {
+    let source = COUNTING;
+    let chunk = compiled(source);
+    let good = serialize::write_with(&chunk, "t.lr", source, false, false);
+    assert!(serialize::read(&good).is_ok(), "the chunk it wrote must read back");
+
+    let mut caught = 0;
+    let mut missed = 0;
+    for byte in 0..good.len() {
+        for bit in 0..8u32 {
+            let mut damaged = good.clone();
+            damaged[byte] ^= 1 << bit;
+            match serialize::read(&damaged) {
+                Err(serialize::Broken::Damaged) => caught += 1,
+                // The magic and the version come before the sum and answer for themselves.
+                Err(_) => missed += 1,
+                Ok(_) => panic!("a chunk with byte {byte} bit {bit} flipped read as whole"),
+            }
+        }
+    }
+    assert!(caught > 0, "the sum caught nothing");
+    // Only the twelve bytes of magic and version are allowed to be caught by something
+    // else, since they are read before the sum is.
+    assert!(missed <= 12 * 8, "{missed} flips were not caught by the sum");
+}
+
+/// The sum costs nothing that changes an answer.
+#[test]
+fn summing_does_not_change_what_a_chunk_says() {
+    let source = EVERYTHING;
+    let chunk = compiled(source);
+    let bytes = serialize::write_with(&chunk, "t.lr", source, true, false);
+    let read = serialize::read(&bytes).expect("it reads back");
+    assert_eq!(output_of(&read.chunk), output_of(&chunk), "the round trip changed the program");
+}

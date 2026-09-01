@@ -37,7 +37,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -54,6 +54,8 @@ pub enum Broken {
     NotText,
     /// It points at something that is not there.
     OutOfRange { what: &'static str, index: u64, of: usize },
+    /// It is not the bytes it was written as. Something damaged it on the way here.
+    Damaged,
     /// It asks for more registers than an instruction could ever name.
     TooManyRegisters { asked: u64, most: usize },
 }
@@ -71,6 +73,12 @@ impl std::fmt::Display for Broken {
                 write!(f, "this chunk has a {what} of {value}, which is not one of them.")
             }
             Broken::NotText => write!(f, "text in this chunk is not valid UTF-8."),
+            Broken::Damaged => write!(
+                f,
+                "this chunk is not the bytes it was written as. Something damaged it on \
+                 the way here -- a bad copy, a transfer that stopped early, a disk going \
+                 wrong. Build it again, or fetch it again."
+            ),
             Broken::OutOfRange { what, index, of } => {
                 write!(f, "this chunk asks for {what} {index}, and there are {of}.")
             }
@@ -103,6 +111,9 @@ pub fn write_with(
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, VERSION);
+    // Room for the sum of everything after it, filled in once there is everything.
+    let sum_at = out.len();
+    put_u64(&mut out, 0);
     put_u32(&mut out, u32::from(chunk.overflow == Overflow::Trap));
     // What the program decided about collecting and about printing floats. Both are the
     // project's answers, and `luarust-run` has no project file, so they travel here.
@@ -179,6 +190,9 @@ pub fn write_with(
             put_u32(&mut out, span.end as u32);
         }
     }
+    // Everything after the slot, summed into it.
+    let sum = summed(&out[sum_at + 8..]);
+    out[sum_at..sum_at + 8].copy_from_slice(&sum.to_le_bytes());
     out
 }
 
@@ -192,6 +206,23 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
 
 fn put_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_le_bytes());
+}
+
+/// A sum of these bytes, for telling a damaged chunk from a whole one.
+///
+/// FNV-1a, sixty-four bits. Not a defence: anyone editing a chunk on purpose recomputes
+/// it in a line, and that is not what this is for. It is for the disk that went bad, the
+/// copy that stopped early, the transfer that dropped a byte -- accidents, which are the
+/// common case by an enormous margin and which nobody should have to debug as a wrong
+/// answer. What a chunk claims about *itself* is a separate question and `[run] chunks`
+/// answers it.
+fn summed(bytes: &[u8]) -> u64 {
+    let mut sum: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        sum ^= u64::from(*byte);
+        sum = sum.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    sum
 }
 
 fn put_str(out: &mut Vec<u8>, text: &str) {
@@ -497,6 +528,14 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     let version = cursor.u32()?;
     if version != VERSION {
         return Err(Broken::Version(version));
+    }
+    // Before any field is believed. Everything below this line reads a chunk on the
+    // understanding that it arrived as it was written, and this is what establishes that
+    // -- a damaged one is refused here rather than being range-checked field by field into
+    // some plausible-looking program that nobody wrote.
+    let claimed = cursor.u64()?;
+    if summed(&bytes[cursor.at..]) != claimed {
+        return Err(Broken::Damaged);
     }
 
     let overflow = if cursor.u32()? == 0 { Overflow::Wrap } else { Overflow::Trap };

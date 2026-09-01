@@ -741,6 +741,12 @@ this does not fit in `ui8`.
   (this was built without its source, so the line above cannot be shown.)
 ```
 
+A chunk carries a sum of its own bytes, checked before a single field of it is believed.
+That is for accidents — a bad copy, a transfer that stopped early, a disk going wrong —
+and it says so rather than range-checking a damaged file field by field into some plausible
+program nobody wrote. It is **not** a defence: anyone editing a chunk on purpose
+recomputes it in a line. What a chunk claims about *itself* is a different question.
+
 Luarust reads this file itself rather than through a TOML library, and understands the
 part of it shown here. A mistake in it stops the build and is reported the same way a
 mistake in a source file is, because it decides how every file in the project is built.
