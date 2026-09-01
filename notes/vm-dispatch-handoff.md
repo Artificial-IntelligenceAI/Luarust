@@ -78,6 +78,16 @@ correctly: the branch's boxed arrangement had drifted under the same refactor th
 split rode in on. Keep both: the A/B to develop against, layout-noise-free; the
 end-to-end ladder to decide a merge with.
 
+**Check exit codes, not filtered output.** Two operators shipped the same failure in
+one evening. One grepped test output for `FAILED|test failed` and not `^error`, so a
+test file that would not compile passed the gate silently and the suite was reported
+green to Tankun when it was not (a0). The other piped the fuzzer through `tail -1`,
+got one arbitrary line of the autopsy the fuzzer prints when it *catches* something,
+read it as noise, pushed past a red gate, and then accused the fuzzer of having a
+hole it did not have (fable). A check that summarizes its own evidence down to one
+line will eventually summarize away the verdict. Gates ask the exit code —
+`cmd || echo GATE-FAILED` — and filters are for reading, never for deciding.
+
 **Fixed, the first way.** `run_widened` in `luarust-vm` takes the arrangement as a
 parameter, and `tails_fused_against_not` (ignored, `--nocapture`) times both from one
 binary, interleaved, minima — layout cancels because there is one layout. Its unfused
