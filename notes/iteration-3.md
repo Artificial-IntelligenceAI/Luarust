@@ -113,8 +113,24 @@ So the order, if any of it happens: parallel loops first, isolated tasks second,
 shared-memory threads last if ever, because that one argues with the first line of the
 README.
 
-**Array loops do not vectorise, and the reason is not where it looks.** Measured
-2026-09-01. Summing an array compiles to this, once optimised:
+**Array loops cost about ninety times what they should.** Measured 2026-09-01, summing a
+hundred thousand `ui64` elements repeatedly, slope taken between 300 and 3000 rounds so
+process start is out of it:
+
+    C, clang -O2        0.06 ns per element
+    Luarust, native     5.18 ns per element
+
+That is the number to hold against the headline. On the scalar benchmark Luarust is 1.01x
+C; on an array loop it is nearly two orders of magnitude behind, and a README that only
+quotes the first is quoting the flattering half. C's loop is real and was checked -- ten
+times the rounds takes ten times the work once startup is subtracted -- it is simply
+vectorised, four elements at a time, where this is one element every twenty cycles.
+
+What *is* already right is the storage. An array of `ui64` is a real run of 64-bit words,
+not a vector of boxed values, and the element read compiles to an ordinary load. The cost
+is entirely in what surrounds the load.
+
+**And the reason is not where it looks.** Measured 2026-09-01. Summing an array compiles to this, once optimised:
 
 ```llvm
 in.range:
