@@ -11,6 +11,10 @@ that all made it slower, so that whoever takes it does not repeat them.
 
     the same loop, Lua 5.5's VM      76 ms      2.5 ns
 
+    (Lua is /opt/homebrew/bin/lua -> Cellar/lua/5.5.1, Homebrew's default build,
+    untuned; re-measured 2026-09-01 at 2.52 ns. A -O3 -march=native Lua would move
+    this target, so pin the build when comparing.)
+
 Six times Lua on array reads, about twice on scalar arithmetic. The scalar benchmark in
 the README has the VM at 3.4x C, which is respectable; this is the part that is not.
 
