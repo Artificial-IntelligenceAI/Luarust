@@ -28,7 +28,14 @@ pub enum Op {
     Move { dst: Reg, src: Reg, ty: Ty },
     /// The type is here because the checker already knew it. Working it out again from
     /// the values, once per operation, was costing more than the arithmetic did.
-    Binary { op: BinOp, ty: Ty, dst: Reg, lhs: Reg, rhs: Reg },
+    ///
+    /// `nonnegative` is only ever true on `Div` and `Mod`, and says the checker proved
+    /// the dividend at or above zero and the divisor above it — so floored and
+    /// truncated division agree and nothing about the divisor needs guarding. It is
+    /// advice for a compiler: the JIT drops its guards on the strength of it, while
+    /// the VM ignores it and computes floored `mod` the long way, so a proof that was
+    /// wrong is caught by the paths disagreeing rather than believed by both.
+    Binary { op: BinOp, ty: Ty, dst: Reg, lhs: Reg, rhs: Reg, nonnegative: bool },
     Neg { dst: Reg, src: Reg, ty: Ty },
     /// Answers `bool`. `operands` is what the two sides are, which is what decides how
     /// they get compared.
@@ -159,8 +166,9 @@ impl Chunk {
             Op::Move { dst, src, ty } => {
                 format!("move         r{dst}, r{src}    -- {}", ty.word())
             }
-            Op::Binary { op, ty, dst, lhs, rhs } => {
-                format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}", name_of(op), ty.word())
+            Op::Binary { op, ty, dst, lhs, rhs, nonnegative } => {
+                let proven = if nonnegative { ", proven nonnegative" } else { "" };
+                format!("{:<12} r{dst}, r{lhs}, r{rhs}    -- {}{proven}", name_of(op), ty.word())
             }
             Op::Neg { dst, src, ty } => format!("neg          r{dst}, r{src}    -- {}", ty.word()),
             Op::Not { dst, src } => format!("not          r{dst}, r{src}"),

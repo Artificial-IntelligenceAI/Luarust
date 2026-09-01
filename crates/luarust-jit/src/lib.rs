@@ -806,12 +806,12 @@ impl<'ctx> Emitter<'ctx> {
                 }
             }
 
-            Op::Binary { op, ty, dst, lhs, rhs } => {
+            Op::Binary { op, ty, dst, lhs, rhs, nonnegative } => {
                 if celled(ty) {
                     self.call_cell_binary(op, u64::from(dst), u64::from(lhs), u64::from(rhs), span);
                 } else {
                     let (a, b) = (self.get(lhs, ty), self.get(rhs, ty));
-                    let answer = self.arithmetic(op, a, b, ty, span);
+                    let answer = self.arithmetic(op, a, b, ty, span, nonnegative);
                     self.put(dst, answer, ty);
                 }
             }
@@ -1521,7 +1521,7 @@ impl<'ctx> Emitter<'ctx> {
                 .into();
         }
         let zero = self.zero(ty);
-        self.arithmetic(BinOp::Sub, zero, value, ty, span)
+        self.arithmetic(BinOp::Sub, zero, value, ty, span, false)
     }
 
     fn constant(&self, value: &Value) -> BasicValueEnum<'ctx> {
@@ -1741,6 +1741,7 @@ impl<'ctx> Emitter<'ctx> {
         b: BasicValueEnum<'ctx>,
         ty: Ty,
         span: Span,
+        nonnegative: bool,
     ) -> BasicValueEnum<'ctx> {
         // b16 has no instructions on either target, so all of it goes back.
         if ty == Ty::B16 {
@@ -1771,7 +1772,7 @@ impl<'ctx> Emitter<'ctx> {
             BinOp::Mul => self.builder.build_int_mul(x, y, "mul").expect("mul").into(),
             // Division and remainder can fault, and the hardware would rather crash than
             // say so, so both are guarded before they happen.
-            BinOp::Div | BinOp::Mod => self.int_division(op, x, y, ty, span).into(),
+            BinOp::Div | BinOp::Mod => self.int_division(op, x, y, ty, span, nonnegative).into(),
             BinOp::Pow => self.call_fallback(op, a, b, ty, span),
         }
     }
@@ -1793,9 +1794,23 @@ impl<'ctx> Emitter<'ctx> {
         y: inkwell::values::IntValue<'ctx>,
         ty: Ty,
         span: Span,
+        nonnegative: bool,
     ) -> inkwell::values::IntValue<'ctx> {
         let int = self.int_type(ty);
         let zero = int.const_int(0, false);
+
+        // The checker proved the dividend at or above zero and the divisor above it,
+        // so nothing here can fault, floored is truncated, and both operands carry the
+        // bit patterns of the same values unsigned — the *unsigned* instruction is the
+        // whole answer, and against a constant divisor it also lowers to the cheaper
+        // strength reduction. This is the value-range analysis paying out: it makes
+        // the signed benchmark loop compile to the code the unsigned one always got.
+        if nonnegative && ty.is_signed() {
+            return match op {
+                BinOp::Div => self.builder.build_int_unsigned_div(x, y, "div").expect("div"),
+                _ => self.builder.build_int_unsigned_rem(x, y, "rem").expect("rem"),
+            };
+        }
 
         let is_zero = self
             .builder
