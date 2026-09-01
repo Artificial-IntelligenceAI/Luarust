@@ -66,8 +66,23 @@ run the benchmark in-process so one binary measures both arrangements; use hardw
 counters rather than wall clock; or take many more samples and compare distributions
 rather than minima.
 
+**Fixed, the first way.** `run_widened` in `luarust-vm` takes the arrangement as a
+parameter, and `tails_fused_against_not` (ignored, `--nocapture`) times both from one
+binary, interleaved, minima — layout cancels because there is one layout. Its unfused
+column reproduced the 6.3 ns baseline to a twentieth of a nanosecond on its first run,
+which is the calibration the old method could not have shown. The pattern generalises:
+a change worth less than the 8% build noise must be runtime-switchable long enough to
+be measured, and only then hardwired.
+
 ## Directions that have not been tried
 
+- **Fusing the loop tail** — tried, kept: `Micro::Tail` folds the counting loop's
+  `jump.eq / add / jump` into one fetch and dispatch, only where nothing jumps into the
+  swallowed pair, never under a tier (the back edge carries the counter there), the
+  swallowed instructions left in place so every index survives. Add loop 6.35 to
+  3.71 ns an iteration; array loop 17.48 to 15.33. The constraint held in reverse, as
+  predicted: an arm that *removes* dispatches paid nothing — the unfused path in the
+  same binary did not move.
 - **A small hot loop.** Keep the arms that dominate real programs -- arithmetic, the
   jumps, `move`, `const` -- and outline everything else. The opposite of what was tried:
   outline the *cold* many, not the hot one.

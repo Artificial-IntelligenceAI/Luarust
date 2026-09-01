@@ -164,14 +164,59 @@ enum Micro {
     /// cannot change while a program runs. It is fetched here instead, once, when the
     /// instruction is first widened.
     At { dst: chunk::Reg, array: chunk::Reg, at: u16, rank: u8, shape: u8 },
+    /// A counting loop's whole tail — leave if the counter reached the bound, otherwise
+    /// step it and go round — fetched and dispatched once where the chunk says three.
+    /// Only ever made from the exact shape `compile` emits, when nothing jumps into the
+    /// middle of it; the swallowed add and jump stay where they were, unreachable, so
+    /// every other target and span survives unchanged. The jump back is read from the
+    /// slot beside it rather than carried, which is what keeps this no wider than `Op`.
+    Tail { ty: Ty, counter: chunk::Reg, limit: chunk::Reg, step: chunk::Reg },
     Other(Op),
 }
 
 /// One-for-one, so every jump target and span index survives unchanged.
-fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>) -> Vec<Micro> {
+///
+/// `fuse` folds each counting loop's three-instruction tail into one [`Micro::Tail`],
+/// and is off when back edges are being counted — a fused tail has no separate jump
+/// for a counter to ride on, and the tiering engine wants every one.
+fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>, fuse: bool) -> Vec<Micro> {
+    // Where jumps land. A fused tail swallows the two instructions after it, which is
+    // only sound while nothing else can arrive at either.
+    let mut landed = vec![false; code.len()];
+    for op in code {
+        if let Op::Jump { target }
+        | Op::JumpIfFalse { target, .. }
+        | Op::JumpIfTrue { target, .. }
+        | Op::JumpIfGreater { target, .. }
+        | Op::JumpIfEqual { target, .. } = op
+            && let Some(seen) = landed.get_mut(*target as usize)
+        {
+            *seen = true;
+        }
+    }
     code.iter()
         .enumerate()
         .map(|(here, &op)| match op {
+            // The tail `compile` emits for a counting loop, whole: leave when the
+            // counter has reached the bound, step it otherwise, and go round again.
+            Op::JumpIfEqual { lhs, rhs, ty, target } if fuse
+                && counters.is_none()
+                && ty.is_integer()
+                && target as usize == here + 3
+                && !landed[here + 1]
+                && !landed[here + 2]
+                && matches!(
+                    code[here + 1],
+                    Op::Binary { op: BinOp::Add, ty: add_ty, dst, lhs: add_lhs, .. }
+                        if add_ty == ty && dst == lhs && add_lhs == lhs
+                )
+                && matches!(code[here + 2], Op::Jump { target: top } if top as usize <= here) =>
+            {
+                let Op::Binary { rhs: step, .. } = code[here + 1] else {
+                    unreachable!("just matched an add");
+                };
+                Micro::Tail { ty, counter: lhs, limit: rhs, step }
+            }
             // A loop is a jump backwards, so a back edge is a jump whose target is at or
             // behind it, and counting those counts iterations without touching anything
             // else. The counter is made here rather than looked up there: by the time the
@@ -248,7 +293,19 @@ pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
 pub fn run_with(
     chunk: &Chunk,
     out: &mut impl Write,
+    tier: Option<&mut dyn Tier>,
+) -> Result<(), Stopped> {
+    run_widened(chunk, out, tier, true)
+}
+
+/// [`run_with`], saying whether loop tails are fused — one binary holding both
+/// arrangements is the only instrument that can compare them, since two builds of
+/// identical source have measured 8% apart on code layout alone.
+fn run_widened(
+    chunk: &Chunk,
+    out: &mut impl Write,
     mut tier: Option<&mut dyn Tier>,
+    fuse: bool,
 ) -> Result<(), Stopped> {
     heap::clear();
     // A chunk carries what its project decided, so running one applies it. Nothing else
@@ -286,8 +343,8 @@ pub fn run_with(
     let (top, threshold) = match &tier {
         // Never nought: a counter is compared after it is raised, so a threshold nothing
         // could reach would be a loop that compiles before it has gone round at all.
-        Some(tier) => (widen(&chunk.code, Some(&mut counters)), tier.threshold().max(1)),
-        None => (widen(&chunk.code, None), 0),
+        Some(tier) => (widen(&chunk.code, Some(&mut counters), fuse), tier.threshold().max(1)),
+        None => (widen(&chunk.code, None, fuse), 0),
     };
     let mut routines: Vec<Option<Vec<Micro>>> = vec![None; chunk.funcs.len()];
 
@@ -306,8 +363,8 @@ pub fn run_with(
             Some(index) => {
                 if routines[index].is_none() {
                     let counted = match tier {
-                        Some(_) => widen(&chunk.funcs[index].code, Some(&mut counters)),
-                        None => widen(&chunk.funcs[index].code, None),
+                        Some(_) => widen(&chunk.funcs[index].code, Some(&mut counters), fuse),
+                        None => widen(&chunk.funcs[index].code, None, fuse),
                     };
                     routines[index] = Some(counted);
                 }
@@ -383,6 +440,32 @@ pub fn run_with(
             }
             Micro::Mod { ty, dst, lhs, rhs } => {
                 int_arm!(BinOp::Mod, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+            }
+
+            Micro::Tail { ty, counter, limit, step } => {
+                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
+                    (&registers[counter as usize], &registers[limit as usize])
+                else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it compares whole numbers"),
+                        span: spans[here],
+                    });
+                };
+                if a == b {
+                    // Past the swallowed add and jump, to where the loop lands.
+                    at += 2;
+                } else {
+                    int_arm!(
+                        BinOp::Add, ty, counter, counter, step, registers, spans, here,
+                        chunk.overflow
+                    );
+                    // The jump back was left in the slot beside this one, unreachable
+                    // except from here.
+                    let Micro::Other(Op::Jump { target }) = code[at + 1] else {
+                        unreachable!("a fused tail keeps its jump beside it");
+                    };
+                    at = target as usize;
+                }
             }
 
             Micro::Other(op) => match op {
@@ -850,5 +933,96 @@ mod sizes {
         let micro = std::mem::size_of::<super::Micro>();
         let op = std::mem::size_of::<crate::Op>();
         assert!(micro <= op, "Micro is {micro} bytes against Op's {op}");
+    }
+
+    #[cfg(feature = "compile")]
+    fn chunk_of(source: &str) -> crate::Chunk {
+        let lexed = luarust_lex::lex(source);
+        assert!(lexed.ok(), "lexing failed: {:#?}", lexed.errors);
+        let parsed = luarust_parse::parse(source, &lexed.tokens);
+        assert!(parsed.ok(), "parsing failed: {:#?}", parsed.errors);
+        let (program, errors) = luarust_check::check(&parsed.program);
+        assert!(errors.is_empty(), "checking failed: {errors:#?}");
+        crate::compile(&program)
+    }
+
+    #[cfg(feature = "compile")]
+    #[test]
+    fn a_fused_tail_changes_no_answer() {
+        // Loops that leave from the middle, loops that never run, a loop right at the
+        // top of its type, and nested ones — the shapes where a fused tail could get
+        // an exit wrong.
+        for source in [
+            "var.local.mut.i64 ['sum'] = [|0|];\n\
+             loop.temp.range.i64 ['i'] = [|1|, |10|] {\n\
+             set ['sum'] = [math { ('sum' + 'i') mod 7 }];\n\
+             }\nprint['sum' \\n];\n",
+            "var.local.mut.i64 ['x'] = [|5|];\n\
+             loop.temp.range.i64 ['i'] = [|1|, |10|] {\n\
+             if [math { 'i' = 3 }] { set ['x'] = [|-1|]; break; }\n\
+             set ['x'] = [|9|];\n\
+             }\nprint['x' \\n];\n",
+            "var.local.mut.i64 ['n'] = [|0|];\n\
+             loop.temp.range.i64 ['i'] = [|5|, |4|] { set ['n'] = [|1|]; }\n\
+             print['n' \\n];\n",
+            "var.local.mut.ui8 ['n'] = [|0|];\n\
+             loop.temp.range.ui8 ['i'] = [|250|, |255|] { set ['n'] = ['i']; }\n\
+             print['n' \\n];\n",
+            "var.local.mut.i64 ['s'] = [|0|];\n\
+             loop.temp.range.i64 ['i'] = [|1|, |4|] {\n\
+             loop.temp.range.i64 ['j'] = [|1|, |3|] {\n\
+             set ['s'] = [math { 's' + 1 }];\n\
+             }\n\
+             }\nprint['s' \\n];\n",
+        ] {
+            let chunk = chunk_of(source);
+            let mut fused = Vec::new();
+            let mut plain = Vec::new();
+            let a = crate::run_widened(&chunk, &mut fused, None, true);
+            let b = crate::run_widened(&chunk, &mut plain, None, false);
+            assert_eq!(a.is_ok(), b.is_ok(), "the two arrangements ended differently");
+            assert_eq!(
+                String::from_utf8_lossy(&fused),
+                String::from_utf8_lossy(&plain),
+                "the two arrangements printed differently\n\n{source}"
+            );
+        }
+    }
+
+    /// The instrument, not a test: both arrangements timed from one binary, so code
+    /// layout — worth 8% between two builds of identical source — cancels out.
+    #[cfg(feature = "compile")]
+    #[test]
+    #[ignore = "a measurement, run by hand with --nocapture"]
+    fn tails_fused_against_not() {
+        let add = "var.local.mut.i64 ['sum'] = [|0|];\n\
+                   loop.temp.range.i64 ['i'] = [|1|, |30000000|] {\n\
+                   set ['sum'] = [math { 'sum' + 'i' }];\n\
+                   }\nprint['sum' \\n];\n";
+        let array = "var.local.mut.array.i64 ['xs'] = [filled[|64|, |7|]];\n\
+                     var.local.mut.i64 ['sum'] = [|0|];\n\
+                     loop.temp.range.ui32 ['i'] = [|1|, |30000000|] {\n\
+                     set ['sum'] = [math { 'sum' + 'xs'[math { (('i' - 1) mod 64) + 1 }] }];\n\
+                     }\nprint['sum' \\n];\n";
+        for (name, source) in [("add", add), ("array", array)] {
+            let chunk = chunk_of(source);
+            let (mut fused, mut plain) = (u128::MAX, u128::MAX);
+            for _ in 0..6 {
+                for (fuse, best) in [(true, &mut fused), (false, &mut plain)] {
+                    let mut out = Vec::new();
+                    let t0 = std::time::Instant::now();
+                    crate::run_widened(&chunk, &mut out, None, fuse).expect("it runs");
+                    *best = (*best).min(t0.elapsed().as_nanos());
+                }
+            }
+            println!(
+                "{name}: fused {} ms, unfused {} ms over 30M iterations \
+                 ({:.2} against {:.2} ns an iteration)",
+                fused / 1_000_000,
+                plain / 1_000_000,
+                fused as f64 / 30_000_000.0,
+                plain as f64 / 30_000_000.0,
+            );
+        }
     }
 }
