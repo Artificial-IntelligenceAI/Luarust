@@ -1184,25 +1184,35 @@ it drew is not comparable with itself.
 | | 100M | vs C | | 100M | vs C |
 | --- | --- | --- | --- | --- | --- |
 | **x86-64**, AMD EPYC 9V74 | | | **Apple M5** | | |
-| C, clang -O2 | 425 ms | 1.00× | Rust, rustc -O | 199 ms | 0.90× |
-| Rust, rustc -O | 442 ms | 1.04× | C, clang -O2 | 222 ms | 1.00× |
-| Java 21 | 463 ms | 1.09× | **Luarust**, whole JIT | **231 ms** | **1.04×** |
-| **Luarust**, whole JIT | **464 ms** | **1.09×** | Java 21 | 260 ms | 1.17× |
-| PyPy 7.3 | 506 ms | 1.19× | PyPy 7.3 | 283 ms | 1.28× |
-| Lua 5.4 | 796 ms | 1.87× | **Luarust**, hot JIT | **287 ms** | **1.30×** |
-| LuaJIT | 882 ms | 2.08× | Lua 5.5 | 386 ms | 1.74× |
-| Luarust, bytecode VM | 2,432 ms | 5.72× | LuaJIT 2.1 | 430 ms | 1.94× |
-| CPython | 9,534 ms | 22.43× | Luarust, bytecode VM | 759 ms | 3.42× |
-| Luarust, tree-walker | 13,350 ms | 31.41× | Luarust, tree-walker | 2,771 ms | 12.49× |
-| | | | CPython 3.14 | 3,857 ms | 17.38× |
+| C, clang -O2 | 425 ms | 1.00× | Rust, rustc -O | 202 ms | 0.90× |
+| Rust, rustc -O | 442 ms | 1.04× | **Luarust**, native | **222 ms** | **0.98×** |
+| Java 21 | 463 ms | 1.09× | C, clang -O2 | 225 ms | 1.00× |
+| **Luarust**, whole JIT | **464 ms** | **1.09×** | **Luarust**, whole JIT | **238 ms** | **1.06×** |
+| PyPy 7.3 | 506 ms | 1.19× | Java 21 | 265 ms | 1.18× |
+| Lua 5.4 | 796 ms | 1.87× | PyPy 7.3 | 286 ms | 1.27× |
+| LuaJIT | 882 ms | 2.08× | **Luarust**, hot JIT | **291 ms** | **1.29×** |
+| Luarust, bytecode VM | 2,432 ms | 5.72× | Lua 5.5 | 406 ms | 1.80× |
+| CPython | 9,534 ms | 22.43× | LuaJIT 2.1 | 434 ms | 1.92× |
+| Luarust, tree-walker | 13,350 ms | 31.41× | Luarust, bytecode VM | 839 ms | 3.72× |
+| | | | Luarust, tree-walker | 2,619 ms | 11.62× |
+| | | | CPython 3.14 | 3,683 ms | 16.34× |
 
 **Two machines, because one was not enough to tell the truth with.** The left column is a
 GitHub runner; the right is an idle Apple M5. Same commit, same programs, and they do not
 agree about where this language stands.
 
+**Compiled ahead of time it comes second, ahead of C.** 2.17 ns an iteration against
+clang's 2.22 — the same emitter and the same passes as the JIT, with the compile paid at
+build time instead of inside the measurement. It is one benchmark and the margin is a
+couple of percent, so read it as *level with C* rather than as beating it; what it rules
+out is a language that needs an interpreter to be understood.
+
 The whole-chunk JIT survives the move: ahead of PyPy on both, level with Java on x86-64
-and ahead of it on the M5, and between 1.00× and 1.03× C once the fixed costs are taken
-out. It used to be 1.34× C on x86-64. That gap closed when the checker learned to prove
+and ahead of it on the M5, and between 1.00× and 1.04× C once the fixed costs are taken
+out.
+
+Native and the hot JIT have no x86-64 row: the workflow that measures that column predates
+both, and a blank is more honest than a number from a different program. It used to be 1.34× C on x86-64. That gap closed when the checker learned to prove
 where a number cannot be negative — the benchmark's remainder is signed, and a signed
 remainder that is provably non-negative compiles to the unsigned instruction.
 
@@ -1246,17 +1256,18 @@ iteration costs:
 
 | | M5 ns/iter | vs C | x86-64 ns/iter | vs C |
 | --- | --- | --- | --- | --- |
-| Rust, rustc -O | 1.94 | 0.89× | 4.39 | 1.04× |
-| C, clang -O2 | 2.17 | 1.00× | 4.22 | 1.00× |
-| Luarust, whole JIT | 2.24 | 1.03× | 4.23 | 1.00× |
-| Java 21 | 2.43 | 1.12× | 4.23 | 1.00× |
-| PyPy | 2.71 | 1.25× | 4.58 | 1.09× |
-| Luarust, hot JIT | 2.80 | 1.29× | — | — |
-| Lua | 3.85 | 1.77× | 7.92 | 1.88× |
-| LuaJIT | 4.28 | 1.97× | 8.79 | 2.08× |
-| Luarust, bytecode VM | 7.49 | 3.44× | 24.20 | 5.73× |
-| Luarust, tree-walker | 27.74 | 12.76× | 133.47 | 31.63× |
-| CPython | 38.48 | 17.70× | 95.24 | 22.57× |
+| Rust, rustc -O | 1.98 | 0.90× | 4.39 | 1.04× |
+| Luarust, native | 2.17 | 0.98× | — | — |
+| C, clang -O2 | 2.22 | 1.00× | 4.22 | 1.00× |
+| Luarust, whole JIT | 2.31 | 1.04× | 4.23 | 1.00× |
+| Java 21 | 2.47 | 1.11× | 4.23 | 1.00× |
+| PyPy | 2.74 | 1.24× | 4.58 | 1.09× |
+| Luarust, hot JIT | 2.83 | 1.28× | — | — |
+| Lua | 4.06 | 1.83× | 7.92 | 1.88× |
+| LuaJIT | 4.31 | 1.95× | 8.79 | 2.08× |
+| Luarust, bytecode VM | 8.43 | 3.80× | 24.20 | 5.73× |
+| Luarust, tree-walker | 26.15 | 11.81× | 133.47 | 31.63× |
+| CPython | 36.60 | 16.52× | 95.24 | 22.57× |
 
 Lua is ahead of LuaJIT on both machines for a reason worth knowing: LuaJIT is Lua 5.1,
 where every number is a double, so its `%` is floating-point, while 5.4 and 5.5 have real
@@ -1317,17 +1328,18 @@ times the time:
 
 | | 10M | 100M | ratio |
 | --- | --- | --- | --- |
-| Rust, rustc -O | 24 ms | 199 ms | 8.1× |
-| C, clang -O2 | 26 ms | 222 ms | 8.5× |
-| Luarust, whole JIT | 30 ms | 231 ms | 7.7× |
-| Java 21 | 42 ms | 260 ms | 6.3× |
-| PyPy | 39 ms | 283 ms | 7.2× |
-| Luarust, hot JIT | 35 ms | 287 ms | 8.2× |
-| Lua 5.5 | 39 ms | 386 ms | 9.8× |
-| LuaJIT 2.1 | 44 ms | 430 ms | 9.7× |
-| Luarust VM | 85 ms | 759 ms | 8.9× |
-| Luarust tree-walker | 275 ms | 2,771 ms | 10.1× |
-| CPython 3.14 | 393 ms | 3,857 ms | 9.8× |
+| Rust, rustc -O | 24 ms | 202 ms | 8.6× |
+| Luarust, native | 27 ms | 222 ms | 8.4× |
+| C, clang -O2 | 26 ms | 225 ms | 8.7× |
+| Luarust, whole JIT | 30 ms | 238 ms | 7.8× |
+| Java 21 | 43 ms | 265 ms | 6.2× |
+| PyPy | 40 ms | 286 ms | 7.2× |
+| Luarust, hot JIT | 36 ms | 291 ms | 8.1× |
+| Lua 5.5 | 41 ms | 406 ms | 10.0× |
+| LuaJIT 2.1 | 46 ms | 434 ms | 9.5× |
+| Luarust VM | 81 ms | 839 ms | 10.3× |
+| Luarust tree-walker | 265 ms | 2,619 ms | 9.9× |
+| CPython 3.14 | 390 ms | 3,683 ms | 9.5× |
 
 Nobody's loop was deleted. Every ratio falls short of ten by however much of the smaller
 run was *not* the loop — a process starting, a JVM warming, LLVM compiling — and on a

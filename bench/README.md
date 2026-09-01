@@ -18,10 +18,17 @@ Whole-process wall clock, best of three. That counts a JVM starting and a Luarus
 being compiled, because a program that runs is a process that starts. The slope between
 the two sizes takes those fixed costs back out and leaves what one iteration costs.
 
-Build the release binary first, with the JIT in it, or the Luarust rows have nothing to
-measure:
+Build the release binary first, with the JIT in it, and the runtime archive beside it, or
+the Luarust rows have nothing to measure and the native one cannot be linked:
 
-    LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 cargo build --release --all-features
+    LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 \
+        cargo build --release --all-features -p luarust-cli -p luarust-native
+
+The native row is compiled once and then timed as the program it has become. Building it is
+deliberately outside the measurement: that cost belongs to whoever ships the program, not
+to whoever runs it, and it is the whole difference between that row and the other Luarust
+ones. It needs `cc`; if it cannot be built the row says so rather than quietly going
+missing.
 
 Paths to the other runners are named in full at the top of `run.py`, deliberately. The
 `java` on this Mac is a stub that resolves to nothing useful and `python3` is whatever came

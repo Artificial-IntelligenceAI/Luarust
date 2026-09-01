@@ -104,6 +104,23 @@ def measure(n):
         pathlib.Path(folder, "Luarust.toml").write_text(f'[run]\nmode = "{mode}"\n')
         took[label] = timed([TOOLS["luarust"], command, f"{folder}/loop.lr"])
 
+    # Ahead of time: compiled once here, then timed as the program it now is. The build
+    # is deliberately outside the measurement -- that cost is paid by whoever ships it,
+    # not by whoever runs it, which is the whole difference between this row and the rest
+    # of the Luarust ones.
+    folder = tempfile.mkdtemp(prefix="luarust-bench-native-")
+    pathlib.Path(folder, "loop.lr").write_text(sized("loop.lr", n))
+    pathlib.Path(folder, "Luarust.toml").write_text('[run]\nmode = "vm"\n')
+    built = subprocess.run(
+        [TOOLS["luarust"], "native", f"{folder}/loop.lr"], capture_output=True, text=True
+    )
+    if built.returncode == 0:
+        took["Luarust, native"] = timed([f"{folder}/loop"])
+    else:
+        # Said out loud rather than left as a missing row. It needs `cc` and the runtime
+        # archive, and a table quietly one row short is worse than one that explains.
+        took["Luarust, native"] = (None, f"not built: {built.stderr.strip()[:120]}")
+
     took["CPython 3.14"] = timed([TOOLS["python"], f"{build}/loop.py"])
     return took
 
@@ -115,9 +132,12 @@ def main():
     wrong = [
         (n, name, answer)
         for n, took in at.items()
-        for name, (_, answer) in took.items()
-        if answer != expected(n)
+        for name, (ms, answer) in took.items()
+        if ms is not None and answer != expected(n)
     ]
+    missing = {name for took in at.values() for name, (ms, _) in took.items() if ms is None}
+    for name in sorted(missing):
+        print(f"  {name}: {at[big][name][1]}")
     if wrong:
         for n, name, answer in wrong:
             print(f"  WRONG at {n}: {name} said {answer}, not {expected(n)}")
@@ -127,14 +147,20 @@ def main():
     base = at[big]["C, clang -O2"][0]
     print(f"| | {big // 1_000_000}M | vs C |")
     print("| --- | --- | --- |")
-    for name, (ms, _) in sorted(at[big].items(), key=lambda r: r[1][0]):
+    for name, (ms, _) in sorted(at[big].items(), key=lambda r: r[1][0] or 1e9):
+        if ms is None:
+            continue
         print(f"| {name} | {ms:,.0f} ms | {ms / base:.2f}x |")
 
     # The slope between the two sizes drops whatever a runner spends before it loops -- a
     # process launching, a JVM warming, LLVM compiling -- and leaves the iteration itself.
     print(f"\n| | ns/iter | vs C | {small // 1_000_000}M | {big // 1_000_000}M | ratio |")
     print("| --- | --- | --- | --- | --- | --- |")
-    per = {name: (at[big][name][0] - at[small][name][0]) * 1e6 / (big - small) for name in at[big]}
+    per = {
+        name: (at[big][name][0] - at[small][name][0]) * 1e6 / (big - small)
+        for name in at[big]
+        if name not in missing
+    }
     for name, ns in sorted(per.items(), key=lambda r: r[1]):
         lo, hi = at[small][name][0], at[big][name][0]
         print(f"| {name} | {ns:.2f} | {ns / per['C, clang -O2']:.2f}x | {lo:,.0f} ms | {hi:,.0f} ms | {hi / lo:.1f}x |")
