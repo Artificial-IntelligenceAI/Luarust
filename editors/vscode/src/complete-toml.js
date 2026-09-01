@@ -1,4 +1,4 @@
-// Suggestions for `Luarust.toml`, which has exactly three sections and five settings.
+// Suggestions for `Luarust.toml`, which has four sections and eight settings.
 //
 // A project file is small and completely enumerable, so there is no reason for the editor
 // to be vaguer about it than the compiler is. Every section, every key and every value it
@@ -23,6 +23,14 @@ const SETTINGS = {
         values: [
           ['"exact"', "the value it holds, whole -- `0.1` is not one tenth and says so"],
           ['"shortest"', "the fewest digits that name it and no other, at its own format"],
+        ],
+      },
+      division: {
+        what: "which way `div` rounds, and which way `mod` leans with it",
+        values: [
+          ['"floored"', "the remainder follows the divisor -- Knuth's, and Python's"],
+          ['"truncated"', "the remainder follows the dividend -- C's, and the hardware's"],
+          ['"euclidean"', "the remainder is never negative"],
         ],
       },
       "no-visibility-stated": {

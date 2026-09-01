@@ -173,6 +173,11 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
                     luarust_conf::Engine::Vm => luarust_core::value::Engine::Vm,
                     luarust_conf::Engine::Whole => luarust_core::value::Engine::Whole,
                 },
+                division: match project.division {
+                    luarust_conf::Division::Floored => luarust_core::value::Division::Floored,
+                    luarust_conf::Division::Truncated => luarust_core::value::Division::Truncated,
+                    luarust_conf::Division::Euclidean => luarust_core::value::Division::Euclidean,
+                },
             };
             let (program, problems) = luarust_check::check_with(&parsed.program, start);
             errors.extend(problems);
@@ -453,7 +458,17 @@ fn fuzz(count: u64) -> ExitCode {
 
         let lexed = luarust_lex::lex(source.text());
         let parsed = luarust_parse::parse(source.text(), &lexed.tokens);
-        let (program, errors) = luarust_check::check(&parsed.program);
+        // The convention this seed runs under, so a sweep covers all three: every path
+        // is told the same one, so it varies what the answer is, never who agrees.
+        let division = match seed % 3 {
+            0 => luarust_core::value::Division::Floored,
+            1 => luarust_core::value::Division::Truncated,
+            _ => luarust_core::value::Division::Euclidean,
+        };
+        let (program, errors) = luarust_check::check_with(
+            &parsed.program,
+            luarust_check::Start { division, ..luarust_check::Start::default() },
+        );
         let refused: Vec<_> =
             lexed.errors.into_iter().chain(parsed.errors).chain(errors).collect();
         if !refused.is_empty() {

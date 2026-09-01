@@ -27,7 +27,7 @@
 
 use crate::chunk::{Chunk, Op, Reg, Routine};
 use luarust_core::heap::Collect;
-use luarust_core::value::{Engine, Floats, Overflow, Value};
+use luarust_core::value::{Division, Engine, Floats, Overflow, Value};
 use luarust_diag::Span;
 use luarust_num::Uint;
 use luarust_core::{BinOp, CmpOp, Ty};
@@ -37,7 +37,7 @@ pub const MAGIC: &[u8; 8] = b"LUARUST\x1b";
 
 /// The format's version. Read a file claiming a different one and it is refused rather
 /// than guessed at.
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 
 /// Why a file could not be read as a chunk.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -109,6 +109,7 @@ pub fn write_with(
     put_u32(&mut out, chunk.collect.tag());
     put_u32(&mut out, chunk.floats.tag());
     put_u32(&mut out, chunk.engine.tag());
+    put_u32(&mut out, chunk.division.tag());
     put_u32(&mut out, chunk.registers as u32);
     put_str(&mut out, path);
 
@@ -508,6 +509,9 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     let tag = cursor.u32()?;
     let engine = Engine::from_tag(tag)
         .ok_or(Broken::Unknown { what: "a way of running a chunk", value: u64::from(tag) })?;
+    let tag = cursor.u32()?;
+    let division = Division::from_tag(tag)
+        .ok_or(Broken::Unknown { what: "a way of dividing", value: u64::from(tag) })?;
     let registers = cursor.u32()? as usize;
     let path = cursor.text()?;
     let source = match cursor.u32()? {
@@ -587,7 +591,7 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     }
 
     let chunk =
-        Chunk { code, spans, consts, texts, registers, overflow, collect, floats, engine, funcs };
+        Chunk { code, spans, consts, texts, registers, overflow, collect, floats, engine, division, funcs };
     check(&chunk)?;
     Ok(Loaded { chunk, path, source })
 }

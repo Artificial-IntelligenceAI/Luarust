@@ -36,7 +36,7 @@
       }
     },
     "key": {
-      "match": "^\\s*(overflow|float-printing|no-visibility-stated|embed-source|decimal-encoding|mode)\\s*(?==)",
+      "match": "^\\s*(overflow|float-printing|division|no-visibility-stated|embed-source|decimal-encoding|mode)\\s*(?==)",
       "captures": {
         "1": {
           "name": "support.type.property-name.luarust-toml"
@@ -44,7 +44,7 @@
       }
     },
     "value": {
-      "match": "\"(vm|whole|exact|shortest|wrap|trap|restricted|error|bid|dpd|off|silent|aggressive)\"",
+      "match": "\"(vm|whole|exact|shortest|wrap|trap|floored|truncated|euclidean|restricted|error|bid|dpd|off|silent|aggressive)\"",
       "name": "constant.language.luarust-toml"
     },
     "boolean": {

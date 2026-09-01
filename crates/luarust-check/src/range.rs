@@ -31,7 +31,7 @@
 //! intervals — the passes that were still searching for the fixed point prove nothing.
 
 use crate::ir::{Checked, Expr, Item, Stmt};
-use crate::value::Overflow;
+use crate::value::{Division, Overflow};
 use luarust_parse::ast::{BinOp, Ty};
 
 /// A closed interval. Kept in `i128` so every 64-bit value, signed or not, fits with
@@ -76,6 +76,7 @@ fn hull_states(a: &State, b: &State) -> State {
 /// the walk trusts the types the checker settled.
 pub(crate) fn flag(checked: &mut Checked) {
     let overflow = checked.overflow;
+    let division = checked.division;
     // A function's parameters can hold anything their types can, and nothing a call
     // does can reach the caller's slots, so every body stands alone.
     for func in &mut checked.funcs {
@@ -83,16 +84,17 @@ pub(crate) fn flag(checked: &mut Checked) {
         for (n, ty) in func.params.iter().enumerate() {
             state[n] = ty_range(*ty);
         }
-        let mut walker = Walker { overflow, breaks: Vec::new() };
+        let mut walker = Walker { overflow, division, breaks: Vec::new() };
         walker.block(&mut func.body, &mut state, true);
     }
     let mut state: State = vec![None; checked.slots];
-    let mut walker = Walker { overflow, breaks: Vec::new() };
+    let mut walker = Walker { overflow, division, breaks: Vec::new() };
     walker.block(&mut checked.stmts, &mut state, true);
 }
 
 struct Walker {
     overflow: Overflow,
+    division: Division,
     /// One entry per loop currently open: the hull of the states at its `break`s.
     breaks: Vec<Option<State>>,
 }
@@ -313,11 +315,23 @@ impl Walker {
                     BinOp::Sub => Some(Range { lo: l.lo - r.hi, hi: l.hi - r.lo }),
                     BinOp::Mul => mul(l, r),
                     // Quotient and remainder against a divisor that is certainly
-                    // positive; anything less certain falls back to the type.
+                    // positive; anything less certain falls back to the type. That is
+                    // also exactly where the three division conventions coincide, which
+                    // is why nothing here needs to know which one the project chose.
                     BinOp::Div if l.lo >= 0 && r.lo >= 1 => {
                         Some(Range { lo: l.lo / r.hi, hi: l.hi / r.lo })
                     }
-                    BinOp::Mod if r.lo >= 1 => Some(Range { lo: 0, hi: r.hi - 1 }),
+                    // A remainder is smaller than the divisor, and which side of zero it
+                    // may fall on is the whole of what the convention decides: floored
+                    // and euclidean follow the divisor and cannot be negative here,
+                    // truncated follows the dividend and can be, exactly as far.
+                    BinOp::Mod if r.lo >= 1 => {
+                        let low = match self.division {
+                            Division::Truncated if l.lo < 0 => -(r.hi - 1),
+                            _ => 0,
+                        };
+                        Some(Range { lo: low, hi: r.hi - 1 })
+                    }
                     _ => None,
                 };
                 held(exact, *ty, self.overflow)

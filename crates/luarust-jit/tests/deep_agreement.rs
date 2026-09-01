@@ -1,15 +1,32 @@
 //! A one-off deep sweep, not part of the ordinary gate: 200,000 generated programs,
 //! three ways each. Run it with `--ignored` when a change touches what the JIT emits.
 
+use luarust_check::Start;
+use luarust_core::value::Division;
 use luarust_diag::SourceFile;
+/// The convention this seed runs under. A generated program is run under one setting at a
+/// time, and the seed picks which -- so a sweep covers all three, and a divergence that
+/// only appears in one of them has somewhere to show up. Each path is told the same
+/// thing, so this varies what the answer should be, never who agrees about it.
+fn division_for(seed: u64) -> Division {
+    match seed % 3 {
+        0 => Division::Floored,
+        1 => Division::Truncated,
+        _ => Division::Euclidean,
+    }
+}
 
-fn three_ways(source: &str) {
+
+fn three_ways(source: &str, seed: u64) {
     let file = SourceFile::new("test.lr", source);
     let lexed = luarust_lex::lex(source);
     assert!(lexed.ok(), "{}", luarust_diag::report(&file, &lexed.errors));
     let parsed = luarust_parse::parse(source, &lexed.tokens);
     assert!(parsed.ok(), "{}", luarust_diag::report(&file, &parsed.errors));
-    let (program, errors) = luarust_check::check(&parsed.program);
+    let (program, errors) = luarust_check::check_with(
+        &parsed.program,
+        Start { division: division_for(seed), ..Start::default() },
+    );
     assert!(errors.is_empty(), "{}", luarust_diag::report(&file, &errors));
 
     let mut walked = Vec::new();
@@ -48,6 +65,6 @@ fn three_ways(source: &str) {
 #[ignore = "a deep sweep for changes to what the JIT emits, not for every gate"]
 fn two_hundred_thousand_agree_three_ways() {
     for seed in 1..=200_000u64 {
-        three_ways(&luarust_gen::program(seed).source);
+        three_ways(&luarust_gen::program(seed).source, seed);
     }
 }

@@ -31,6 +31,24 @@ pub struct Project {
     pub floats: Floats,
     /// `[run] mode` — which engine runs the chunk.
     pub engine: Engine,
+    /// `[defaults] division` — how a division rounds, and which way its remainder leans.
+    pub division: Division,
+}
+
+/// How a division rounds, and which way its remainder leans.
+///
+/// One setting for both `div` and `mod`, because they are one division: every convention
+/// answers `a = q × b + r`, and picking `q` decides `r`. Settling them separately is how
+/// the identity came to be broken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Division {
+    /// The remainder takes the sign of the divisor. Knuth's, Python's, and the default.
+    Floored,
+    /// The remainder takes the sign of the dividend. C's, and most hardware's.
+    Truncated,
+    /// The remainder is never negative — the division algorithm as number theory states
+    /// it, `0 ≤ r < |b|`.
+    Euclidean,
 }
 
 /// Which engine runs a chunk.
@@ -118,6 +136,10 @@ impl Default for Project {
             // The VM, because it needs nothing and starts at once. Asking for `"whole"`
             // is asking for LLVM, and that should be said rather than assumed.
             engine: Engine::Vm,
+            // Floored, which is what `mod` has always done here and what the README
+            // documents. `div` used to truncate, so the two disagreed and `q × b + r`
+            // was not `a`; this is the setting that made them one decision.
+            division: Division::Floored,
         }
     }
 }
@@ -169,7 +191,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                     Diagnostic::new("C0001", format!("there is no `[{name}]` section."))
                         .primary(locate(body, start, trimmed), "written here")
                         .rule("a project file has the sections Luarust knows")
-                        .tip("the sections are `[defaults]` and `[build]`.")
+                        .tip("the sections are `[defaults]`, `[build]`, `[run]` and `[gc]`.")
                         .fix("delete it, or correct the name."),
                 );
                 section.clear();
@@ -198,7 +220,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Diagnostic::new("C0003", format!("`{key}` is not under any section."))
                     .primary(locate(body, start, trimmed), "written here")
                     .rule("a setting belongs to the section above it")
-                    .tip("`overflow` and `no-visibility-stated` are `[defaults]`; `embed-source` and `decimal-encoding` are `[build]`; `mode` is `[gc]`.")
+                    .tip("`overflow`, `no-visibility-stated`, `float-printing` and `division` are `[defaults]`; `embed-source` and `decimal-encoding` are `[build]`; `mode` is `[run]` and `[gc]`.")
                     .fix("put a section header above it."),
             );
             continue;
@@ -230,6 +252,17 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Some("shortest") => project.floats = Floats::Shortest,
                 _ => errors.push(bad_value(key, raw, span, "`\"exact\"` or `\"shortest\"`")),
             },
+            ("defaults", "division") => match unquote(raw) {
+                Some("floored") => project.division = Division::Floored,
+                Some("truncated") => project.division = Division::Truncated,
+                Some("euclidean") => project.division = Division::Euclidean,
+                _ => errors.push(bad_value(
+                    key,
+                    raw,
+                    span,
+                    "`\"floored\"`, `\"truncated\"` or `\"euclidean\"`",
+                )),
+            },
             ("run", "mode") => match unquote(raw) {
                 Some("vm") => project.engine = Engine::Vm,
                 Some("whole") => project.engine = Engine::Whole,
@@ -251,7 +284,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                     .primary(locate(body, start, key), "written here")
                     .rule("a project file sets only settings that exist")
                     .tip(match section.as_str() {
-                        "defaults" => "`[defaults]` has `overflow`, `no-visibility-stated` and `float-printing`.",
+                        "defaults" => "`[defaults]` has `overflow`, `no-visibility-stated`, `float-printing` and `division`.",
                         "gc" => "`[gc]` has `mode`.",
                         "run" => "`[run]` has `mode`.",
                         _ => "`[build]` has `embed-source` and `decimal-encoding`.",

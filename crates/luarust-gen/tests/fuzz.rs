@@ -3,7 +3,21 @@
 //! This is the oracle doing the job it was built for. The tests written by hand cover the
 //! cases somebody thought of; these cover the ones nobody did.
 
+use luarust_check::Start;
+use luarust_core::value::Division;
 use luarust_diag::SourceFile;
+/// The convention this seed runs under. A generated program is run under one setting at a
+/// time, and the seed picks which -- so a sweep covers all three, and a divergence that
+/// only appears in one of them has somewhere to show up. Each path is told the same
+/// thing, so this varies what the answer should be, never who agrees about it.
+fn division_for(seed: u64) -> Division {
+    match seed % 3 {
+        0 => Division::Floored,
+        1 => Division::Truncated,
+        _ => Division::Euclidean,
+    }
+}
+
 
 enum Outcome {
     Printed(String),
@@ -29,7 +43,10 @@ fn agree(source: &str, seed: u64) -> Outcome {
     if !parsed.ok() {
         complain("parse", &parsed.errors);
     }
-    let (program, errors) = luarust_check::check(&parsed.program);
+    let (program, errors) = luarust_check::check_with(
+        &parsed.program,
+        Start { division: division_for(seed), ..Start::default() },
+    );
     if !errors.is_empty() {
         complain("check", &errors);
     }

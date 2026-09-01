@@ -9,14 +9,22 @@
 //! file which is *not* a valid chunk produces a complaint rather than a crash, because
 //! "run anywhere" means chunks will arrive from places nobody vouched for.
 
+use luarust_core::value::Division;
 use luarust_vm::serialize::{self, Broken, Source};
 
 fn compiled(source: &str) -> luarust_vm::Chunk {
+    compiled_with(source, Division::default())
+}
+
+fn compiled_with(source: &str, division: Division) -> luarust_vm::Chunk {
     let lexed = luarust_lex::lex(source);
     assert!(lexed.ok(), "{:#?}", lexed.errors);
     let parsed = luarust_parse::parse(source, &lexed.tokens);
     assert!(parsed.ok(), "{:#?}", parsed.errors);
-    let (program, errors) = luarust_check::check(&parsed.program);
+    let (program, errors) = luarust_check::check_with(
+        &parsed.program,
+        luarust_check::Start { division, ..luarust_check::Start::default() },
+    );
     assert!(errors.is_empty(), "{errors:#?}");
     luarust_vm::compile(&program)
 }
@@ -235,9 +243,9 @@ fn a_line_table_that_could_not_have_come_from_a_file_is_refused() {
     let mut bytes = serialize::write_with(&chunk, "t.lr", COUNTING, false, false);
 
     // Where the line table begins: the magic, then a word each for the version, overflow,
-    // collecting, float printing and the engine, then the register count, then the path,
-    // then the flag saying there is no source and the count of lines.
-    let table = 8 + (4 * 6) + (4 + "t.lr".len()) + 4 + 4;
+    // collecting, float printing, the engine and the division, then the register count,
+    // then the path, then the flag saying there is no source and the count of lines.
+    let table = 8 + (4 * 7) + (4 + "t.lr".len()) + 4 + 4;
 
     // Checked rather than trusted. This is a byte offset into a format that grows a field
     // now and then, and a test that pokes the wrong four bytes still passes for the wrong
@@ -297,4 +305,45 @@ fn a_chunk_cannot_ask_for_registers_nothing_could_name() {
             "{asked} registers should be refused, not allocated"
         );
     }
+}
+
+/// The convention travels with the chunk.
+///
+/// A chunk is the artefact that runs somewhere else, and `div` means different things
+/// under different settings — so the setting has to be *in* the file. If it were read
+/// from the project file at run time instead, the same chunk would give different answers
+/// depending on which folder it was run from, which is the opposite of what a chunk is.
+#[test]
+fn a_chunk_carries_the_division_it_was_compiled_under() {
+    let source = "print[math { i32 |-7| div i32 |3| } \" \" math { i32 |-7| mod i32 |3| }];";
+    let answers = [
+        (Division::Floored, "-3 2"),
+        (Division::Truncated, "-2 -1"),
+        (Division::Euclidean, "-3 2"),
+    ];
+    for (division, want) in answers {
+        let chunk = compiled_with(source, division);
+        let read = serialize::read(&serialize::write_with(&chunk, "t.lr", source, false, false))
+            .expect("it reads back");
+        assert_eq!(read.chunk.division, division, "the setting survived the round trip");
+        assert_eq!(output_of(&read.chunk), want, "{division:?}");
+    }
+}
+
+/// A chunk whose division tag is not one of the three.
+#[test]
+fn a_division_nothing_could_have_written_is_refused() {
+    let source = COUNTING;
+    let chunk = compiled(source);
+    let mut bytes = serialize::write_with(&chunk, "t.lr", source, false, false);
+    // The magic, then a word each for the version, overflow, collecting and float
+    // printing, then the engine, then the division.
+    let division = 8 + (4 * 5);
+    assert_eq!(
+        u32::from_le_bytes(bytes[division..division + 4].try_into().expect("four bytes")),
+        Division::Floored.tag(),
+        "the default was compiled in, so this is not the division any more"
+    );
+    bytes[division..division + 4].copy_from_slice(&9u32.to_le_bytes());
+    assert!(serialize::read(&bytes).is_err(), "an unknown division must be refused");
 }

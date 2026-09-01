@@ -6,7 +6,7 @@
 //! allocated before compilation starts.
 
 use luarust_core::heap::Collect;
-use luarust_core::value::{Engine, Floats, Overflow, Value};
+use luarust_core::value::{Division, Engine, Floats, Overflow, Value};
 use luarust_diag::Span;
 use luarust_core::{BinOp, CmpOp, Ty};
 
@@ -96,6 +96,9 @@ pub struct Chunk {
     /// Which engine the project asked for. A build that has not got it runs the VM
     /// instead: a preference that cannot be met is not an error.
     pub engine: Engine,
+    /// How a division rounds. One setting for `div` and `mod` together, so the two always
+    /// describe the same division.
+    pub division: Division,
     /// Every function, each with its own code and its own register file. The constants
     /// and the texts are shared, because they are the same values wherever they appear.
     pub funcs: Vec<Routine>,

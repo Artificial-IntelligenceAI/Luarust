@@ -118,6 +118,85 @@ pub enum Overflow {
     Trap,
 }
 
+/// How a division rounds, and which way its remainder leans.
+///
+/// Every convention answers `a = q × b + r`; they disagree only about which `q` to pick
+/// when the division is not exact, and each choice of `q` decides `r`. So this settles
+/// **both** `div` and `mod` at once, which is the point of it being one setting: the two
+/// were separate decisions once, and the identity above did not hold.
+///
+/// ```text
+///                    -7 div 3   -7 mod 3    7 div -3   7 mod -3
+///   Floored             -3          2          -3         -2      `r` follows the divisor
+///   Truncated           -2         -1          -2          1      `r` follows the dividend
+///   Euclidean           -3          2          -2          1      `r` is never negative
+/// ```
+///
+/// Unsigned types cannot tell them apart, and only integers round at all — `div` on a
+/// float, a decimal or an `er` is exact division, so for those this settles `mod` alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Division {
+    /// The remainder takes the sign of the divisor. Knuth's, and Python's.
+    #[default]
+    Floored,
+    /// The remainder takes the sign of the dividend. C's, and most hardware's.
+    Truncated,
+    /// The remainder is never negative, which is the division algorithm as number theory
+    /// states it: `0 ≤ r < |b|`.
+    Euclidean,
+}
+
+impl Division {
+    /// The quotient and remainder of `a` and `b`, and whether the quotient overflowed.
+    ///
+    /// `b` is never nought here — every caller has already refused that. The most
+    /// negative value divided by `-1` is the one case that overflows, and it is the same
+    /// case in all three conventions because the division is exact.
+    pub fn apply(self, a: i128, b: i128, width: u32) -> (i128, i128, bool) {
+        let low = -(1i128 << (width - 1));
+        let overflowed = a == low && b == -1;
+        // Wrapping, so the one overflowing case answers rather than crashing; the caller
+        // decides what an overflow means.
+        let quotient = a.wrapping_div(b);
+        let remainder = a.wrapping_rem(b);
+        if remainder == 0 {
+            return (quotient, 0, overflowed);
+        }
+        let (quotient, remainder) = match self {
+            Division::Truncated => (quotient, remainder),
+            // The signs differ, so the truncated quotient rounded toward zero where
+            // flooring rounds away: one step down, and the divisor back into the
+            // remainder.
+            Division::Floored if (remainder < 0) != (b < 0) => (quotient - 1, remainder + b),
+            Division::Floored => (quotient, remainder),
+            // Only the sign of the remainder matters, and the step goes whichever way
+            // brings it back above zero.
+            Division::Euclidean if remainder < 0 && b > 0 => (quotient - 1, remainder + b),
+            Division::Euclidean if remainder < 0 => (quotient + 1, remainder - b),
+            Division::Euclidean => (quotient, remainder),
+        };
+        (quotient, remainder, overflowed)
+    }
+
+    /// The number it is written as in a chunk, and back.
+    pub fn tag(self) -> u32 {
+        match self {
+            Division::Floored => 0,
+            Division::Truncated => 1,
+            Division::Euclidean => 2,
+        }
+    }
+
+    pub fn from_tag(tag: u32) -> Option<Division> {
+        Some(match tag {
+            0 => Division::Floored,
+            1 => Division::Truncated,
+            2 => Division::Euclidean,
+            _ => return None,
+        })
+    }
+}
+
 /// A value, and the type it is.
 ///
 /// The shape here is a performance decision, and a measured one. Holding every float at
@@ -498,7 +577,81 @@ fn decimal_op(op: BinOp, fmt: decimal::Format, lhs: &Value, rhs: &Value) -> Valu
 }
 
 /// `lhs op rhs`, both already known to be the same type.
-pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Answer<Value> {
+pub fn binary_op(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    overflow: Overflow,
+    division: Division,
+) -> Answer<Value> {
+    let plain = floored_binary_op(op, lhs, rhs, overflow, division)?;
+    leaning(op, lhs, rhs, plain, overflow, division)
+}
+
+/// A remainder the project did not ask for, moved to the one it did.
+///
+/// Every numeric family here computes a **floored** remainder, and the other two
+/// conventions are one step away from it rather than a different algorithm:
+///
+/// ```text
+///   truncated   the remainder follows the dividend, so where the two signs differ,
+///               floored has already stepped once too far: subtract the divisor back
+///   euclidean   the remainder is never negative, and a floored one is negative exactly
+///               when the divisor is: subtract the divisor, which adds its size
+/// ```
+///
+/// Which is why `luarust-num` needs no notion of this at all. Integers do their own,
+/// inside `int_op`, because there the quotient has to move with the remainder and both
+/// come out of one place; here `div` is exact division and has no quotient to correct.
+fn leaning(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    floored: Value,
+    overflow: Overflow,
+    division: Division,
+) -> Answer<Value> {
+    if op != BinOp::Mod || division == Division::Floored {
+        return Ok(floored);
+    }
+    // Integers were settled at their own width, quotient and remainder together.
+    if lhs.ty().is_integer() {
+        return Ok(floored);
+    }
+    // A remainder of nought is nought in every convention, and a sign it has not got
+    // cannot disagree with anything.
+    if is_nought(&floored) {
+        return Ok(floored);
+    }
+    let step = match division {
+        Division::Floored => false,
+        Division::Truncated => negative(lhs) != negative(rhs),
+        Division::Euclidean => negative(rhs),
+    };
+    if !step {
+        return Ok(floored);
+    }
+    floored_binary_op(BinOp::Sub, &floored, rhs, overflow, division)
+}
+
+/// Whether a value is below zero. Not-a-number is not, and neither is a negative nought:
+/// what matters here is which side of zero the remainder fell, and a signed nought has
+/// not fallen either way.
+fn negative(value: &Value) -> bool {
+    matches!(compare(value, &Value::zero(value.ty())), Comparison::Less)
+}
+
+fn is_nought(value: &Value) -> bool {
+    matches!(compare(value, &Value::zero(value.ty())), Comparison::Equal)
+}
+
+fn floored_binary_op(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    overflow: Overflow,
+    division: Division,
+) -> Answer<Value> {
     let ty = lhs.ty();
     if let (Value::Exact(a), Value::Exact(b)) = (lhs, rhs) {
         return exact_op(op, a, b);
@@ -509,7 +662,7 @@ pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Ans
         return Ok(decimal_op(op, fmt, lhs, rhs));
     }
     if ty.is_integer() && rhs.ty().is_integer() {
-        return integer_op(op, ty, lhs, rhs, overflow);
+        return integer_op(op, ty, lhs, rhs, overflow, division);
     }
     // b32 and b64 are the two formats the hardware knows, and for these operations what
     // the hardware does is *correctly rounded* -- which means there is exactly one right
@@ -541,11 +694,18 @@ pub fn binary_op(op: BinOp, lhs: &Value, rhs: &Value, overflow: Overflow) -> Ans
     }
 }
 
-fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -> Answer<Value> {
+fn integer_op(
+    op: BinOp,
+    ty: Ty,
+    lhs: &Value,
+    rhs: &Value,
+    overflow: Overflow,
+    division: Division,
+) -> Answer<Value> {
     let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (lhs, rhs) else {
         unreachable!("both were checked to be integers");
     };
-    Ok(Value::Num { ty, bits: int_op(op, ty, *a, *b, overflow)? })
+    Ok(Value::Num { ty, bits: int_op(op, ty, *a, *b, overflow, division)? })
 }
 
 /// Integer arithmetic, at the width it is actually stored at.
@@ -556,7 +716,14 @@ fn integer_op(op: BinOp, ty: Ty, lhs: &Value, rhs: &Value, overflow: Overflow) -
 /// then range-checking the answer cost about five nanoseconds an operation more than
 /// doing it at the width the number is actually kept at.
 #[inline(always)]
-pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Answer<u64> {
+pub fn int_op(
+    op: BinOp,
+    ty: Ty,
+    a: u64,
+    b: u64,
+    overflow: Overflow,
+    division: Division,
+) -> Answer<u64> {
     macro_rules! at_width {
         ($signed:ty, $unsigned:ty) => {{
             let a = a as $unsigned as $signed;
@@ -565,32 +732,26 @@ pub fn int_op(op: BinOp, ty: Ty, a: u64, b: u64, overflow: Overflow) -> Answer<u
                 BinOp::Add => a.overflowing_add(b),
                 BinOp::Sub => a.overflowing_sub(b),
                 BinOp::Mul => a.overflowing_mul(b),
+                // The quotient and the remainder come from one place, so the two always
+                // describe the same division and `q × b + r` is `a` whichever convention
+                // the project chose.
                 BinOp::Div => {
                     if b == 0 {
                         return Err(divide_by_zero());
                     }
-                    a.overflowing_div(b)
+                    let (quotient, _, over) =
+                        division.apply(a as i128, b as i128, <$signed>::BITS);
+                    (quotient as $signed, over)
                 }
                 BinOp::Mod => {
                     if b == 0 {
                         return Err(remainder_by_zero());
                     }
-                    // The most negative value against -1 has no remainder that fits, and
-                    // asking the hardware is a crash rather than an answer.
-                    if b == -1 {
-                        (0, false)
-                    } else {
-                        // Floored: `%` takes the sign of the dividend and mathematics
-                        // takes the sign of the divisor, so where they differ the divisor
-                        // is added back.
-                        let truncated = a % b;
-                        let floored = if truncated != 0 && (truncated < 0) != (b < 0) {
-                            truncated + b
-                        } else {
-                            truncated
-                        };
-                        (floored, false)
-                    }
+                    // A remainder never overflows: it is smaller than the divisor. The
+                    // one case the hardware crashes on is the most negative value against
+                    // `-1`, whose remainder is nought in every convention.
+                    let (_, remainder, _) = division.apply(a as i128, b as i128, <$signed>::BITS);
+                    (remainder as $signed, false)
                 }
                 BinOp::Pow => return power(op, ty, a as i128, b as i128, overflow),
             };

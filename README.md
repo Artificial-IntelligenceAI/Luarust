@@ -231,6 +231,19 @@ math { 7 mod -3 }     # -2, not 1
 So `'i' mod 3` cycles `0 1 2` however `'i'` is signed, which is what anyone counting
 actually wanted.
 
+`div` rounds to match it, because a quotient and a remainder describe one division:
+`(a div b) x b + (a mod b)` is `a`, whichever way it rounds. The three ways that hold
+that together are all here, and the project picks one:
+
+| `[defaults] division` | `-7 div 3` | `-7 mod 3` | `7 div -3` | `7 mod -3` | the remainder |
+|---|---|---|---|---|---|
+| `"floored"`, the default | `-3` | `2` | `-3` | `-2` | follows the divisor |
+| `"truncated"` | `-2` | `-1` | `-2` | `1` | follows the dividend, as in C |
+| `"euclidean"` | `-3` | `2` | `-2` | `1` | is never negative |
+
+Unsigned types cannot tell them apart, and only whole numbers round at all: `div` on a
+float, a decimal or an `er` is exact division, so there the setting decides `mod` alone.
+
 ### Comparing
 
 Six of them, and they answer `bool`:
@@ -673,6 +686,7 @@ A Luarust source file is `.lr`. Settings for a whole project live beside them in
 no-visibility-stated = "error"
 overflow = "trap"
 float-printing = "exact"
+division = "floored"
 
 [build]
 embed-source = false
@@ -726,9 +740,9 @@ compiled, and it has no lexer, parser, checker or program generator linked into 
 — those are facts about writing Luarust, not about running it.
 
 It has no project file either, and never looks for one. A chunk carries what its project
-decided — `overflow`, `[gc] mode`, `float-printing` — so a program keeps its own answers
-wherever it is run, on a machine that has never seen the `Luarust.toml` it was built
-under.
+decided — `overflow`, `[gc] mode`, `float-printing`, `division` — so a program keeps its
+own answers wherever it is run, on a machine that has never seen the `Luarust.toml` it
+was built under.
 
 The JIT is a different case, and not a fourth thing left out of the runtime because it is
 only for development. **How a shipped program runs is the project's choice**, written in
@@ -1244,7 +1258,7 @@ at7:
 ```
 
 Every register was emitted as an `alloca` and every one is now a phi. Luarust's `mod` is
-**floored** where C's `%` is truncated, so it was emitted as nine operations around the
+**floored** by default where C's `%` is truncated, so it was emitted as nine operations around the
 `srem` — a zero test, a `-1` test with a select to dodge `INT_MIN % -1`, a sign comparison,
 a corrective add and a final select. Two of those guards tested a divisor that is a literal
 sitting in the same block, and the rest collapsed once LLVM knew the divisor was positive:

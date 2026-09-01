@@ -17,7 +17,7 @@ mod range;
 // needs the checker only before it does. It is still named from here.
 pub use luarust_core::value;
 
-use crate::value::{Engine, Floats};
+use crate::value::{Division, Engine, Floats};
 use ir::Checked;
 use luarust_core::heap::Collect;
 use luarust_diag::{Diagnostic, Span};
@@ -48,6 +48,7 @@ pub struct Start {
     pub collect: Collect,
     pub floats: Floats,
     pub engine: Engine,
+    pub division: Division,
 }
 
 impl Default for Start {
@@ -58,6 +59,7 @@ impl Default for Start {
             collect: Collect::Off,
             floats: Floats::Exact,
             engine: Engine::Vm,
+            division: Division::Floored,
         }
     }
 }
@@ -79,6 +81,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         collect: start.collect,
         floats: start.floats,
         engine: start.engine,
+        division: start.division,
         visibility_required: start.visibility_required,
         signatures: HashMap::new(),
         funcs: Vec::new(),
@@ -111,6 +114,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         collect: checker.collect,
         floats: checker.floats,
         engine: checker.engine,
+        division: checker.division,
     };
     // A program with faults never runs, so there is nothing to prove about one.
     if checker.errors.is_empty() {
@@ -126,6 +130,7 @@ struct Checker {
     collect: Collect,
     floats: Floats,
     engine: Engine,
+    division: Division,
     visibility_required: bool,
     /// Every function's name, and where it sits in `funcs`.
     signatures: HashMap<String, Signature>,
@@ -183,14 +188,17 @@ impl Checker {
             ("no-visibility-stated", "restricted") => self.visibility_required = false,
             ("overflow", "trap") => self.overflow = Overflow::Trap,
             ("overflow", "wrap") => self.overflow = Overflow::Wrap,
-            ("no-visibility-stated" | "overflow", behaviour) => self.error(
+            ("division", "floored") => self.division = Division::Floored,
+            ("division", "truncated") => self.division = Division::Truncated,
+            ("division", "euclidean") => self.division = Division::Euclidean,
+            ("no-visibility-stated" | "overflow" | "division", behaviour) => self.error(
                 Diagnostic::new("E0200", format!("`{behaviour}` is not something `{}` can be set to.", defaults.setting))
                     .primary(defaults.behaviour_span, "written here")
                     .rule("a default is set to one of the behaviours its setting allows")
-                    .tip(if defaults.setting == "overflow" {
-                        "`overflow` may be `wrap` or `trap`."
-                    } else {
-                        "`no-visibility-stated` may be `restricted` or `error`."
+                    .tip(match defaults.setting.as_str() {
+                        "overflow" => "`overflow` may be `wrap` or `trap`.",
+                        "division" => "`division` may be `floored`, `truncated` or `euclidean`.",
+                        _ => "`no-visibility-stated` may be `restricted` or `error`.",
                     })
                     .fix("use one of those."),
             ),
@@ -198,7 +206,7 @@ impl Checker {
                 Diagnostic::new("E0201", format!("`{setting}` is not a setting Luarust has."))
                     .primary(defaults.setting_span, "written here")
                     .rule("a default names a setting the language knows")
-                    .tip("the settings are `no-visibility-stated` and `overflow`.")
+                    .tip("the settings are `no-visibility-stated`, `overflow` and `division`.")
                     .fix("use one of those."),
             ),
         }

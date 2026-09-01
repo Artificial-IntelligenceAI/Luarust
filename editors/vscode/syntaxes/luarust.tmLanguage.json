@@ -134,7 +134,7 @@
       "name": "constant.language.luarust"
     },
     "setting": {
-      "match": "\\b(no-visibility-stated|overflow|error|trap|wrap)\\b",
+      "match": "\\b(no-visibility-stated|overflow|division|error|trap|wrap|floored|truncated|euclidean)\\b",
       "name": "support.constant.luarust"
     },
     "number": {

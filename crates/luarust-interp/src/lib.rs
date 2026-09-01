@@ -13,7 +13,7 @@ use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_core::heap;
 use luarust_parse::ast::LogicOp;
 use luarust_check::value::{
-    DEPTH_LIMIT, Fault, Overflow, Value, binary_op, compare, format_of, holds, int_compare,
+    DEPTH_LIMIT, Division, Fault, Overflow, Value, binary_op, compare, format_of, holds, int_compare,
     int_op, negate, one_of,
 };
 pub use luarust_check::value::Stopped;
@@ -50,6 +50,7 @@ pub fn run(program: &Checked, out: &mut impl Write) -> Outcome<()> {
     let mut machine = Machine {
         slots: vec![None; program.slots],
         overflow: program.overflow,
+        division: program.division,
         started: Instant::now(),
         program,
         depth: 0,
@@ -73,6 +74,7 @@ enum Flow {
 struct Machine<'a> {
     slots: Vec<Option<Value>>,
     overflow: Overflow,
+    division: Division,
     started: Instant,
     program: &'a Checked,
     depth: usize,
@@ -154,7 +156,7 @@ impl Machine<'_> {
                     // loop makes, which never steps past the last value it took.
                     if let Some((slot, ty)) = counter {
                         let held = self.slots[*slot].clone().expect("the counter was set");
-                        let next = binary_op(BinOp::Add, &held, &one_of(*ty), self.overflow)
+                        let next = binary_op(BinOp::Add, &held, &one_of(*ty), self.overflow, self.division)
                             .map_err(|fault| Stopped { fault, span: *span })?;
                         self.slots[*slot] = Some(next);
                     }
@@ -224,7 +226,7 @@ impl Machine<'_> {
             if ordering(ty, &current, &to) != Comparison::Less {
                 return Ok(Flow::Went);
             }
-            current = binary_op(BinOp::Add, &current, &one, Overflow::Wrap)
+            current = binary_op(BinOp::Add, &current, &one, Overflow::Wrap, Division::Floored)
                 .map_err(|fault| Stopped { fault, span })?;
         }
     }
@@ -444,11 +446,11 @@ impl Machine<'_> {
                 if ty.is_integer()
                     && let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) = (&lhs, &rhs)
                 {
-                    let bits = int_op(*op, *ty, *a, *b, self.overflow)
+                    let bits = int_op(*op, *ty, *a, *b, self.overflow, self.division)
                         .map_err(|fault| Stopped { fault, span: *span })?;
                     return Ok(Value::Num { ty: *ty, bits });
                 }
-                binary_op(*op, &lhs, &rhs, self.overflow)
+                binary_op(*op, &lhs, &rhs, self.overflow, self.division)
                     .map_err(|fault| Stopped { fault, span: *span })
             }
         }

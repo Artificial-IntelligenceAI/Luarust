@@ -27,7 +27,7 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{FloatPredicate, IntPredicate};
-use luarust_check::value::{Fault, Overflow, Stopped, Value};
+use luarust_check::value::{Division, Fault, Overflow, Stopped, Value};
 use luarust_vm::chunk::{Chunk, Op, Routine};
 use luarust_diag::Span;
 use luarust_parse::ast::{BinOp, CmpOp, Ty};
@@ -273,6 +273,7 @@ struct Emitter<'ctx> {
     /// Where each fault can happen, so a code can be turned back into a place.
     spans: Vec<Span>,
     overflow: Overflow,
+    division: Division,
     helpers: Helpers<'ctx>,
 }
 
@@ -343,7 +344,15 @@ impl<'ctx> Emitter<'ctx> {
         let fallback = module.add_function(
             "luarust_fallback",
             i64_t.fn_type(
-                &[i32_t.into(), i32_t.into(), i64_t.into(), i64_t.into(), i32_t.into(), ptr_t.into()],
+                &[
+                    i32_t.into(),
+                    i32_t.into(),
+                    i64_t.into(),
+                    i64_t.into(),
+                    i32_t.into(),
+                    i32_t.into(),
+                    ptr_t.into(),
+                ],
                 false,
             ),
             None,
@@ -358,7 +367,10 @@ impl<'ctx> Emitter<'ctx> {
 
         let cell_binary = module.add_function(
             "luarust_cell_binary",
-            i64_t.fn_type(&[i32_t.into(), i64_t.into(), i64_t.into(), i64_t.into(), i32_t.into()], false),
+            i64_t.fn_type(
+                &[i32_t.into(), i64_t.into(), i64_t.into(), i64_t.into(), i32_t.into(), i32_t.into()],
+                false,
+            ),
             None,
         );
         engine.add_global_mapping(&cell_binary, runtime::cell_binary as *const () as usize);
@@ -531,6 +543,7 @@ impl<'ctx> Emitter<'ctx> {
             answer_slot,
             spans: Vec::new(),
             overflow: chunk.overflow,
+            division: chunk.division,
             funcs: Vec::new(),
             constants: Vec::new(),
             frame: Vec::new(),
@@ -1417,6 +1430,7 @@ impl<'ctx> Emitter<'ctx> {
                     self.cell_number(a).into(),
                     self.cell_number(b).into(),
                     trapping.into(),
+                    i32_t.const_int(u64::from(self.division.tag()), false).into(),
                 ],
                 "celled",
             )
@@ -1806,7 +1820,7 @@ impl<'ctx> Emitter<'ctx> {
         let zero = int.const_int(0, false);
 
         // The checker proved the dividend at or above zero and the divisor above it,
-        // so nothing here can fault, floored is truncated, and both operands carry the
+        // so nothing here can fault, all three conventions coincide, and both operands carry the
         // bit patterns of the same values unsigned — the *unsigned* instruction is the
         // whole answer, and against a constant divisor it also lowers to the cheaper
         // strength reduction. This is the value-range analysis paying out: it makes
@@ -1825,6 +1839,8 @@ impl<'ctx> Emitter<'ctx> {
         let code = if op == BinOp::Div { runtime::DIVIDE_BY_ZERO } else { runtime::REMAINDER_BY_ZERO };
         self.stop_if(is_zero, code, span);
 
+        // Nothing below this line is about unsigned types: with no negative operand there
+        // is nothing for a convention to disagree about, so the instruction is the answer.
         if !ty.is_signed() {
             return match op {
                 BinOp::Div => self.builder.build_int_unsigned_div(x, y, "div").expect("div"),
@@ -1844,17 +1860,17 @@ impl<'ctx> Emitter<'ctx> {
             .expect("a select")
             .into_int_value();
 
-        if op == BinOp::Div {
-            let quotient = self.builder.build_int_signed_div(x, safe, "div").expect("div");
-            // Negating wraps, which is the answer wrapping arithmetic wants.
-            let negated = self.builder.build_int_sub(zero, x, "neg").expect("sub");
-            return self
-                .builder
-                .build_select(is_minus_one, negated, quotient, "div.result")
-                .expect("a select")
-                .into_int_value();
-        }
-
+        // The hardware's own division, which truncates. Both halves of it: a correction
+        // to the quotient is decided by the remainder, so `div` needs one too — and
+        // where it turns out not to, the unused one is dead and LLVM drops it.
+        let quotient = self.builder.build_int_signed_div(x, safe, "div").expect("div");
+        // Negating wraps, which is the answer wrapping arithmetic wants.
+        let negated = self.builder.build_int_sub(zero, x, "neg").expect("sub");
+        let quotient = self
+            .builder
+            .build_select(is_minus_one, negated, quotient, "div.result")
+            .expect("a select")
+            .into_int_value();
         let remainder = self.builder.build_int_signed_rem(x, safe, "rem").expect("rem");
         let remainder = self
             .builder
@@ -1862,25 +1878,73 @@ impl<'ctx> Emitter<'ctx> {
             .expect("a select")
             .into_int_value();
 
-        // Floored: if the remainder is not zero and disagrees in sign with the divisor,
-        // it is on the wrong side and the divisor is added back.
-        let not_zero = self
-            .builder
-            .build_int_compare(IntPredicate::NE, remainder, zero, "rem.not.zero")
-            .expect("a compare");
-        let signs_differ = self
-            .builder
-            .build_int_compare(
-                IntPredicate::SLT,
-                self.builder.build_xor(remainder, y, "signs").expect("an xor"),
-                zero,
-                "signs.differ",
-            )
-            .expect("a compare");
-        let needs_correcting = self.builder.build_and(not_zero, signs_differ, "needs").expect("an and");
-        let corrected = self.builder.build_int_add(remainder, y, "corrected").expect("add");
+        // One correction tail, chosen by the project's convention. Truncated is what the
+        // instruction already did, so it appends nothing; the other two step the quotient
+        // one place and move the divisor into the remainder to match.
+        let (needs_correcting, stepped, moved) = match self.division {
+            Division::Truncated => {
+                return if op == BinOp::Div { quotient } else { remainder };
+            }
+            // The remainder is on the wrong side when it disagrees in sign with the
+            // divisor, and a remainder of nought is on no side at all.
+            Division::Floored => {
+                let not_zero = self
+                    .builder
+                    .build_int_compare(IntPredicate::NE, remainder, zero, "rem.not.zero")
+                    .expect("a compare");
+                let signs_differ = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::SLT,
+                        self.builder.build_xor(remainder, y, "signs").expect("an xor"),
+                        zero,
+                        "signs.differ",
+                    )
+                    .expect("a compare");
+                (
+                    self.builder.build_and(not_zero, signs_differ, "needs").expect("an and"),
+                    self.builder.build_int_sub(quotient, int.const_int(1, false), "down").expect("sub"),
+                    self.builder.build_int_add(remainder, y, "corrected").expect("add"),
+                )
+            }
+            // Only the sign of the remainder matters, and the step goes whichever way
+            // brings it back above zero: the divisor's size added, and the quotient moved
+            // one place against the divisor's sign.
+            Division::Euclidean => {
+                let below = self
+                    .builder
+                    .build_int_compare(IntPredicate::SLT, remainder, zero, "rem.below.zero")
+                    .expect("a compare");
+                let divisor_below = self
+                    .builder
+                    .build_int_compare(IntPredicate::SLT, y, zero, "divisor.below.zero")
+                    .expect("a compare");
+                let size = self
+                    .builder
+                    .build_select(
+                        divisor_below,
+                        self.builder.build_int_sub(zero, y, "size").expect("sub"),
+                        y,
+                        "divisor.size",
+                    )
+                    .expect("a select")
+                    .into_int_value();
+                let step = self
+                    .builder
+                    .build_select(divisor_below, minus_one, int.const_int(1, false), "step")
+                    .expect("a select")
+                    .into_int_value();
+                (
+                    below,
+                    self.builder.build_int_sub(quotient, step, "stepped").expect("sub"),
+                    self.builder.build_int_add(remainder, size, "corrected").expect("add"),
+                )
+            }
+        };
+        let (plain, corrected) =
+            if op == BinOp::Div { (quotient, stepped) } else { (remainder, moved) };
         self.builder
-            .build_select(needs_correcting, corrected, remainder, "floored")
+            .build_select(needs_correcting, corrected, plain, "leaned")
             .expect("a select")
             .into_int_value()
     }
@@ -1926,6 +1990,7 @@ impl<'ctx> Emitter<'ctx> {
                     a_bits.into(),
                     b_bits.into(),
                     trapping.into(),
+                    i32_t.const_int(u64::from(self.division.tag()), false).into(),
                     out.into(),
                 ],
                 "fallback",
