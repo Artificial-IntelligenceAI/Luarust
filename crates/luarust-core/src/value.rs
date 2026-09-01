@@ -124,6 +124,56 @@ pub enum Overflow {
     Trap,
 }
 
+/// The quotient and remainder of `a` and `b` at their own width, and whether the quotient
+/// overflowed.
+///
+/// A macro over the real width rather than a function over `i128`, which is what this was
+/// and what cost the interpreter 38% on signed `mod`: widening to 128 bits turns one
+/// `sdiv` into a multi-instruction sequence, to buy range that a correction of one divisor
+/// never needed. Found by measuring the commit before the setting existed against the one
+/// after, on the same machine in the same minute -- the released numbers looked fine
+/// because the unsigned path never comes here.
+///
+/// `b` is never nought: every caller has already refused that. The most negative value
+/// over `-1` is the one case that overflows, and it is the same case in all three
+/// conventions because that division is exact -- so it is detected rather than computed.
+///
+/// Every step is written wrapping, and none of them can wrap. A correction only happens
+/// when the remainder is not nought, which rules out both divisions whose quotient could
+/// sit at a limit: the most negative value over `1` and over `-1` are each exact.
+macro_rules! divided {
+    ($division:expr, $a:expr, $b:expr, $signed:ty) => {{
+        let (a, b): ($signed, $signed) = ($a, $b);
+        let overflowed = a == <$signed>::MIN && b == -1;
+        let quotient = a.wrapping_div(b);
+        let remainder = a.wrapping_rem(b);
+        if remainder == 0 {
+            (quotient, 0, overflowed)
+        } else {
+            let (quotient, remainder) = match $division {
+                Division::Truncated => (quotient, remainder),
+                // The signs differ, so the truncated quotient rounded toward zero where
+                // flooring rounds away: one step down, and the divisor back into the
+                // remainder.
+                Division::Floored if (remainder < 0) != (b < 0) => {
+                    (quotient.wrapping_sub(1), remainder.wrapping_add(b))
+                }
+                Division::Floored => (quotient, remainder),
+                // Only the sign of the remainder matters, and the step goes whichever way
+                // brings it back above zero.
+                Division::Euclidean if remainder < 0 && b > 0 => {
+                    (quotient.wrapping_sub(1), remainder.wrapping_add(b))
+                }
+                Division::Euclidean if remainder < 0 => {
+                    (quotient.wrapping_add(1), remainder.wrapping_sub(b))
+                }
+                Division::Euclidean => (quotient, remainder),
+            };
+            (quotient, remainder, overflowed)
+        }
+    }};
+}
+
 /// How a division rounds, and which way its remainder leans.
 ///
 /// Every convention answers `a = q × b + r`; they disagree only about which `q` to pick
@@ -153,37 +203,6 @@ pub enum Division {
 }
 
 impl Division {
-    /// The quotient and remainder of `a` and `b`, and whether the quotient overflowed.
-    ///
-    /// `b` is never nought here — every caller has already refused that. The most
-    /// negative value divided by `-1` is the one case that overflows, and it is the same
-    /// case in all three conventions because the division is exact.
-    pub fn apply(self, a: i128, b: i128, width: u32) -> (i128, i128, bool) {
-        let low = -(1i128 << (width - 1));
-        let overflowed = a == low && b == -1;
-        // Wrapping, so the one overflowing case answers rather than crashing; the caller
-        // decides what an overflow means.
-        let quotient = a.wrapping_div(b);
-        let remainder = a.wrapping_rem(b);
-        if remainder == 0 {
-            return (quotient, 0, overflowed);
-        }
-        let (quotient, remainder) = match self {
-            Division::Truncated => (quotient, remainder),
-            // The signs differ, so the truncated quotient rounded toward zero where
-            // flooring rounds away: one step down, and the divisor back into the
-            // remainder.
-            Division::Floored if (remainder < 0) != (b < 0) => (quotient - 1, remainder + b),
-            Division::Floored => (quotient, remainder),
-            // Only the sign of the remainder matters, and the step goes whichever way
-            // brings it back above zero.
-            Division::Euclidean if remainder < 0 && b > 0 => (quotient - 1, remainder + b),
-            Division::Euclidean if remainder < 0 => (quotient + 1, remainder - b),
-            Division::Euclidean => (quotient, remainder),
-        };
-        (quotient, remainder, overflowed)
-    }
-
     /// The number it is written as in a chunk, and back.
     pub fn tag(self) -> u32 {
         match self {
@@ -745,9 +764,8 @@ pub fn int_op(
                     if b == 0 {
                         return Err(divide_by_zero());
                     }
-                    let (quotient, _, over) =
-                        division.apply(a as i128, b as i128, <$signed>::BITS);
-                    (quotient as $signed, over)
+                    let (quotient, _, over) = divided!(division, a, b, $signed);
+                    (quotient, over)
                 }
                 BinOp::Mod => {
                     if b == 0 {
@@ -756,8 +774,8 @@ pub fn int_op(
                     // A remainder never overflows: it is smaller than the divisor. The
                     // one case the hardware crashes on is the most negative value against
                     // `-1`, whose remainder is nought in every convention.
-                    let (_, remainder, _) = division.apply(a as i128, b as i128, <$signed>::BITS);
-                    (remainder as $signed, false)
+                    let (_, remainder, _) = divided!(division, a, b, $signed);
+                    (remainder, false)
                 }
                 BinOp::Pow => return power(op, ty, a as i128, b as i128, overflow),
             };
