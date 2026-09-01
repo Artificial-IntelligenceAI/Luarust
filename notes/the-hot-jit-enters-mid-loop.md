@@ -106,6 +106,20 @@ Parity with `"whole"`, still compiling two routines out of forty-one. The LLVM c
 behind each kept routine is leaked deliberately -- the cache lives until the program
 ends, and machine code whose context was dropped is a dangling pointer.
 
+The entry itself has since been slimmed, in the order the risks deserved. The two
+harmless costs went first: a module's constant and template tables are installed once
+and re-entered on a token, and the output buffer is written and flushed only when
+something is in it — 160 ns to 99 on the `call_cost` ruler. Then the risky one: the
+caller's open frames are *borrowed* for the span of the call rather than cloned, as
+raw pointers the runtime holds from `reenter` to `retire` and reads only as collection
+roots and depth — 99 to 85 on a one-frame harness, and O(1) in stack depth where the
+clone was O(everything held). Because a mistake in a shared root set corrupts rather
+than crashes, the change carries its own guards instead of leaning on the fuzzer: a
+debug assertion that every borrowed frame is exactly where and how long it was when
+the call began, and `kept_calls_survive_aggressive_collection`, which sweeps across
+the handover on nearly every kept call and stares at the values only a suspended
+caller still names.
+
 ## What it does not do yet
 
 - **A counter fires once.** If the JIT declines, that loop is never asked about again.
@@ -121,10 +135,11 @@ ends, and machine code whose context was dropped is a dangling pointer.
   no argument against counting with one. The case only call counting can ever catch
   — a long straight-line body, no loop, called a great many times — remains real,
   uncaught, and unmeasured. But 151 ns is the wrong constant to design a policy
-  around, because it is three removable costs, so the slim re-entry comes first —
-  tables installed once per module, output drained only when something printed, the
-  root set borrowed rather than copied — and the policy gets designed against the
-  number that survives. Both numbers re-derive: the entry cost is
+  around, because it is three removable costs, so the slim re-entry came first —
+  all three are done, and the number that survived is 85 ns on a one-frame harness,
+  most of it the fresh frame's own allocation. A policy now gets designed against
+  that, and it still wants a body filter: 85 ns of entry against a 38 ns interpreted
+  leaf call still loses. Both numbers re-derive: the entry cost is
   `cost_of_one_kept_call` in `crates/luarust-jit/tests/call_cost.rs` (ignored, run
   by hand), and the 38 ns is the two programs in its module comment, on the plain
   VM, at N=3,000,000. For the routines the cache already keeps, the 151 ns sits

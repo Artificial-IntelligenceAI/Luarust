@@ -70,8 +70,10 @@ pub fn resume(
     started: Instant,
 ) {
     // Tables installed by hand belong to no kept module, so the next kept call must
-    // install its own rather than trust what a one-shot module left here.
+    // install its own rather than trust what a one-shot module left here. And a resumed
+    // run owns every frame it was handed, so nothing stays borrowed.
     INSTALLED.with(|token| token.set(0));
+    BORROWED.with(|callers| callers.borrow_mut().clear());
     OUTPUT.with(|out| out.borrow_mut().clear());
     STARTED.with(|at| *at.borrow_mut() = Some(started));
     CONSTANTS.with(|table| *table.borrow_mut() = constants);
@@ -88,15 +90,31 @@ thread_local! {
     static INSTALLED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    /// Frames borrowed from the caller that suspended itself to make a kept call — the
+    /// VM's own registers, read here only as collection roots and counted for depth.
+    /// Raw pointers, because a thread-local cannot name the caller's lifetime. They are
+    /// valid for exactly the span the caller spends blocked inside the call, which is
+    /// exactly the span they are installed for: set by [`reenter`], cleared by
+    /// [`retire`], and never survive either.
+    static BORROWED: RefCell<Vec<*const Vec<Value>>> = const { RefCell::new(Vec::new()) };
+}
+
 /// [`resume`], for a kept module that is entered over and over.
 ///
 /// `module` never being nought is the caller's business; a nought would alias the
 /// nothing-installed state and reinstall on every call, which is slow rather than wrong.
+///
+/// `open` is every frame the caller has, borrowed rather than copied: nothing here
+/// writes through them, compiled code cannot name a cell outside its own frame, and the
+/// caller is suspended for the whole call — so a copy would be paid for by every call
+/// and read by none. `fresh` is the callee's frame, which is written, so it is owned.
 pub fn reenter(
     module: u64,
     constants: &[Value],
     templates: &[Vec<Value>],
-    frames: Vec<Vec<Value>>,
+    open: &[&Vec<Value>],
+    fresh: Vec<Value>,
     started: Instant,
 ) {
     INSTALLED.with(|token| {
@@ -106,11 +124,27 @@ pub fn reenter(
             token.set(module);
         }
     });
+    BORROWED.with(|callers| {
+        let mut callers = callers.borrow_mut();
+        callers.clear();
+        callers.extend(open.iter().map(|frame| *frame as *const Vec<Value>));
+    });
     OUTPUT.with(|out| out.borrow_mut().clear());
     STARTED.with(|at| *at.borrow_mut() = Some(started));
     PENDING.with(|queue| queue.borrow_mut().clear());
     ANSWER.with(|slot| *slot.borrow_mut() = None);
-    FRAMES.with(|open| *open.borrow_mut() = frames);
+    FRAMES.with(|frames| {
+        let mut frames = frames.borrow_mut();
+        frames.clear();
+        frames.push(fresh);
+    });
+}
+
+/// Forget the borrowed frames, before the call they belong to returns.
+///
+/// After this, nothing anywhere holds the pointers [`reenter`] took.
+pub fn retire() {
+    BORROWED.with(|callers| callers.borrow_mut().clear());
 }
 
 /// What a register holds, as the bits a machine register would hold.
@@ -209,8 +243,10 @@ pub extern "C" fn cell_take_answer(dst: u64) {
 }
 
 /// How deep the frames go, so compiled code can stop where the other two paths stop.
+/// The borrowed frames are calls the caller has open, so they count.
 pub extern "C" fn call_depth() -> u64 {
-    FRAMES.with(|frames| frames.borrow().len() as u64)
+    let borrowed = BORROWED.with(|callers| callers.borrow().len() as u64);
+    borrowed + FRAMES.with(|frames| frames.borrow().len() as u64)
 }
 
 /// Copy one cell into another.
@@ -470,9 +506,16 @@ fn sweep_if_asked() {
     if !luarust_core::heap::wants_collecting() {
         return;
     }
-    FRAMES.with(|frames| {
-        let frames = frames.borrow();
-        luarust_core::heap::collect(frames.iter().flatten());
+    BORROWED.with(|callers| {
+        FRAMES.with(|frames| {
+            let callers = callers.borrow();
+            let frames = frames.borrow();
+            // SAFETY: the pointers were taken by `reenter` from references whose owner
+            // is suspended for the whole of the call, and they are cleared before it
+            // returns. Nothing writes through them; the collector only reads.
+            let roots = callers.iter().flat_map(|frame| unsafe { (**frame).iter() });
+            luarust_core::heap::collect(roots.chain(frames.iter().flatten()));
+        });
     });
 }
 

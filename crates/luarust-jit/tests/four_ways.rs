@@ -74,13 +74,14 @@ impl Tier for Eagerly {
         &mut self,
         _chunk: &Chunk,
         routine: usize,
-        frames: Vec<Vec<Value>>,
+        open: &[&Vec<Value>],
+        fresh: Vec<Value>,
         started: std::time::Instant,
         out: &mut dyn std::io::Write,
     ) -> Result<Option<Value>, luarust_core::value::Stopped> {
         self.served = true;
         let code = self.kept[routine].as_ref().expect("keeps said yes");
-        code.call(frames, started, out)
+        code.call(open, fresh, started, out)
     }
 }
 
@@ -147,6 +148,55 @@ fn four_ways_told(source: &str, after: u32) -> Eagerly {
         assert_eq!(ran.fault, walked.fault, "{name} ended differently\n\n{source}");
     }
     tier
+}
+
+#[test]
+fn kept_calls_survive_aggressive_collection() {
+    // The guard the borrowed root set was designed with, not after. Every kept call
+    // allocates enough to keep the collector sweeping across the handover, and the
+    // arrays only the suspended caller's frame still names — `keep`, and each call's
+    // answer — must come through every sweep untouched. A collector that dropped a
+    // borrowed root would not crash here; it would print the wrong numbers, which is
+    // exactly what the closing assertions are staring at.
+    let mut source = String::from(
+        "fn.local.i64 ['work'] [i64 'n'] {\n\
+         var.local.mut.array.i64 ['t'] = [filled[|60|, |0|]];\n\
+         var.local.mut.i64 ['s'] = [|0|];\n\
+         loop.temp.range.ui32 ['j'] = [|1|, |60|] {\n\
+         set ['t'['j']] = ['n'];\n\
+         set ['s'] = [math { 's' + 't'['j'] }];\n\
+         }\n\
+         return 's';\n\
+         }\n\
+         var.local.array.4.i64 ['keep'] = [[|11|, |22|, |33|, |44|]];\n",
+    );
+    for n in 1..=24 {
+        source.push_str(&format!("var.local.i64 ['a{n}'] = [work[|{n}|]];\n"));
+    }
+    source.push_str("print['keep'[|1|] \" \" 'keep'[|4|] \" \" 'a1' \" \" 'a24' \\n];\n");
+
+    let file = SourceFile::new("test.lr", source.as_str());
+    let lexed = luarust_lex::lex(&source);
+    assert!(lexed.ok(), "{}", luarust_diag::report(&file, &lexed.errors));
+    let parsed = luarust_parse::parse(&source, &lexed.tokens);
+    assert!(parsed.ok(), "{}", luarust_diag::report(&file, &parsed.errors));
+    let (program, errors) = luarust_check::check(&parsed.program);
+    assert!(errors.is_empty(), "{}", luarust_diag::report(&file, &errors));
+
+    let mut out = Vec::new();
+    luarust_interp::run(&program, &mut out).expect("the oracle runs it");
+    let walked = String::from_utf8_lossy(&out).into_owned();
+    assert_eq!(walked, "11 44 60 1440\n", "the oracle disagrees with arithmetic");
+
+    let mut chunk = luarust_vm::compile(&program);
+    chunk.engine = Engine::Hot;
+    chunk.collect = luarust_core::heap::Collect::Aggressive;
+    let mut tier =
+        Eagerly { after: 1, switched: false, inside: false, kept: Vec::new(), served: false };
+    let mut out = Vec::new();
+    luarust_vm::run_with(&chunk, &mut out, Some(&mut tier)).expect("the tiered run survives");
+    assert_eq!(String::from_utf8_lossy(&out), walked, "a sweep changed what was printed");
+    assert!(tier.served, "the calls were meant to land on kept code");
 }
 
 #[test]

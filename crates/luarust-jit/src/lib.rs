@@ -220,17 +220,24 @@ pub fn compile_routine(chunk: &Chunk, index: usize) -> Result<CompiledRoutine, D
 impl CompiledRoutine {
     /// Run one call on the kept machine code.
     ///
-    /// `frames` is every call the VM has open *plus* the fresh frame this call runs on,
-    /// outermost first — the root set a collection walks, and what the depth limit
-    /// counts, exactly as a resumed frame stack is. The heap is not cleared and the
-    /// clock is not restarted, for the same reason `resume` does neither.
+    /// `open` is every call the VM has open, outermost first, borrowed for the span of
+    /// this call — the root set a collection walks and what the depth limit counts —
+    /// and `fresh` is the frame the call runs on. The heap is not cleared and the clock
+    /// is not restarted, for the same reason `resume` does neither.
     pub fn call(
         &self,
-        frames: Vec<Vec<Value>>,
+        open: &[&Vec<Value>],
+        fresh: Vec<Value>,
         started: std::time::Instant,
         out: &mut dyn Write,
     ) -> Result<Option<Value>, Stopped> {
-        runtime::reenter(self.module, &self.constants, &self.templates, frames, started);
+        // The claim the borrow rests on is that nothing moves or resizes a caller's
+        // frame while its call is in flight. A collector bug here corrupts rather than
+        // crashes, so the claim is checked where checking is free.
+        #[cfg(debug_assertions)]
+        let watched: Vec<(*const Value, usize)> =
+            open.iter().map(|frame| (frame.as_ptr(), frame.len())).collect();
+        runtime::reenter(self.module, &self.constants, &self.templates, open, fresh, started);
         let (code, bits) = match self.answers.filter(|ty| !celled(*ty)) {
             // A machine answer comes back through a pointer, a celled one is left where
             // celled answers are always left — the two shapes `compile_and_run` has.
@@ -247,6 +254,14 @@ impl CompiledRoutine {
                 (unsafe { compiled() }, None)
             }
         };
+        runtime::retire();
+        #[cfg(debug_assertions)]
+        for (frame, (data, len)) in open.iter().zip(watched) {
+            debug_assert!(
+                std::ptr::eq(frame.as_ptr(), data) && frame.len() == len,
+                "a borrowed frame moved while its call was in flight"
+            );
+        }
         // Most calls print nothing, and an empty take costs nothing — it is the write
         // and the flush that were being paid for no output.
         let printed = runtime::taken();

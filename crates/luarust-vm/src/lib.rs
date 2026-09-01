@@ -94,18 +94,20 @@ pub trait Tier {
     /// it. Only ever asked after [`keeps`](Tier::keeps) said yes: a tier that keeps a
     /// routine answers every call of it, so there is no way to decline here.
     ///
-    /// `frames` is every call the VM has open plus the fresh frame this call would run
-    /// on, outermost first — the root set, and what the depth limit counts. The answer
-    /// is what the routine returned, exactly as [`Taken::Returned`] carries it.
+    /// `open` is every call the VM has open, outermost first, borrowed for exactly as
+    /// long as this call runs — with `fresh`, the frame the call runs on, they are the
+    /// root set and what the depth limit counts. The answer is what the routine
+    /// returned, exactly as [`Taken::Returned`] carries it.
     fn call(
         &mut self,
         chunk: &Chunk,
         routine: usize,
-        frames: Vec<Vec<Value>>,
+        open: &[&Vec<Value>],
+        fresh: Vec<Value>,
         started: Instant,
         out: &mut dyn Write,
     ) -> Result<Option<Value>, Stopped> {
-        let _ = (chunk, routine, frames, started, out);
+        let _ = (chunk, routine, open, fresh, started, out);
         unreachable!("the VM only asks about a routine `keeps` said it was keeping");
     }
 }
@@ -608,16 +610,16 @@ pub fn run_with(
             Step::Called { func, fresh, dst } => {
                 frames.last_mut().expect("a frame is always open").at = at;
                 // Machine code first, when some is being kept for this routine: the
-                // fresh frame is handed over on top of every open one, and the answer
-                // lands exactly where a `return` would have put it. The frame is never
-                // pushed, because the call never runs here.
+                // open frames are lent rather than copied — the VM is suspended right
+                // here until the call comes back — and the answer lands exactly where
+                // a `return` would have put it. The frame is never pushed, because the
+                // call never runs here.
                 if let Some(t) = tier.as_deref_mut()
                     && t.keeps(func)
                 {
-                    let mut open: Vec<Vec<Value>> =
-                        frames.iter().map(|frame| frame.registers.clone()).collect();
-                    open.push(fresh);
-                    let answer = t.call(chunk, func, open, started, out)?;
+                    let open: Vec<&Vec<Value>> =
+                        frames.iter().map(|frame| &frame.registers).collect();
+                    let answer = t.call(chunk, func, &open, fresh, started, out)?;
                     if let Some(answer) = answer {
                         let caller = frames.last_mut().expect("something called it");
                         caller.registers[dst as usize] = answer;

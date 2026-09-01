@@ -442,14 +442,15 @@ impl luarust_vm::Tier for Compiling {
         &mut self,
         _chunk: &luarust_vm::Chunk,
         routine: usize,
-        frames: Vec<Vec<luarust_core::value::Value>>,
+        open: &[&Vec<luarust_core::value::Value>],
+        fresh: Vec<luarust_core::value::Value>,
         started: std::time::Instant,
         out: &mut dyn std::io::Write,
     ) -> Result<Option<luarust_core::value::Value>, luarust_core::value::Stopped> {
         let Kept::Code(code) = &self.kept[routine] else {
             unreachable!("only asked about a routine `keeps` said yes to");
         };
-        code.call(frames, started, out)
+        code.call(open, fresh, started, out)
     }
 }
 

@@ -37,17 +37,19 @@ fn cost_of_one_kept_call() {
     let code = luarust_jit::compile_routine(&chunk, 0).expect("a leaf compiles");
     let started = std::time::Instant::now();
     let slots = chunk.funcs[0].registers;
-    // The same shape the VM hands over: the top level's frame, then the fresh one the
-    // call built, argument in slot nought.
-    let frame = |n: u64| {
+    // The same shape the VM hands over: the top level's frame lent, the fresh one the
+    // call built handed over, argument in slot nought.
+    let top = vec![luarust_core::value::Value::Bool(false); chunk.registers];
+    let open = [&top];
+    let fresh = |n: u64| {
         let mut fresh = vec![luarust_core::value::Value::Bool(false); slots];
         fresh[0] = luarust_core::value::Value::Num { ty: luarust_core::Ty::I64, bits: n };
-        vec![vec![luarust_core::value::Value::Bool(false); chunk.registers], fresh]
+        fresh
     };
 
     // Warm up, and insist on the right answer while at it.
     let mut out = Vec::new();
-    let answer = code.call(frame(5), started, &mut out).expect("it runs");
+    let answer = code.call(&open, fresh(5), started, &mut out).expect("it runs");
     assert_eq!(
         answer,
         Some(luarust_core::value::Value::Num { ty: luarust_core::Ty::I64, bits: 15 })
@@ -58,7 +60,7 @@ fn cost_of_one_kept_call() {
     let mut checksum = 0u64;
     for n in 1..=CALLS {
         let mut out = Vec::new();
-        let answer = code.call(frame(n), started, &mut out).expect("it runs");
+        let answer = code.call(&open, fresh(n), started, &mut out).expect("it runs");
         if let Some(luarust_core::value::Value::Num { bits, .. }) = answer {
             checksum = checksum.wrapping_add(bits);
         }
