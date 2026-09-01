@@ -58,6 +58,9 @@ pub enum Broken {
     Damaged,
     /// It asks for more registers than an instruction could ever name.
     TooManyRegisters { asked: u64, most: usize },
+    /// An instruction disagrees with its registers about what they hold — the claim the
+    /// checker proves about programs it compiles, demonstrated here by anything loaded.
+    Mistyped { at: u64, register: u64 },
 }
 
 impl std::fmt::Display for Broken {
@@ -82,6 +85,11 @@ impl std::fmt::Display for Broken {
             Broken::OutOfRange { what, index, of } => {
                 write!(f, "this chunk asks for {what} {index}, and there are {of}.")
             }
+            Broken::Mistyped { at, register } => write!(
+                f,
+                "instruction {at} of this chunk disagrees with register r{register} about \
+                 what it holds."
+            ),
             Broken::TooManyRegisters { asked, most } => write!(
                 f,
                 "this chunk asks for {asked} registers, and an instruction can name {most}."
@@ -632,6 +640,7 @@ pub fn read(bytes: &[u8]) -> Result<Loaded, Broken> {
     let chunk =
         Chunk { code, spans, consts, texts, registers, overflow, collect, floats, engine, division, funcs };
     check(&chunk)?;
+    crate::typed::well_typed(&chunk)?;
     Ok(Loaded { chunk, path, source })
 }
 
@@ -649,6 +658,10 @@ fn too_many(registers: usize) -> Result<(), Broken> {
 /// The VM indexes registers, constants, text and instructions without checking, because
 /// the compiler never produces an index that is wrong. A file from somewhere else has made
 /// no such promise, so this is where that promise is either kept or refused.
+///
+/// The types get the same treatment, one pass later: [`crate::typed::well_typed`] makes
+/// the whole chunk demonstrate that every instruction agrees with its registers, which is
+/// what lets the machine act on an instruction's word without looking at a tag.
 fn check(chunk: &Chunk) -> Result<(), Broken> {
     // How many registers a chunk says it wants, before a frame is made out of it.
     //

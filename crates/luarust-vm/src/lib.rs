@@ -18,6 +18,8 @@ pub mod chunk;
 #[cfg(feature = "compile")]
 pub mod compile;
 pub mod serialize;
+/// Whether a chunk's instructions agree with its registers, established at load.
+pub mod typed;
 
 pub use chunk::{Chunk, Op};
 #[cfg(feature = "compile")]

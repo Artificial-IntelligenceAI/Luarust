@@ -114,6 +114,10 @@ fn main() -> ExitCode {
 }
 
 fn act(path: PathBuf, then: Then, target: Option<&str>) -> ExitCode {
+    // Only the native path asks for a target, and a build without the JIT has no
+    // native path to hand it to.
+    #[cfg(not(feature = "jit"))]
+    let _ = target;
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(why) => {
