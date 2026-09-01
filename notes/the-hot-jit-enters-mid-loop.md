@@ -86,21 +86,39 @@ lands *behind* the entry, and everything the outer loop does is live. `blocks::r
 follows the graph rather than comparing instruction numbers, and `blocks.rs` has that case
 as a test.
 
+## Routines are kept
+
+A routine that goes hot is compiled twice: once in the resumed shape that serves the
+activation that tripped the counter, and once in the entered shape -- at instruction
+nought, on the fresh frame a call builds -- which is kept. Every later call the VM
+would have interpreted lands on the kept code instead: the VM asks `Tier::keeps`
+before pushing a frame, which costs a lookup, and hands the frames over only on a yes.
+The interpreted call and the kept one end identically because the answer comes back
+exactly as `Taken::Returned` carries it.
+
+Where that pays is the shape the resumed module cannot help: an outer loop below the
+threshold calling a routine whose inner loop is hot. The activation that trips is
+served once, and before keeping, every one of the thousands after it was interpreted:
+
+    5,000 calls, 12,000 iterations each      before 742 ms    kept 160 ms    whole 163 ms
+
+Parity with `"whole"`, still compiling two routines out of forty-one. The LLVM context
+behind each kept routine is leaked deliberately -- the cache lives until the program
+ends, and machine code whose context was dropped is a dangling pointer.
+
 ## What it does not do yet
 
-- **Compiled code is thrown away after the activation.** A counter fires once, the module
-  is built, one activation runs on it, and the module goes. So a routine that is hot
-  because it is *called* a great many times -- rather than because one call goes round a
-  great many times -- gains almost nothing: the one activation that tripped the counter
-  runs compiled and every later call is interpreted again. Caching compiled routines and
-  dispatching calls to them is the next step, and it is what the cumulative counter is
-  already measuring the right thing for.
 - **A counter fires once.** If the JIT declines, that loop is never asked about again.
+- **Nothing counts bare calls.** A leaf routine with no loop in it never trips any
+  counter however often it is called, so it is never kept. Counting calls as well as
+  back edges is the remaining half of "hot because it is called".
 
 ## Testing it
 
 `crates/luarust-jit/tests/four_ways.rs` runs a program on the interpreter, the VM, the
-whole-chunk JIT and the tiering engine, and insists all four agree. The threshold is a
+whole-chunk JIT and the tiering engine, and insists all four agree. Its tier keeps
+routines the way the CLI's does, so the sweeps also cover calls landing on kept code,
+and one test insists a kept routine actually served a call rather than merely existing. The threshold is a
 `Tier` method rather than a constant precisely so a test can set it to one -- at ten
 thousand no generated program would ever switch, and the point is to make the join happen
 in as many different places as possible. `twenty_thousand_agree_four_ways` is the deep

@@ -24,6 +24,12 @@ struct Eagerly {
     /// Whether any of it was a loop inside a routine, which is the harder handover: it
     /// comes back.
     inside: bool,
+    /// Machine code kept per routine once one goes hot, the way the CLI keeps it, so
+    /// these tests also cover a *call* landing on compiled code instead of the VM.
+    kept: Vec<Option<luarust_jit::CompiledRoutine>>,
+    /// Whether a kept routine actually served a call, so a test can insist the cache
+    /// was exercised rather than merely filled.
+    served: bool,
 }
 
 impl Tier for Eagerly {
@@ -44,12 +50,37 @@ impl Tier for Eagerly {
         if routine.is_some() {
             self.inside = true;
         }
+        if let Some(index) = routine {
+            if self.kept.is_empty() {
+                self.kept.resize_with(chunk.funcs.len(), || None);
+            }
+            if self.kept[index].is_none() {
+                self.kept[index] = luarust_jit::compile_routine(chunk, index).ok();
+            }
+        }
         let taken = match routine {
             None => luarust_jit::resume(chunk, at, frames, started, out).map(Taken::Finished),
             Some(index) => luarust_jit::resume_routine(chunk, index, at, frames, started, out)
                 .map(Taken::Returned),
         };
         taken.unwrap_or(Taken::Declined)
+    }
+
+    fn keeps(&self, routine: usize) -> bool {
+        self.kept.get(routine).is_some_and(Option::is_some)
+    }
+
+    fn call(
+        &mut self,
+        _chunk: &Chunk,
+        routine: usize,
+        frames: Vec<Vec<Value>>,
+        started: std::time::Instant,
+        out: &mut dyn std::io::Write,
+    ) -> Result<Option<Value>, luarust_core::value::Stopped> {
+        self.served = true;
+        let code = self.kept[routine].as_ref().expect("keeps said yes");
+        code.call(frames, started, out)
     }
 }
 
@@ -76,6 +107,12 @@ fn four_ways(source: &str, after: u32) -> bool {
 /// The same, saying both whether anything switched and whether any of it was inside a
 /// routine.
 fn four_ways_reporting(source: &str, after: u32) -> (bool, bool) {
+    let tier = four_ways_told(source, after);
+    (tier.switched, tier.inside)
+}
+
+/// The whole harness, handing the tier back for whatever a test wants to know of it.
+fn four_ways_told(source: &str, after: u32) -> Eagerly {
     let file = SourceFile::new("test.lr", source);
     let lexed = luarust_lex::lex(source);
     assert!(lexed.ok(), "{}", luarust_diag::report(&file, &lexed.errors));
@@ -98,7 +135,7 @@ fn four_ways_reporting(source: &str, after: u32) -> (bool, bool) {
     let outcome = luarust_jit::run(&chunk, &mut out).expect("the JIT takes every chunk");
     let compiled = ended(out, outcome);
 
-    let mut tier = Eagerly { after, switched: false, inside: false };
+    let mut tier = Eagerly { after, switched: false, inside: false, kept: Vec::new(), served: false };
     let mut out = Vec::new();
     let outcome = luarust_vm::run_with(&chunk, &mut out, Some(&mut tier));
     let tiered = ended(out, outcome);
@@ -109,7 +146,27 @@ fn four_ways_reporting(source: &str, after: u32) -> (bool, bool) {
         assert_eq!(ran.text, walked.text, "{name} printed something else\n\n{source}");
         assert_eq!(ran.fault, walked.fault, "{name} ended differently\n\n{source}");
     }
-    (tier.switched, tier.inside)
+    tier
+}
+
+#[test]
+fn a_call_after_the_hot_one_runs_on_kept_code() {
+    // The first call trips the routine's inner loop, which caches it; the second call
+    // is straight-line code with no back edge of its own between the two, so nothing
+    // can take the top level over first and the call must land on the kept code.
+    let source = "fn.local.i64 ['work'] [i64 'n'] {\n\
+                  var.local.mut.i64 ['s'] = [|0|];\n\
+                  loop.temp.range.i64 ['j'] = [|1|, |6|] {\n\
+                  set ['s'] = [math { ('s' + 'n') mod 1000000007 }];\n\
+                  }\n\
+                  return 's';\n\
+                  }\n\
+                  var.local.i64 ['a'] = [work[|5|]];\n\
+                  var.local.i64 ['b'] = [work[|7|]];\n\
+                  print['a' \" \" 'b' \\n];\n";
+    let tier = four_ways_told(source, 1);
+    assert!(tier.inside, "the first call was meant to go hot inside the routine");
+    assert!(tier.served, "the second call was meant to run on the kept code");
 }
 
 #[test]

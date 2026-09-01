@@ -81,6 +81,33 @@ pub trait Tier {
         started: Instant,
         out: &mut dyn Write,
     ) -> Taken;
+
+    /// Whether machine code for `routine` is being kept. Asked before every interpreted
+    /// call, so it has to cost a lookup and nothing more — the cloning a handover needs
+    /// only happens once this says yes.
+    fn keeps(&self, routine: usize) -> bool {
+        let _ = routine;
+        false
+    }
+
+    /// Run one call of `routine` on kept machine code, instead of the VM interpreting
+    /// it. Only ever asked after [`keeps`](Tier::keeps) said yes: a tier that keeps a
+    /// routine answers every call of it, so there is no way to decline here.
+    ///
+    /// `frames` is every call the VM has open plus the fresh frame this call would run
+    /// on, outermost first — the root set, and what the depth limit counts. The answer
+    /// is what the routine returned, exactly as [`Taken::Returned`] carries it.
+    fn call(
+        &mut self,
+        chunk: &Chunk,
+        routine: usize,
+        frames: Vec<Vec<Value>>,
+        started: Instant,
+        out: &mut dyn Write,
+    ) -> Result<Option<Value>, Stopped> {
+        let _ = (chunk, routine, frames, started, out);
+        unreachable!("the VM only asks about a routine `keeps` said it was keeping");
+    }
 }
 
 /// What a [`Tier`] did with a hot loop.
@@ -580,6 +607,23 @@ pub fn run_with(
         match step {
             Step::Called { func, fresh, dst } => {
                 frames.last_mut().expect("a frame is always open").at = at;
+                // Machine code first, when some is being kept for this routine: the
+                // fresh frame is handed over on top of every open one, and the answer
+                // lands exactly where a `return` would have put it. The frame is never
+                // pushed, because the call never runs here.
+                if let Some(t) = tier.as_deref_mut()
+                    && t.keeps(func)
+                {
+                    let mut open: Vec<Vec<Value>> =
+                        frames.iter().map(|frame| frame.registers.clone()).collect();
+                    open.push(fresh);
+                    let answer = t.call(chunk, func, open, started, out)?;
+                    if let Some(answer) = answer {
+                        let caller = frames.last_mut().expect("something called it");
+                        caller.registers[dst as usize] = answer;
+                    }
+                    continue 'activation;
+                }
                 frames.push(Frame { routine: Some(func), at: 0, registers: fresh, dst });
             }
             Step::Returned(answer) => {

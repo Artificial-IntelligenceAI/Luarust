@@ -162,6 +162,95 @@ pub fn resume_routine(
     }
 }
 
+/// A routine compiled once and kept, for every call after the one that made it hot.
+///
+/// [`resume_routine`] serves the activation that tripped the counter, and its module is
+/// gone when that activation returns — so a routine hot because it is *called* a great
+/// many times used to gain one compiled activation and nothing else. This is the other
+/// half: the same routine compiled to be entered rather than resumed — at instruction
+/// nought, on the fresh frame a call builds, which is a frame like any other the VM
+/// hands over — and held onto, so the millionth call runs the machine code the second
+/// one did.
+///
+/// The LLVM context is leaked, deliberately. The cache lives until the program ends,
+/// and machine code whose context was dropped is a dangling function pointer; a few
+/// hundred bytes per kept routine is the whole price.
+pub struct CompiledRoutine {
+    /// Never read, and load-bearing: dropping it unmaps the machine code `entry` names.
+    _engine: ExecutionEngine<'static>,
+    /// Where `luarust_main` landed in memory.
+    entry: usize,
+    constants: Vec<Value>,
+    templates: Vec<Vec<Value>>,
+    spans: Vec<Span>,
+    /// What the routine answers, when it answers anything.
+    answers: Option<Ty>,
+}
+
+/// Compile `index` for calling, to keep.
+pub fn compile_routine(chunk: &Chunk, index: usize) -> Result<CompiledRoutine, Declined> {
+    accepts(chunk)?;
+    let context: &'static Context = Box::leak(Box::new(Context::create()));
+    let module = context.create_module("luarust");
+    let engine = module
+        .create_jit_execution_engine(OptimizationLevel::Aggressive)
+        .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
+    let mut emitter = Emitter::new(context, &module, &engine, chunk, Entry::Routine { index, at: 0 });
+    emitter.emit(chunk, &module);
+    optimise(&module);
+    let entry = engine
+        .get_function_address("luarust_main")
+        .map_err(|why| Declined { because: format!("the compiled routine was lost: {why}") })?;
+    Ok(CompiledRoutine {
+        entry,
+        constants: std::mem::take(&mut emitter.constants),
+        templates: std::mem::take(&mut emitter.templates),
+        spans: std::mem::take(&mut emitter.spans),
+        answers: chunk.funcs[index].returns,
+        _engine: engine,
+    })
+}
+
+impl CompiledRoutine {
+    /// Run one call on the kept machine code.
+    ///
+    /// `frames` is every call the VM has open *plus* the fresh frame this call runs on,
+    /// outermost first — the root set a collection walks, and what the depth limit
+    /// counts, exactly as a resumed frame stack is. The heap is not cleared and the
+    /// clock is not restarted, for the same reason `resume` does neither.
+    pub fn call(
+        &self,
+        frames: Vec<Vec<Value>>,
+        started: std::time::Instant,
+        out: &mut dyn Write,
+    ) -> Result<Option<Value>, Stopped> {
+        runtime::resume(self.constants.clone(), frames, self.templates.clone(), started);
+        let (code, bits) = match self.answers.filter(|ty| !celled(*ty)) {
+            // A machine answer comes back through a pointer, a celled one is left where
+            // celled answers are always left — the two shapes `compile_and_run` has.
+            Some(_) => {
+                let compiled: unsafe extern "C" fn(*mut u64) -> i64 =
+                    unsafe { std::mem::transmute(self.entry) };
+                let mut bits: u64 = 0;
+                let code = unsafe { compiled(&mut bits) };
+                (code, Some(bits))
+            }
+            None => {
+                let compiled: unsafe extern "C" fn() -> i64 =
+                    unsafe { std::mem::transmute(self.entry) };
+                (unsafe { compiled() }, None)
+            }
+        };
+        let _ = out.write_all(&runtime::taken());
+        let _ = out.flush();
+        decode(code, &self.spans).map(|()| match (self.answers, bits) {
+            (None, _) => None,
+            (Some(ty), Some(bits)) => Some(runtime::held(ty, bits)),
+            (Some(_), None) => runtime::answer(),
+        })
+    }
+}
+
 /// How a compiled run ended, which depends only on where it was entered.
 enum Ended {
     Program(Result<(), Stopped>),

@@ -354,7 +354,7 @@ fn run_as_asked(
     }
     #[cfg(feature = "jit")]
     if chunk.engine == luarust_core::value::Engine::Hot {
-        let mut tier = Compiling;
+        let mut tier = Compiling { kept: Vec::new() };
         return luarust_vm::run_with(chunk, out, Some(&mut tier));
     }
     luarust_vm::run(chunk, out)
@@ -366,7 +366,22 @@ fn run_as_asked(
 /// the VM cannot reach the JIT without closing a dependency circle, and the JIT has no
 /// business driving the VM. A build with no compiler in it never constructs one.
 #[cfg(feature = "jit")]
-struct Compiling;
+struct Compiling {
+    /// What has been kept, or refused, per routine. Empty until the first loop goes hot,
+    /// since a program with no hot loop should pay nothing for a cache it never fills.
+    kept: Vec<Kept>,
+}
+
+/// One routine's standing with the cache.
+#[cfg(feature = "jit")]
+enum Kept {
+    /// Never gone hot, so never compiled.
+    Unasked,
+    /// Compiled and held; every later call of it runs here.
+    Code(luarust_jit::CompiledRoutine),
+    /// The JIT declined it once, which will not change by asking again.
+    Refused,
+}
 
 #[cfg(feature = "jit")]
 impl luarust_vm::Tier for Compiling {
@@ -379,6 +394,28 @@ impl luarust_vm::Tier for Compiling {
         started: std::time::Instant,
         out: &mut dyn std::io::Write,
     ) -> luarust_vm::Taken {
+        // A routine that went hot once will be called again — that is what hot means —
+        // so it is compiled for keeps as well as for this activation. The activation
+        // that tripped the counter is mid-loop and needs the resumed shape; every call
+        // after it enters at the top, on the kept one.
+        if let Some(index) = routine {
+            if self.kept.is_empty() {
+                self.kept.resize_with(chunk.funcs.len(), || Kept::Unasked);
+            }
+            if matches!(self.kept[index], Kept::Unasked) {
+                self.kept[index] = match luarust_jit::compile_routine(chunk, index) {
+                    Ok(code) => Kept::Code(code),
+                    Err(declined) => {
+                        eprintln!(
+                            "the JIT declined to keep this routine: {}. Its calls stay \
+                             on the VM.",
+                            declined.because
+                        );
+                        Kept::Refused
+                    }
+                };
+            }
+        }
         let taken = match routine {
             None => luarust_jit::resume(chunk, at, frames, started, out)
                 .map(luarust_vm::Taken::Finished),
@@ -395,6 +432,24 @@ impl luarust_vm::Tier for Compiling {
                 luarust_vm::Taken::Declined
             }
         }
+    }
+
+    fn keeps(&self, routine: usize) -> bool {
+        matches!(self.kept.get(routine), Some(Kept::Code(_)))
+    }
+
+    fn call(
+        &mut self,
+        _chunk: &luarust_vm::Chunk,
+        routine: usize,
+        frames: Vec<Vec<luarust_core::value::Value>>,
+        started: std::time::Instant,
+        out: &mut dyn std::io::Write,
+    ) -> Result<Option<luarust_core::value::Value>, luarust_core::value::Stopped> {
+        let Kept::Code(code) = &self.kept[routine] else {
+            unreachable!("only asked about a routine `keeps` said yes to");
+        };
+        code.call(frames, started, out)
     }
 }
 
