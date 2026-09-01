@@ -115,12 +115,20 @@ ends, and machine code whose context was dropped is a dangling pointer.
   is blocked on something else first. The VM makes a whole interpreted leaf call in
   38 ns; one call *into kept code* costs 151 ns before the body runs, because every
   call re-installs the module's constant and template tables, clones every open
-  frame for the root set, and round-trips the output buffer. Counting calls today
-  would compile leaves into code that runs them four times slower. The prerequisite
-  is a slim re-entry — tables installed once per module, the root set borrowed
-  rather than copied — and only then is a call-hotness policy worth designing. For
-  the routines the cache already keeps, the 151 ns sits under bodies that save
-  thousands, which is why it was never visible.
+  frame for the root set, and round-trips the output buffer. So a policy that
+  counted calls and kept everything hot would compile leaves into code that runs
+  them four times slower — which rules out counting *with no body filter*, and is
+  no argument against counting with one. The case only call counting can ever catch
+  — a long straight-line body, no loop, called a great many times — remains real,
+  uncaught, and unmeasured. But 151 ns is the wrong constant to design a policy
+  around, because it is three removable costs, so the slim re-entry comes first —
+  tables installed once per module, output drained only when something printed, the
+  root set borrowed rather than copied — and the policy gets designed against the
+  number that survives. Both numbers re-derive: the entry cost is
+  `cost_of_one_kept_call` in `crates/luarust-jit/tests/call_cost.rs` (ignored, run
+  by hand), and the 38 ns is the two programs in its module comment, on the plain
+  VM, at N=3,000,000. For the routines the cache already keeps, the 151 ns sits
+  under bodies that save thousands, which is why it was never visible.
 
 ## Testing it
 
