@@ -610,6 +610,15 @@ pub fn binary_op(
     division: Division,
 ) -> Answer<Value> {
     let plain = floored_binary_op(op, lhs, rhs, overflow, division)?;
+    // Almost nothing leans, and the test for it belongs here rather than behind a call.
+    // Only a remainder can, only under a convention `luarust-num` does not compute, and
+    // only for the families that compute it there -- integers settled quotient and
+    // remainder together at their own width and are already right. Left to `leaning`,
+    // this cost the tree-walker 8% on a loop with no remainder in it at all: it calls
+    // `binary_op` for every operation, where the VM's hot arms go straight to `int_op`.
+    if op != BinOp::Mod || division == Division::Floored || lhs.ty().is_integer() {
+        return Ok(plain);
+    }
     leaning(op, lhs, rhs, plain, overflow, division)
 }
 
@@ -628,6 +637,7 @@ pub fn binary_op(
 /// Which is why `luarust-num` needs no notion of this at all. Integers do their own,
 /// inside `int_op`, because there the quotient has to move with the remainder and both
 /// come out of one place; here `div` is exact division and has no quotient to correct.
+#[inline]
 fn leaning(
     op: BinOp,
     lhs: &Value,
