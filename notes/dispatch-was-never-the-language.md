@@ -125,6 +125,36 @@ Which is the honest correction to make: the rule is worth having because a chunk
 crashes the VM is a broken promise, not because it buys speed. It buys none. The `unsafe`
 that would have collected it is not written.
 
+## Afterwards: the array loop, and two more guesses that measured nothing
+
+The scalar parity this note's numbers led to was partly the benchmark's doing. The loop
+everything was measured on computes `(sum + i) mod 1000000007`, and a modulo dominates
+both machines and hides what is underneath. Take it out and Lua is 1.68 ns an iteration
+against 2.63 -- **1.56x**, not the 1.03x the division-bound loop reports. Measure a second
+shape before believing a headline; the same lesson the `ui64`-against-signed mix-up taught
+once already.
+
+The array loop was 4.04x. Two guesses at why -- the index arithmetic, then the shape
+lookups -- were both written, built and measured at 0.0%. Ablating the arm a piece at a
+time is what answered it:
+
+| the element read | ns |
+| --- | ---: |
+| as it stood | 10.42 |
+| with the index computation removed | 8.92 |
+| with the element load removed | 8.02 |
+| with the whole arm stubbed to a store | 6.18 |
+
+The last row is the finding: 6.18 ns with the array read gone entirely, against 2.63 for a
+plain add loop. `dis` said why -- a `move` copying the loop counter into a temp before
+every `array.at`, a whole dispatched instruction an element. And it is there on purpose:
+`compile::arguments` records that removing it makes the VM ten per cent faster and stops
+LLVM vectorising the compiled loop, worth thirteen times, tried and put back.
+
+So the chunk keeps it and `widen` fuses it away for the machine alone -- `Micro::AtOne`,
+one dimension, nothing else arriving at the `At` it swallows. **307.6 -> 200.9 ms, -34.7%**,
+and `tests/optimised.rs` still finds the vector unit.
+
 ## The standing answer
 
 C is not on the table for the VM. If it comes back it should come back for something C is
