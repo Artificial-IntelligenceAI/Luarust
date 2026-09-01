@@ -129,11 +129,11 @@ pub enum Taken {
 }
 
 /// One call in progress: where it is, what it is holding, and where its answer goes.
-struct Frame {
+struct Frame<F> {
     /// The function being run, or `None` for the top level.
     routine: Option<usize>,
     at: usize,
-    registers: Vec<Value>,
+    file: F,
     /// The register in the *caller* that receives the answer.
     dst: u16,
 }
@@ -257,34 +257,222 @@ fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>, fuse: bool) -> Vec<Mi
 /// `int_op` as a constant and the dispatch on it disappears into the code.
 macro_rules! int_arm {
     ($binop:expr, $ty:expr, $dst:expr, $lhs:expr, $rhs:expr,
-     $registers:expr, $spans:expr, $here:expr, $overflow:expr) => {{
-        let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
-            (&$registers[$lhs as usize], &$registers[$rhs as usize])
-        else {
+     $file:expr, $spans:expr, $here:expr, $overflow:expr) => {{
+        let (Some(a), Some(b)) = ($file.bits($lhs), $file.bits($rhs)) else {
             return Err(Stopped {
                 fault: not_as_described("this says it works on whole numbers"),
                 span: $spans[$here],
             });
         };
-        let bits = int_op($binop, $ty, *a, *b, $overflow)
+        let bits = int_op($binop, $ty, a, b, $overflow)
             .map_err(|fault| Stopped { fault, span: $spans[$here] })?;
-        // Written a field at a time when the slot already holds a number, which it
-        // almost always does: a whole-value write is a 16-byte vector store, and the
-        // narrow loads that read it back next instruction stall on x86-64 until it
-        // drains to cache — measured at 12x the matched-width cost on Zen 3, and the
-        // single largest reason the VM was slower there than the machine explains.
-        if let Value::Num { ty: t, bits: b } = &mut $registers[$dst as usize] {
-            *t = $ty;
+        $file.set_bits($dst, $ty, bits);
+    }};
+}
+
+/// One arrangement of a frame's registers.
+///
+/// Two live here. [`Boxed`] is a `Vec<Value>`, every register carrying its own tag —
+/// the arrangement the tier hands across a join, so a tiered run uses it. [`Split`]
+/// is the JIT's arrangement adopted: raw words for everything the opcode already
+/// types, `Value` cells only for what is genuinely heterogeneous — so moving an `i64`
+/// is a word, not a tagged sixteen-byte struct with drop glue. Both behind one loop,
+/// monomorphised twice, which is also what lets one binary measure them against each
+/// other; two builds of identical source differ by 8% on layout alone.
+///
+/// The `Option`s are the boxed tag check surviving as an interface: [`Split`] answers
+/// `Some` unconditionally — the typing pass refused, at load, every chunk that could
+/// make that wrong — and the compiler folds the branch out of that monomorphisation.
+trait File {
+    fn new(count: usize) -> Self;
+    /// The stored bits of a number-shaped register.
+    fn bits(&self, at: chunk::Reg) -> Option<u64>;
+    /// Write a number a field at a time: a whole-value write is a sixteen-byte store
+    /// that the next instruction's narrow load stalls on — 12x on Zen 3.
+    fn set_bits(&mut self, at: chunk::Reg, ty: Ty, bits: u64);
+    fn truth(&self, at: chunk::Reg) -> Option<bool>;
+    /// The array a register names.
+    fn handle(&self, at: chunk::Reg) -> Option<u32>;
+    /// An index or a length, read the loose way `offset` always has.
+    fn index(&self, at: chunk::Reg) -> i128;
+    /// The index at sixty-four bits, which is every width this language has. Holding an
+    /// unsigned value down at `i64::MAX` keeps the bounds comparison in one register —
+    /// past that is past the end of any array there could be, and the fault path reads
+    /// the real number again to report it.
+    fn index_word(&self, at: chunk::Reg) -> i64;
+    /// The whole value, for the paths that want one — built from the bits and the
+    /// instruction's type where the register is raw.
+    fn value(&self, at: chunk::Reg, ty: Ty) -> Value;
+    /// A value that says what it is, put where it belongs.
+    fn put(&mut self, at: chunk::Reg, value: Value);
+    /// One argument, caller's register to callee's, whatever it holds.
+    fn argument(&mut self, at: usize, from: &Self, src: usize);
+    /// Every root a collection must see.
+    fn roots(&self) -> impl Iterator<Item = &Value>;
+    /// The tier boundary speaks `Vec<Value>`, and only a boxed run reaches it.
+    fn lend(&self) -> &Vec<Value>;
+    fn into_values(self) -> Vec<Value>;
+}
+
+/// Every register a tagged [`Value`]. What the tier hands over, so tiered runs use it.
+struct Boxed(Vec<Value>);
+
+impl File for Boxed {
+    fn new(count: usize) -> Self {
+        // A register the checker has proved is written before it is read; the
+        // placeholder is never observed by a program that got this far.
+        Boxed(vec![Value::Bool(false); count])
+    }
+    fn bits(&self, at: chunk::Reg) -> Option<u64> {
+        match &self.0[at as usize] {
+            Value::Num { bits, .. } => Some(*bits),
+            _ => None,
+        }
+    }
+    fn set_bits(&mut self, at: chunk::Reg, ty: Ty, bits: u64) {
+        if let Value::Num { ty: t, bits: b } = &mut self.0[at as usize] {
+            *t = ty;
             *b = bits;
         } else {
-            $registers[$dst as usize] = Value::Num { ty: $ty, bits };
+            self.0[at as usize] = Value::Num { ty, bits };
         }
-    }};
+    }
+    fn truth(&self, at: chunk::Reg) -> Option<bool> {
+        truth(&self.0[at as usize])
+    }
+    fn handle(&self, at: chunk::Reg) -> Option<u32> {
+        handle_of(&self.0[at as usize])
+    }
+    fn index(&self, at: chunk::Reg) -> i128 {
+        self.0[at as usize].as_i128().unwrap_or(0)
+    }
+    fn index_word(&self, at: chunk::Reg) -> i64 {
+        match &self.0[at as usize] {
+            Value::Num { ty, bits } if ty.is_signed() => {
+                let shift = 64 - ty.int_bits().unwrap_or(64);
+                ((*bits << shift) as i64) >> shift
+            }
+            Value::Num { bits, .. } => (*bits).min(i64::MAX as u64) as i64,
+            _ => 0,
+        }
+    }
+    fn value(&self, at: chunk::Reg, _ty: Ty) -> Value {
+        self.0[at as usize].clone()
+    }
+    fn put(&mut self, at: chunk::Reg, value: Value) {
+        match (&mut self.0[at as usize], value) {
+            (Value::Num { ty: t, bits: b }, Value::Num { ty, bits }) => {
+                *t = ty;
+                *b = bits;
+            }
+            (slot, value) => *slot = value,
+        }
+    }
+    fn argument(&mut self, at: usize, from: &Self, src: usize) {
+        self.0[at] = from.0[src].clone();
+    }
+    fn roots(&self) -> impl Iterator<Item = &Value> {
+        self.0.iter()
+    }
+    fn lend(&self) -> &Vec<Value> {
+        &self.0
+    }
+    fn into_values(self) -> Vec<Value> {
+        self.0
+    }
+}
+
+/// Raw words beside cells: the JIT's split, adopted. The word is authoritative for
+/// everything `celled` says the opcode can type — integers, floats as their encodings,
+/// `bool`, array handles — and the cell beside it for everything else. Arrays sit in
+/// the cells although their handles are words, because the cells are the root set and
+/// an array is the one thing a collection must be able to see.
+struct Split {
+    raw: Vec<u64>,
+    /// Grown to size on the first celled write, and empty until then: most frames hold
+    /// nothing but words, and a call was paying a second allocation for a table of
+    /// placeholders nothing would read. A typed chunk never reads a cell it has not
+    /// written, so an empty table is only ever read by a root walk, which wants it
+    /// empty.
+    cells: Vec<Value>,
+}
+
+impl Split {
+    fn cells_now(&mut self) -> &mut Vec<Value> {
+        if self.cells.len() < self.raw.len() {
+            self.cells.resize(self.raw.len(), Value::Bool(false));
+        }
+        &mut self.cells
+    }
+}
+
+/// Whether a register of this type lives in the cells.
+fn celled(ty: Ty) -> bool {
+    matches!(ty, Ty::B128 | Ty::B256 | Ty::Str | Ty::Er | Ty::Array(_)) || ty.is_decimal()
+}
+
+impl File for Split {
+    fn new(count: usize) -> Self {
+        Split { raw: vec![0; count], cells: Vec::new() }
+    }
+    fn bits(&self, at: chunk::Reg) -> Option<u64> {
+        Some(self.raw[at as usize])
+    }
+    fn set_bits(&mut self, at: chunk::Reg, _ty: Ty, bits: u64) {
+        self.raw[at as usize] = bits;
+    }
+    fn truth(&self, at: chunk::Reg) -> Option<bool> {
+        Some(self.raw[at as usize] != 0)
+    }
+    fn handle(&self, at: chunk::Reg) -> Option<u32> {
+        handle_of(self.cells.get(at as usize)?)
+    }
+    fn index(&self, at: chunk::Reg) -> i128 {
+        i128::from(self.raw[at as usize])
+    }
+    fn index_word(&self, at: chunk::Reg) -> i64 {
+        // An index is `u32` by the checker's own rule, and a chunk demonstrated it.
+        self.raw[at as usize].min(i64::MAX as u64) as i64
+    }
+    fn value(&self, at: chunk::Reg, ty: Ty) -> Value {
+        if celled(ty) {
+            self.cells.get(at as usize).cloned().unwrap_or(Value::Bool(false))
+        } else if ty == Ty::Bool {
+            Value::Bool(self.raw[at as usize] != 0)
+        } else {
+            Value::Num { ty, bits: self.raw[at as usize] }
+        }
+    }
+    fn put(&mut self, at: chunk::Reg, value: Value) {
+        match value {
+            Value::Num { ty, bits } if !celled(ty) => self.raw[at as usize] = bits,
+            Value::Bool(answer) => self.raw[at as usize] = u64::from(answer),
+            value => self.cells_now()[at as usize] = value,
+        }
+    }
+    fn argument(&mut self, at: usize, from: &Self, src: usize) {
+        // Both sides, blindly: one of them is the argument and the other is nothing,
+        // and copying nothing is cheaper than deciding. A caller with no cells at all
+        // has no celled argument to hand over.
+        self.raw[at] = from.raw[src];
+        if let Some(value) = from.cells.get(src) {
+            self.cells_now()[at] = value.clone();
+        }
+    }
+    fn roots(&self) -> impl Iterator<Item = &Value> {
+        self.cells.iter()
+    }
+    fn lend(&self) -> &Vec<Value> {
+        unreachable!("only a tiered run lends frames, and a tiered run is boxed")
+    }
+    fn into_values(self) -> Vec<Value> {
+        unreachable!("only a tiered run hands frames over, and a tiered run is boxed")
+    }
 }
 
 /// Run a compiled chunk.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
-    run_with(chunk, out, None)
+    engine::<Split>(chunk, out, None, true)
 }
 
 /// Run a chunk, with something that may take its hot loops.
@@ -297,13 +485,28 @@ pub fn run_with(
     out: &mut impl Write,
     tier: Option<&mut dyn Tier>,
 ) -> Result<(), Stopped> {
-    run_widened(chunk, out, tier, true)
+    match tier {
+        // The tier boundary speaks Vec<Value>, so a tiered run keeps the boxed file.
+        Some(tier) => engine::<Boxed>(chunk, out, Some(tier), true),
+        None => engine::<Split>(chunk, out, None, true),
+    }
 }
 
-/// [`run_with`], saying whether loop tails are fused — one binary holding both
-/// arrangements is the only instrument that can compare them, since two builds of
-/// identical source have measured 8% apart on code layout alone.
+/// [`run_with`], saying whether loop tails are fused, on the boxed file — the fusion
+/// instrument, kept on one arrangement so it measures fusion and nothing else.
+#[cfg(all(test, feature = "compile"))]
 fn run_widened(
+    chunk: &Chunk,
+    out: &mut impl Write,
+    tier: Option<&mut dyn Tier>,
+    fuse: bool,
+) -> Result<(), Stopped> {
+    engine::<Boxed>(chunk, out, tier, fuse)
+}
+
+/// The machine itself, over either arrangement of the registers — one loop,
+/// monomorphised per [`File`], which is what lets one binary hold and measure both.
+fn engine<F: File>(
     chunk: &Chunk,
     out: &mut impl Write,
     mut tier: Option<&mut dyn Tier>,
@@ -316,15 +519,12 @@ fn run_widened(
     heap::set_threshold(chunk.collect.threshold());
     luarust_core::value::set_floats(chunk.floats);
     luarust_core::value::set_division(chunk.division);
-    // A register the checker has proved is written before it is read. The placeholder is
-    // never observed by a program that got this far.
-    let placeholder = Value::Bool(false);
     let started = Instant::now();
 
-    let mut frames: Vec<Frame> = vec![Frame {
+    let mut frames: Vec<Frame<F>> = vec![Frame {
         routine: None,
         at: 0,
-        registers: vec![placeholder.clone(); chunk.registers],
+        file: F::new(chunk.registers),
         dst: 0,
     }];
 
@@ -381,7 +581,7 @@ fn run_widened(
         // What ended the inner loop, decided while the registers are still borrowed and
         // acted on once they are not.
         let step = {
-            let registers = &mut frames.last_mut().expect("a frame is always open").registers;
+            let file = &mut frames.last_mut().expect("a frame is always open").file;
             loop {
                 let op = code[at];
                 // Where this instruction came from is only ever wanted when something
@@ -404,50 +604,40 @@ fn run_widened(
                 at = target as usize;
             }
             Micro::At { dst, array, at, rank, shape } => {
-                let Some(handle) = handle_of(&registers[array as usize]) else {
+                let Some(handle) = file.handle(array) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it indexes an array"),
                         span: spans[here],
                     });
                 };
-                let index = offset(shapes[shape as usize].dims(), handle, registers, at, rank)
+                let index = offset(shapes[shape as usize].dims(), handle, file, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 let held = heap::read(handle, index).ok_or_else(|| Stopped {
                     fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
                     span: spans[here],
                 })?;
-                // A field at a time, for the reason the arithmetic does it: an array of
-                // numbers read in a loop writes the same register every pass, and a
-                // whole-value write is a sixteen-byte store that the next instruction's
-                // narrow load waits on.
-                match (&mut registers[dst as usize], held) {
-                    (Value::Num { ty: t, bits: b }, Value::Num { ty, bits }) => {
-                        *t = ty;
-                        *b = bits;
-                    }
-                    (slot, held) => *slot = held,
-                }
+                // Put a field at a time, for the reason the arithmetic writes narrow: an
+                // array of numbers read in a loop writes the same register every pass.
+                file.put(dst, held);
             }
             Micro::Add { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+                int_arm!(BinOp::Add, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)
             }
             Micro::Sub { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Sub, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+                int_arm!(BinOp::Sub, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)
             }
             Micro::Mul { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Mul, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+                int_arm!(BinOp::Mul, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)
             }
             Micro::Div { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Div, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+                int_arm!(BinOp::Div, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)
             }
             Micro::Mod { ty, dst, lhs, rhs } => {
-                int_arm!(BinOp::Mod, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
+                int_arm!(BinOp::Mod, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)
             }
 
             Micro::Tail { ty, counter, limit, step } => {
-                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
-                    (&registers[counter as usize], &registers[limit as usize])
-                else {
+                let (Some(a), Some(b)) = (file.bits(counter), file.bits(limit)) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it compares whole numbers"),
                         span: spans[here],
@@ -458,7 +648,7 @@ fn run_widened(
                     at += 2;
                 } else {
                     int_arm!(
-                        BinOp::Add, ty, counter, counter, step, registers, spans, here,
+                        BinOp::Add, ty, counter, counter, step, file, spans, here,
                         chunk.overflow
                     );
                     // The jump back was left in the slot beside this one, unreachable
@@ -486,75 +676,63 @@ fn run_widened(
                         span: spans[here],
                     });
                 }
-                let mut fresh = vec![placeholder.clone(); chunk.funcs[func as usize].registers];
+                let mut fresh = F::new(chunk.funcs[func as usize].registers);
                 for n in 0..argc as usize {
-                    fresh[n] = registers[base as usize + n].clone();
+                    fresh.argument(n, file, base as usize + n);
                 }
                 break Step::Called { func: func as usize, fresh, dst };
             }
 
-            Op::Return { src, .. } => break Step::Returned(Some(registers[src as usize].clone())),
+            Op::Return { src, ty } => break Step::Returned(Some(file.value(src, ty))),
 
             Op::ReturnNothing => break Step::Returned(None),
 
             Op::Const { dst, konst } => {
-                registers[dst as usize] = chunk.consts[konst as usize].clone();
+                file.put(dst, chunk.consts[konst as usize].clone());
             }
 
-            Op::Move { dst, src, .. } => {
-                registers[dst as usize] = registers[src as usize].clone();
+            Op::Move { dst, src, ty } => {
+                let held = file.value(src, ty);
+                file.put(dst, held);
             }
 
             // Integers go straight to the arithmetic with their raw bits, since the
             // instruction already says what width they are. Everything else goes the long
             // way round, which for a b256 divide is nothing next to the divide.
             Op::Binary { op, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
-                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
-                    (&registers[lhs as usize], &registers[rhs as usize])
-                else {
-                    return Err(Stopped {
-                        fault: not_as_described("this says it works on whole numbers"),
-                        span: spans[here],
-                    });
-                };
-                let bits = int_op(op, ty, *a, *b, chunk.overflow)
-                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                registers[dst as usize] = Value::Num { ty, bits };
+                int_arm!(op, ty, dst, lhs, rhs, file, spans, here, chunk.overflow)
             }
 
-            Op::Binary { op, dst, lhs, rhs, .. } => {
+            Op::Binary { op, ty, dst, lhs, rhs, .. } => {
                 let value = binary_op(
                     op,
-                    &registers[lhs as usize],
-                    &registers[rhs as usize],
+                    &file.value(lhs, ty),
+                    &file.value(rhs, ty),
                     chunk.overflow,
                 )
                 .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                registers[dst as usize] = value;
+                file.put(dst, value);
             }
 
             Op::Compare { op, operands, dst, lhs, rhs } if operands.is_integer() => {
-                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
-                    (&registers[lhs as usize], &registers[rhs as usize])
-                else {
+                let (Some(a), Some(b)) = (file.bits(lhs), file.bits(rhs)) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it compares whole numbers"),
                         span: spans[here],
                     });
                 };
-                registers[dst as usize] =
-                    Value::Bool(holds(op, int_compare(operands, *a, *b)));
+                file.put(dst, Value::Bool(holds(op, int_compare(operands, a, b))));
             }
 
-            Op::Compare { op, dst, lhs, rhs, .. } => {
-                let ordering = compare(&registers[lhs as usize], &registers[rhs as usize]);
-                registers[dst as usize] = Value::Bool(holds(op, ordering));
+            Op::Compare { op, operands, dst, lhs, rhs } => {
+                let ordering = compare(&file.value(lhs, operands), &file.value(rhs, operands));
+                file.put(dst, Value::Bool(holds(op, ordering)));
             }
 
-            Op::Neg { dst, src, .. } => {
-                let value = negate(&registers[src as usize], chunk.overflow)
+            Op::Neg { dst, src, ty } => {
+                let value = negate(&file.value(src, ty), chunk.overflow)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                registers[dst as usize] = value;
+                file.put(dst, value);
             }
 
             Op::TimeNow { dst, ty } => {
@@ -571,7 +749,7 @@ fn run_widened(
                     &format!("{seconds:.9}"),
                 )
                 .expect("nine decimal places is a number");
-                registers[dst as usize] = Value::float(ty, bits);
+                file.put(dst, Value::float(ty, bits));
             }
 
             Op::PrintText { text } => {
@@ -579,17 +757,17 @@ fn run_widened(
                 let _ = out.flush();
             }
 
-            Op::PrintValue { src, .. } => {
-                let _ = out.write_all(registers[src as usize].to_string().as_bytes());
+            Op::PrintValue { src, ty } => {
+                let _ = out.write_all(file.value(src, ty).to_string().as_bytes());
                 let _ = out.flush();
             }
 
             Op::NewArray { dst, items, count, ty } => {
                 let of = ty.array().expect("a new array has an array type");
-                let held: Vec<Value> = (0..count as usize)
-                    .map(|n| registers[items as usize + n].clone())
+                let held: Vec<Value> = (0..count)
+                    .map(|n| file.value(items + n, of.element))
                     .collect();
-                registers[dst as usize] = heap::handle(ty, heap::of(of.element, &held));
+                file.put(dst, heap::handle(ty, heap::of(of.element, &held)));
                 if heap::wants_collecting() {
                     break Step::Collecting;
                 }
@@ -597,13 +775,12 @@ fn run_widened(
 
             Op::Filled { dst, length, value, ty } => {
                 let of = ty.array().expect("a filled array has an array type");
-                let count = registers[length as usize].as_i128().unwrap_or(0);
+                let count = file.index(length);
                 if count < 0 {
                     return Err(Stopped { fault: fewer_than_none(), span: spans[here] });
                 }
-                let fill = registers[value as usize].clone();
-                registers[dst as usize] =
-                    heap::handle(ty, heap::make(of.element, count as usize, &fill));
+                let fill = file.value(value, of.element);
+                file.put(dst, heap::handle(ty, heap::make(of.element, count as usize, &fill)));
                 if heap::wants_collecting() {
                     break Step::Collecting;
                 }
@@ -616,16 +793,16 @@ fn run_widened(
             Op::At { .. } => unreachable!("every `At` is widened"),
 
             Op::StoreAt { array, at, rank, value, ty } => {
-                let Some(handle) = handle_of(&registers[array as usize]) else {
+                let Some(handle) = file.handle(array) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it indexes an array"),
                         span: spans[here],
                     });
                 };
                 let shape = ty.array().expect("only an array is indexed");
-                let index = offset(shape.dims(), handle, registers, at, rank)
+                let index = offset(shape.dims(), handle, file, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                let held = registers[value as usize].clone();
+                let held = file.value(value, shape.element);
                 // The answer is not decoration. `offset` no longer checks the upper bound
                 // of an array that grows -- the heap knows the real length and is about to
                 // look anyway -- so this is where writing past the end is caught. It was
@@ -641,28 +818,27 @@ fn run_widened(
             }
 
             Op::Count { dst, array, ty } => {
-                let Some(handle) = handle_of(&registers[array as usize]) else {
+                let Some(handle) = file.handle(array) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it indexes an array"),
                         span: spans[here],
                     });
                 };
-                registers[dst as usize] =
-                    Value::Num { ty, bits: heap::length(handle) as u64 };
+                file.set_bits(dst, ty, heap::length(handle) as u64);
             }
 
             Op::Not { dst, src } => {
-                let Some(answer) = truth(&registers[src as usize]) else {
+                let Some(answer) = file.truth(src) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it negates a truth"),
                         span: spans[here],
                     });
                 };
-                registers[dst as usize] = Value::Bool(!answer);
+                file.put(dst, Value::Bool(!answer));
             }
 
             Op::JumpIfFalse { cond, target } => {
-                let Some(answer) = truth(&registers[cond as usize]) else {
+                let Some(answer) = file.truth(cond) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it branches on a truth"),
                         span: spans[here],
@@ -674,7 +850,7 @@ fn run_widened(
             }
 
             Op::JumpIfTrue { cond, target } => {
-                let Some(answer) = truth(&registers[cond as usize]) else {
+                let Some(answer) = file.truth(cond) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it branches on a truth"),
                         span: spans[here],
@@ -690,23 +866,19 @@ fn run_widened(
             // The whole point of the type being on the instruction: an integer
             // comparison is a machine comparison, not an inspection of two values.
             Op::JumpIfGreater { lhs, rhs, ty, target } if ty.is_integer() => {
-                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
-                    (&registers[lhs as usize], &registers[rhs as usize])
-                else {
+                let (Some(a), Some(b)) = (file.bits(lhs), file.bits(rhs)) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it compares whole numbers"),
                         span: spans[here],
                     });
                 };
-                if int_compare(ty, *a, *b) == Comparison::Greater {
+                if int_compare(ty, a, b) == Comparison::Greater {
                     at = target as usize;
                 }
             }
 
             Op::JumpIfEqual { lhs, rhs, ty, target } if ty.is_integer() => {
-                let (Value::Num { bits: a, .. }, Value::Num { bits: b, .. }) =
-                    (&registers[lhs as usize], &registers[rhs as usize])
-                else {
+                let (Some(a), Some(b)) = (file.bits(lhs), file.bits(rhs)) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it compares whole numbers"),
                         span: spans[here],
@@ -717,16 +889,16 @@ fn run_widened(
                 }
             }
 
-            Op::JumpIfGreater { lhs, rhs, target, .. } => {
-                if compare(&registers[lhs as usize], &registers[rhs as usize])
+            Op::JumpIfGreater { lhs, rhs, ty, target } => {
+                if compare(&file.value(lhs, ty), &file.value(rhs, ty))
                     == Comparison::Greater
                 {
                     at = target as usize;
                 }
             }
 
-            Op::JumpIfEqual { lhs, rhs, target, .. } => {
-                if compare(&registers[lhs as usize], &registers[rhs as usize])
+            Op::JumpIfEqual { lhs, rhs, ty, target } => {
+                if compare(&file.value(lhs, ty), &file.value(rhs, ty))
                     == Comparison::Equal
                 {
                     at = target as usize;
@@ -749,21 +921,21 @@ fn run_widened(
                     && t.keeps(func)
                 {
                     let open: Vec<&Vec<Value>> =
-                        frames.iter().map(|frame| &frame.registers).collect();
-                    let answer = t.call(chunk, func, &open, fresh, started, out)?;
+                        frames.iter().map(|frame| frame.file.lend()).collect();
+                    let answer = t.call(chunk, func, &open, fresh.into_values(), started, out)?;
                     if let Some(answer) = answer {
                         let caller = frames.last_mut().expect("something called it");
-                        caller.registers[dst as usize] = answer;
+                        caller.file.put(dst, answer);
                     }
                     continue 'activation;
                 }
-                frames.push(Frame { routine: Some(func), at: 0, registers: fresh, dst });
+                frames.push(Frame { routine: Some(func), at: 0, file: fresh, dst });
             }
             Step::Returned(answer) => {
                 let finished = frames.pop().expect("a frame is always open");
                 if let Some(answer) = answer {
                     let caller = frames.last_mut().expect("something called it");
-                    caller.registers[finished.dst as usize] = answer;
+                    caller.file.put(finished.dst, answer);
                 }
             }
             Step::Hot { target, counter } => {
@@ -775,7 +947,7 @@ fn run_widened(
                 // Every open call, outermost first. Cloned because compiled code is about
                 // to work on its own copy and the VM's is what it comes back to.
                 let open: Vec<Vec<Value>> =
-                    frames.iter().map(|frame| frame.registers.clone()).collect();
+                    frames.iter().map(|frame| frame.file.lend().clone()).collect();
                 match tier.hot(chunk, routine, target, open, started, out) {
                     Taken::Declined => {}
                     Taken::Finished(outcome) => return outcome,
@@ -786,17 +958,16 @@ fn run_widened(
                         let finished = frames.pop().expect("a frame is always open");
                         if let Some(answer) = answer {
                             let caller = frames.last_mut().expect("something called it");
-                            caller.registers[finished.dst as usize] = answer;
+                            caller.file.put(finished.dst, answer);
                         }
                     }
                 }
             }
             Step::Collecting => {
                 frames.last_mut().expect("a frame is always open").at = at;
-                // Every register of every frame is a root. A register the checker has
-                // proved is written before it is read may still hold the placeholder, and
-                // a `bool` is not a handle, so nothing false is kept alive by looking.
-                heap::collect(frames.iter().flat_map(|frame| frame.registers.iter()));
+                // Every root of every frame: the whole file where values carry tags, the
+                // cells alone where the words cannot be handles.
+                heap::collect(frames.iter().flat_map(|frame| frame.file.roots()));
             }
         }
         continue 'activation;
@@ -804,8 +975,8 @@ fn run_widened(
 }
 
 /// What ended a run of instructions: something that changes which frame is running.
-enum Step {
-    Called { func: usize, fresh: Vec<Value>, dst: u16 },
+enum Step<F> {
+    Called { func: usize, fresh: F, dst: u16 },
     Returned(Option<Value>),
     /// The heap has asked to be collected, which cannot happen in here: the roots are
     /// every frame's registers and this loop is holding one frame's borrowed.
@@ -835,10 +1006,10 @@ fn handle_of(value: &Value) -> Option<u32> {
 }
 
 /// Where an index lands, counted from one and flattened row by row.
-fn offset(
+fn offset<F: File>(
     dims: &[u32],
     handle: u32,
-    registers: &[Value],
+    file: &F,
     at: u16,
     rank: u8,
 ) -> Result<usize, Box<Fault>> {
@@ -850,17 +1021,7 @@ fn offset(
         // `as_i128`, and widening cost a match, a pair of 128-bit shifts and 128-bit
         // comparisons on every element read, to hold a number that never needed the room.
         // The same mistake as `Division::apply` made, in a hotter place.
-        let held: i64 = match &registers[at as usize + place] {
-            Value::Num { ty, bits } if ty.is_signed() => {
-                let shift = 64 - ty.int_bits().unwrap_or(64);
-                ((*bits << shift) as i64) >> shift
-            }
-            // An unsigned index past `i64::MAX` is past the end of any array there could
-            // be, so holding it down keeps the comparison in one register. The fault path
-            // reads the real value again to report it.
-            Value::Num { bits, .. } => (*bits).min(i64::MAX as u64) as i64,
-            _ => 0,
-        };
+        let held: i64 = file.index_word(at + place as u16);
         // A shaped array knows its bounds without asking. One that grows does not -- and
         // `heap::read` is about to check the index against the real length anyway, so
         // asking here as well meant two trips through the heap for every element read,
@@ -868,7 +1029,7 @@ fn offset(
         // small an index is still caught here, because that one nothing downstream sees.
         let past = (!dims.is_empty()).then(|| i64::from(dims[place]));
         if held < 1 || past.is_some_and(|past| held > past) {
-            let reported = registers[at as usize + place].as_i128().unwrap_or(0);
+            let reported = file.index(at + place as u16);
             return Err(out_of_range(
                 reported,
                 past.map_or_else(|| heap::length(handle) as i128, i128::from),
@@ -987,6 +1148,52 @@ mod sizes {
                 String::from_utf8_lossy(&fused),
                 String::from_utf8_lossy(&plain),
                 "the two arrangements printed differently\n\n{source}"
+            );
+        }
+    }
+
+    /// The other instrument: the two register files, timed from the one binary.
+    #[cfg(feature = "compile")]
+    #[test]
+    #[ignore = "a measurement, run by hand with --nocapture"]
+    fn files_split_against_boxed() {
+        let add = "var.local.mut.i64 ['sum'] = [|0|];\n\
+                   loop.temp.range.i64 ['i'] = [|1|, |30000000|] {\n\
+                   set ['sum'] = [math { 'sum' + 'i' }];\n\
+                   }\nprint['sum' \\n];\n";
+        let array = "var.local.mut.array.i64 ['xs'] = [filled[|64|, |7|]];\n\
+                     var.local.mut.i64 ['sum'] = [|0|];\n\
+                     loop.temp.range.ui32 ['i'] = [|1|, |30000000|] {\n\
+                     set ['sum'] = [math { 'sum' + 'xs'[math { (('i' - 1) mod 64) + 1 }] }];\n\
+                     }\nprint['sum' \\n];\n";
+        let calls = "fn.local.i64 ['leaf'] [i64 'n'] {\n\
+                     return math { ('n' * 3) mod 1000000007 };\n\
+                     }\n\
+                     var.local.mut.i64 ['sum'] = [|0|];\n\
+                     loop.temp.range.i64 ['i'] = [|1|, |3000000|] {\n\
+                     set ['sum'] = [math { ('sum' + leaf['i']) mod 1000000007 }];\n\
+                     }\nprint['sum' \\n];\n";
+        for (name, source, iterations) in
+            [("add", add, 30_000_000u64), ("array", array, 30_000_000), ("calls", calls, 3_000_000)]
+        {
+            let chunk = chunk_of(source);
+            let (mut split, mut boxed) = (u128::MAX, u128::MAX);
+            for _ in 0..6 {
+                let mut out = Vec::new();
+                let t0 = std::time::Instant::now();
+                crate::engine::<crate::Split>(&chunk, &mut out, None, true).expect("it runs");
+                split = split.min(t0.elapsed().as_nanos());
+                let mut out = Vec::new();
+                let t0 = std::time::Instant::now();
+                crate::engine::<crate::Boxed>(&chunk, &mut out, None, true).expect("it runs");
+                boxed = boxed.min(t0.elapsed().as_nanos());
+            }
+            println!(
+                "{name}: split {} ms, boxed {} ms ({:.2} against {:.2} ns an iteration)",
+                split / 1_000_000,
+                boxed / 1_000_000,
+                split as f64 / iterations as f64,
+                boxed as f64 / iterations as f64,
             );
         }
     }
