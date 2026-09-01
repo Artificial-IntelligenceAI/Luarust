@@ -1,0 +1,5 @@
+var.local.mut.ui64 ['sum'] = [|0|];
+loop.temp.range.ui64 ['i'] = [|1|, |ITERATIONS|] {
+    set ['sum'] = [math { ('sum' + 'i') mod 1000000007 }];
+}
+print['sum' \n];
