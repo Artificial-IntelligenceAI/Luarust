@@ -1,17 +1,18 @@
 # What GitHub counts as this repository's languages.
 #
-# Linguist works by file extension, so left alone it reports this as part JavaScript, part
-# Python, and — since the benchmark grew a C, a Java and a Go file — part all three of
-# those as well. None of that is what anybody wrote here. `bench/` holds the same loop in
-# six languages so the README's numbers can be re-derived by anyone, and the editor support
-# is JavaScript because that is what VS Code takes. Marking them keeps them in the
-# repository and out of the summary.
+# Linguist works by file extension, so `bench/` — the same loop written in six languages,
+# so that the README's numbers can be re-derived by anyone rather than believed — would
+# otherwise report this as part C, part Java, part Go and part Lua. Those files are
+# fixtures for a measurement, not work. Marked vendored: still in the repository, out of
+# the summary.
 bench/**     linguist-vendored
-editors/**   linguist-vendored
 
-# `.lr` is Luarust's own extension, and Linguist has never heard of it, so the eleven files
-# that are actually written *in the language this repository is for* count as nothing at
-# all. That stays true until Linguist learns the name, which takes the language being used
-# somewhere other than here. Naming them as Lua or Rust would make the bar look right by
-# saying something false about what they are, so they go on counting as nothing.
+# `editors/` is not marked. The VS Code extension is JavaScript, it was written here, and
+# it does the job the compiler cannot do from inside a terminal — so it counts.
+
+# `.lr` is Luarust's own extension, and Linguist has never heard of it, so the files
+# actually written *in the language this repository is for* count as nothing at all. That
+# stays true until Linguist learns the name, which wants the language used somewhere other
+# than here. Naming them as Lua or Rust would make the bar look right by saying something
+# false about what they are, so they go on counting as nothing.
 *.lr         text
