@@ -1,18 +1,19 @@
 # The hot JIT, and how it gets in
 
 `[run] mode = "hot"` interprets a program, counts how often each loop goes round, and when
-one passes ten thousand hands the whole thing to LLVM and jumps into the middle of that
-loop with the registers the VM was holding. That last part is on-stack replacement, and it
+one passes ten thousand compiles what that loop can reach and jumps into the middle of it
+with the registers the VM was holding. That last part is on-stack replacement, and it
 is the only part of a tiering engine that is genuinely hard: everything else is a counter.
 
-## Why it enters at a loop head and not at a function
+## Why it enters at a loop head and not only at a function
 
 Compiling hot *functions* is the ordinary design and it is simpler -- a function is entered
 afresh, so there is no running state to hand over. It would also do nothing at all for
 Luarust as people write it. The benchmark in the README is a loop at the top level, and so
 is most of what anybody writes in a small language: `main` is entered once, no counter ever
 trips, and a function-granularity hot JIT would sit there watching an interpreter run for
-an hour. So loops are counted, and the join happens in the middle of one.
+an hour. So loops are counted -- in the top level and inside routines both -- and the join
+happens in the middle of one.
 
 ## What made it small
 
@@ -47,15 +48,53 @@ the circle. So the VM takes a `Tier` and the CLI implements it -- which is also 
 `luarust-run` at a few hundred kilobytes. A runtime with no compiler in it installs no tier,
 never counts a back edge, and runs a chunk asking for `"hot"` on the VM without comment.
 
+## Loops inside routines
+
+These are counted too, and they are the harder handover, because this one comes back. The
+top level runs to the end of the program; a routine runs to its `return`, hands the answer
+over, and the VM pops the frame and carries on interpreting the call underneath, which
+never stopped waiting.
+
+Compiled code entered inside a routine puts that routine's body in `luarust_main` rather
+than in the function beside it, because it is entered from Rust and not from a call. It is
+given the answer pointer `Op::Return` already writes through, so the return path is the one
+that was there. No `cells_enter`: the frame is the live one the VM handed over, and
+entering a fresh one from a template would throw away the thing this came to continue.
+
+**Every open frame is handed over, not just the hot one.** They are the root set a
+collection inside compiled code walks, so leaving the callers out would free an array only
+a caller could still reach. They are also what `call_depth` counts, so a program that runs
+out of stack does so in the same place it would have on the VM.
+
+## Only what the loop can reach
+
+Every call names its target index and the language has no function pointers, so the set of
+routines a run can reach is exact rather than a guess. Asked from inside one particular
+loop, the answer is usually much smaller than the whole chunk -- and the instructions
+before the loop are usually unreachable too.
+
+    forty routines, none of them hot          whole 47.7 ms    hot  8.6 ms
+    forty routines, one called three million  whole  154 ms    hot  120 ms
+
+The second row is why this matters beyond startup: `"hot"` compiles one routine where
+`"whole"` compiles forty, so it wins outright on a program where only part of the code is
+worth compiling.
+
+"Before the entry" and "unreachable" are not the same thing, which is the one place this
+could have gone quietly wrong. Entering at an inner loop's head, the outer loop's back edge
+lands *behind* the entry, and everything the outer loop does is live. `blocks::reachable`
+follows the graph rather than comparing instruction numbers, and `blocks.rs` has that case
+as a test.
+
 ## What it does not do yet
 
-- **A hot loop inside a routine is not noticed.** Taking over the top level means running
-  to the end of the program and never coming back; taking over a routine means returning
-  into the middle of a call the VM is holding. Only the top level is counted, so nothing is
-  spent looking for something that cannot be acted on.
-- **It compiles the whole chunk**, every routine included, not just the loop that got hot.
-  The saving is that a program which never gets hot never pays LLVM at all -- not that a
-  program which does pays less.
+- **Compiled code is thrown away after the activation.** A counter fires once, the module
+  is built, one activation runs on it, and the module goes. So a routine that is hot
+  because it is *called* a great many times -- rather than because one call goes round a
+  great many times -- gains almost nothing: the one activation that tripped the counter
+  runs compiled and every later call is interpreted again. Caching compiled routines and
+  dispatching calls to them is the next step, and it is what the cumulative counter is
+  already measuring the right thing for.
 - **A counter fires once.** If the JIT declines, that loop is never asked about again.
 
 ## Testing it

@@ -59,6 +59,42 @@ pub fn terminates(op: &Op) -> bool {
     )
 }
 
+/// Which instructions can actually be reached from `entry`, and which routines called.
+///
+/// Starting a program reaches everything -- entry is nought and there is nowhere the flow
+/// has not been. Taking one over at a loop head does not: the code that ran before the
+/// loop cannot be reached again unless something jumps back to it, and a chunk's other
+/// routines are only worth compiling if this entry can reach a call to them.
+///
+/// Note that "before the entry" and "unreachable" are not the same thing. Entering at an
+/// inner loop's head, the outer loop's back edge jumps to a head that is *behind* the
+/// entry, and everything the outer loop does is live. Following the graph gets that right
+/// where comparing instruction numbers would not.
+pub fn reachable(code: &[Op], entry: usize) -> BTreeSet<usize> {
+    let mut seen = BTreeSet::new();
+    let mut todo = vec![entry];
+    while let Some(at) = todo.pop() {
+        if at >= code.len() || !seen.insert(at) {
+            continue;
+        }
+        let op = &code[at];
+        match op {
+            Op::Jump { target } => todo.push(*target as usize),
+            Op::JumpIfFalse { target, .. }
+            | Op::JumpIfTrue { target, .. }
+            | Op::JumpIfGreater { target, .. }
+            | Op::JumpIfEqual { target, .. } => {
+                todo.push(*target as usize);
+                todo.push(at + 1);
+            }
+            // Nothing carries on from these.
+            Op::Return { .. } | Op::ReturnNothing | Op::Halt => {}
+            _ => todo.push(at + 1),
+        }
+    }
+    seen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +129,39 @@ mod tests {
         //  1 jump 1     <- lands on itself
         let code = [Op::Halt, Op::Jump { target: 1 }];
         assert_eq!(leaders(&code), BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn everything_is_reachable_from_the_beginning() {
+        let code = [Op::Jump { target: 2 }, Op::Halt, Op::Halt];
+        // Not quite everything: instruction 1 is jumped over and nothing lands on it.
+        assert_eq!(reachable(&code, 0), BTreeSet::from([0, 2]));
+    }
+
+    #[test]
+    fn what_ran_before_the_entry_is_left_out() {
+        //  0 halt        <- before the entry, and nothing jumps back to it
+        //  1 jump 1      <- a loop on itself, entered here
+        let code = [Op::Halt, Op::Jump { target: 1 }];
+        assert_eq!(reachable(&code, 1), BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn an_enclosing_loop_is_reached_even_though_it_is_behind() {
+        // Coming in at the inner loop's head, the outer loop's back edge lands behind the
+        // entry -- and everything the outer loop does is live. Comparing instruction
+        // numbers would call this dead; following the graph does not.
+        //
+        //  0 halt          <- genuinely before it all
+        //  1 jump 3        <- the outer loop's head
+        //  2 jump 1        <- the outer back edge
+        //  3 jump 2        <- the inner loop, entered here
+        let code = [
+            Op::Halt,
+            Op::Jump { target: 3 },
+            Op::Jump { target: 1 },
+            Op::Jump { target: 2 },
+        ];
+        assert_eq!(reachable(&code, 3), BTreeSet::from([1, 2, 3]));
     }
 }

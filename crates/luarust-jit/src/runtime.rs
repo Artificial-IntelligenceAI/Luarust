@@ -50,27 +50,22 @@ thread_local! {
 /// Set on a cell number that means a constant rather than an offset into a frame.
 pub const CONSTANT: u64 = 1 << 63;
 
-/// Begin a run: forget the last one's arrays and output, restart the clock, and lay out
-/// the cells.
+/// Lay out the cells and start the clock, for a program starting or being taken over.
 ///
-/// The heap goes with the rest. The interpreter and the VM each forget it when they
-/// start, and a path that did not would inherit whatever the last one left -- which is
-/// exactly what happens in `luarust fuzz`, where all three run in the one process.
-pub fn begin(constants: Vec<Value>, main_frame: Vec<Value>, templates: Vec<Vec<Value>>) {
-    luarust_core::heap::clear();
-    resume(constants, main_frame, templates, Instant::now());
-}
-
-/// Take over a program that is already running.
+/// The heap is *not* touched here. A program starting forgets the last run's arrays before
+/// it gets this far -- the interpreter and the VM each do the same, and a path that did not
+/// would inherit whatever the last one left, which is exactly what happens in
+/// `luarust fuzz` where all three run in the one process. A program being taken over must
+/// keep them, because they are its own and it is still using them.
 ///
-/// Everything [`begin`] does except the two things that would be lies here. The heap is
-/// left alone, because by now it holds arrays the VM made and the program is still using
-/// them. And the clock is handed in rather than started, because the program started when
-/// it started -- a `time` that reset itself the moment a loop got hot would be reporting
-/// on the compiler rather than on the program.
+/// `frames` is every call the VM has open, outermost first. All of them and not just the
+/// one being taken over: they are the root set a collection inside compiled code walks, so
+/// leaving the callers out would free an array only a caller could still reach. They are
+/// also what `call_depth` counts, so a program that runs out of stack does so in the same
+/// place it would have on the VM.
 pub fn resume(
     constants: Vec<Value>,
-    main_frame: Vec<Value>,
+    frames: Vec<Vec<Value>>,
     templates: Vec<Vec<Value>>,
     started: Instant,
 ) {
@@ -80,7 +75,7 @@ pub fn resume(
     TEMPLATES.with(|table| *table.borrow_mut() = templates);
     PENDING.with(|queue| queue.borrow_mut().clear());
     ANSWER.with(|slot| *slot.borrow_mut() = None);
-    FRAMES.with(|frames| *frames.borrow_mut() = vec![main_frame]);
+    FRAMES.with(|open| *open.borrow_mut() = frames);
 }
 
 /// What a register holds, as the bits a machine register would hold.
@@ -154,6 +149,22 @@ pub extern "C" fn cells_leave() {
     FRAMES.with(|frames| {
         frames.borrow_mut().pop();
     });
+}
+
+/// A machine value, as the `Value` the VM holds. The one place the two shapes meet.
+pub(crate) fn held(ty: Ty, bits: u64) -> Value {
+    match ty {
+        Ty::Bool => Value::Bool(bits != 0),
+        ty => Value::Num { ty, bits },
+    }
+}
+
+/// The answer a routine left, for a caller on the Rust side rather than a compiled one.
+///
+/// Only ever used when compiled code was entered inside a routine and has just run it to
+/// its return: the VM is the caller, and this is how the value reaches it.
+pub fn answer() -> Option<Value> {
+    ANSWER.with(|slot| slot.borrow_mut().take())
 }
 
 /// Take the answer a call left, into a cell of the frame that asked for it.
@@ -284,7 +295,7 @@ fn untag(tag: u32) -> Ty {
 }
 
 /// Rebuild a value from the bits compiled code was holding it in.
-fn value_of(tag: u32, bits: u64) -> Value {
+pub(crate) fn value_of(tag: u32, bits: u64) -> Value {
     match untag(tag) {
         Ty::Bool => Value::Bool(bits != 0),
         ty => Value::Num { ty, bits },

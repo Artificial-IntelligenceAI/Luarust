@@ -761,21 +761,27 @@ buys several times the speed for the rest of the day. Neither is the development
 and the other the real one.
 
 `"hot"` is the one that does not need to be told which it is. It interprets, counts how
-often each loop goes round, and when one passes ten thousand it compiles the program and
-**jumps into the middle of that loop** with the registers the VM was holding. Two programs,
-the same command and the same file — one that adds up to a hundred, one that goes round
-twenty million times:
+often each loop goes round, and when one passes ten thousand it compiles **what that loop
+can reach** and jumps into the middle of it with the registers the VM was holding. Four
+programs, the same command and the same file:
 
-| | adds up to 100 | twenty million iterations |
-|---|---|---|
-| `mode = "vm"` | 4.4 ms | 221 ms |
-| `mode = "whole"` | 6.6 ms | 52 ms |
-| `mode = "hot"` | 4.5 ms | 67 ms |
+| | `mode = "vm"` | `mode = "whole"` | `mode = "hot"` |
+|---|---|---|---|
+| adds up to 100 | 4.7 ms | 6.7 ms | **4.6 ms** |
+| twenty million iterations | 214 ms | **52 ms** | 63 ms |
+| forty routines, none of them hot | 4.8 ms | 47.7 ms | **8.6 ms** |
+| forty routines, one called three million times | 525 ms | 154 ms | **120 ms** |
 
-It costs what the VM costs when nothing is worth compiling, and lands near the whole-chunk
-JIT when something is. The 4.4 ms is a process starting, a file being lexed, parsed,
-checked and compiled to bytecode; `"whole"` pays LLVM on top of it for a loop of a hundred,
-and `"hot"` never asks.
+It costs what the VM costs when nothing is worth compiling, and beats compiling everything
+when only part of a program is worth it. The 4.7 ms is a process starting and a file being
+lexed, parsed, checked and compiled to bytecode; `"whole"` pays LLVM on top of that for a
+loop of a hundred, and `"hot"` never asks.
+
+The last two rows are the same forty routines. `"whole"` compiles all of them because the
+program might call any; `"hot"` is asked from inside one particular loop, and every call
+names its target, so it compiles the one routine that loop reaches and leaves the other
+thirty-nine alone. On the third row the hot loop calls nothing at all, and the entire
+compile is thirty-nine routines that no longer happen.
 
 It is a **preference, not an instruction**. `luarust-run` has no JIT linked into it and is
 not meant to, so a chunk asking for `"whole"` or `"hot"` runs on the VM there and says

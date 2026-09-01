@@ -373,13 +373,20 @@ impl luarust_vm::Tier for Compiling {
     fn hot(
         &mut self,
         chunk: &luarust_vm::Chunk,
+        routine: Option<usize>,
         at: usize,
-        registers: &[luarust_core::value::Value],
+        frames: Vec<Vec<luarust_core::value::Value>>,
         started: std::time::Instant,
         out: &mut dyn std::io::Write,
     ) -> luarust_vm::Taken {
-        match luarust_jit::resume(chunk, at, registers, started, out) {
-            Ok(outcome) => luarust_vm::Taken::Finished(outcome),
+        let taken = match routine {
+            None => luarust_jit::resume(chunk, at, frames, started, out)
+                .map(luarust_vm::Taken::Finished),
+            Some(index) => luarust_jit::resume_routine(chunk, index, at, frames, started, out)
+                .map(luarust_vm::Taken::Returned),
+        };
+        match taken {
+            Ok(taken) => taken,
             Err(declined) => {
                 eprintln!(
                     "the JIT declined this loop: {}. Carrying on with the VM.",

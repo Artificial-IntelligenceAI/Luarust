@@ -54,6 +54,35 @@ pub fn accepts(_chunk: &Chunk) -> Result<(), Declined> {
     Ok(())
 }
 
+/// Where compiled code is entered, which is the whole of what tiering adds to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// The beginning of the program. Nothing is live, because nothing has run.
+    Start,
+    /// An instruction in the top level, with everything before it already done. Running
+    /// from here reaches the end of the program and does not come back.
+    Top(usize),
+    /// An instruction in a routine the VM is part way through. Running from here reaches
+    /// that routine's return, and the VM carries on from the call.
+    Routine { index: usize, at: usize },
+}
+
+impl Entry {
+    /// The instruction compiled code starts at.
+    fn at(self) -> usize {
+        match self {
+            Entry::Start => 0,
+            Entry::Top(at) | Entry::Routine { at, .. } => at,
+        }
+    }
+
+    /// Whether anything was already running when this was entered, and so whether the
+    /// registers have to be carried in.
+    fn carries(self) -> bool {
+        self != Entry::Start
+    }
+}
+
 /// Whether a value of this type can live in a register, or has to live in a cell.
 fn celled(ty: Ty) -> bool {
     // `bool` used to be one of these. It stopped being one when comparisons arrived and
@@ -82,52 +111,76 @@ fn celled(ty: Ty) -> bool {
 /// differently still produce the same answers, which is what `luarust fuzz` checks on
 /// every program it writes.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<Result<(), Stopped>, Declined> {
-    accepts(chunk)?;
     luarust_core::heap::set_threshold(chunk.collect.threshold());
     luarust_core::value::set_floats(chunk.floats);
-
-    let context = Context::create();
-    let module = context.create_module("luarust");
-    let engine = module
-        .create_jit_execution_engine(OptimizationLevel::Aggressive)
-        .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
-
-    let mut emitter = Emitter::new(&context, &module, &engine, chunk);
-    emitter.emit(chunk, &module);
-    optimise(&module);
-    let spans = std::mem::take(&mut emitter.spans);
-
-    let compiled = unsafe {
-        engine
-            .get_function::<unsafe extern "C" fn() -> i64>("luarust_main")
-            .map_err(|why| Declined { because: format!("the compiled program was lost: {why}") })?
-    };
-
-    runtime::begin(emitter.constants, emitter.main_frame, emitter.templates);
-    let outcome = unsafe { compiled.call() };
-    let _ = out.write_all(&runtime::taken());
-    let _ = out.flush();
-
-    Ok(decode(outcome, &spans))
+    // A run starts with nothing, the way it does on the other two paths.
+    luarust_core::heap::clear();
+    match compile_and_run(chunk, Entry::Start, Vec::new(), std::time::Instant::now(), out)? {
+        Ended::Program(outcome) => Ok(outcome),
+        Ended::Routine(_) => unreachable!("the top level does not return"),
+    }
 }
 
-/// Take over a program the VM has been running, from the head of a loop.
+/// Take over a program the VM has been running, from the head of a loop in the top level.
 ///
-/// The whole program is compiled -- everything the top level goes on to do, and every
-/// routine it might call -- and then entered at `at` rather than at the beginning, with
-/// the registers the VM was holding. From there compiled code runs to the end, so nothing
-/// comes back: entering at a loop head means running the loop's own exit and everything
-/// after it.
+/// Entered at `at` rather than at the beginning, with the registers the VM was holding.
+/// From there compiled code runs to the end, so nothing comes back: entering at a loop
+/// head means running the loop's own exit and everything after it, and the top level's
+/// end is the program's end.
 ///
 /// The heap is not cleared and the clock is not restarted. Both belong to the program,
 /// which has been running for a while by the time anything gets here.
 pub fn resume(
     chunk: &Chunk,
     at: usize,
-    registers: &[Value],
+    frames: Vec<Vec<Value>>,
     started: std::time::Instant,
     out: &mut dyn Write,
 ) -> Result<Result<(), Stopped>, Declined> {
+    match compile_and_run(chunk, Entry::Top(at), frames, started, out)? {
+        Ended::Program(outcome) => Ok(outcome),
+        Ended::Routine(_) => unreachable!("the top level does not return"),
+    }
+}
+
+/// Take over a routine the VM is part way through, from the head of a loop inside it.
+///
+/// Unlike the top level, this comes back. Compiled code runs the routine to its return
+/// and hands the answer over; the VM pops the frame and carries on interpreting the call
+/// that made it, which is still sitting there underneath.
+pub fn resume_routine(
+    chunk: &Chunk,
+    index: usize,
+    at: usize,
+    frames: Vec<Vec<Value>>,
+    started: std::time::Instant,
+    out: &mut dyn Write,
+) -> Result<Result<Option<Value>, Stopped>, Declined> {
+    match compile_and_run(chunk, Entry::Routine { index, at }, frames, started, out)? {
+        Ended::Routine(outcome) => Ok(outcome),
+        Ended::Program(_) => unreachable!("a routine returns"),
+    }
+}
+
+/// How a compiled run ended, which depends only on where it was entered.
+enum Ended {
+    Program(Result<(), Stopped>),
+    Routine(Result<Option<Value>, Stopped>),
+}
+
+/// Compile a module for one entry point and run it.
+///
+/// The one place LLVM is asked for anything, so that starting a program and taking one
+/// over cannot drift apart in how they set the world up. `frames` is empty for a program
+/// being started, where the emitter's own laid-out frame is the right one, and is every
+/// call the VM has open for a program being taken over.
+fn compile_and_run(
+    chunk: &Chunk,
+    entry: Entry,
+    frames: Vec<Vec<Value>>,
+    started: std::time::Instant,
+    out: &mut dyn Write,
+) -> Result<Ended, Declined> {
     accepts(chunk)?;
 
     let context = Context::create();
@@ -136,26 +189,62 @@ pub fn resume(
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
 
-    let mut emitter = Emitter::new(&context, &module, &engine, chunk);
-    emitter.entry_at = at;
+    let mut emitter = Emitter::new(&context, &module, &engine, chunk, entry);
     emitter.emit(chunk, &module);
     optimise(&module);
     let spans = std::mem::take(&mut emitter.spans);
 
-    let compiled = unsafe {
-        engine
-            .get_function::<unsafe extern "C" fn() -> i64>("luarust_main")
-            .map_err(|why| Declined { because: format!("the compiled program was lost: {why}") })?
+    // The frames the VM was filling in, not the empty one the emitter laid out: those are
+    // the values the loop is going round with. All of them, because they are the root set.
+    let frames = if frames.is_empty() { vec![emitter.main_frame] } else { frames };
+    let answers = match entry {
+        Entry::Routine { index, .. } => chunk.funcs[index].returns,
+        _ => None,
     };
 
-    // The frame the VM was filling in, not the empty one the emitter laid out: these are
-    // the values the loop is going round with.
-    runtime::resume(emitter.constants, registers.to_vec(), emitter.templates, started);
-    let outcome = unsafe { compiled.call() };
+    let outcome = match answers.filter(|ty| !celled(*ty)) {
+        // A routine whose answer is a machine value writes it through a pointer, the same
+        // way it does when a compiled caller asks. Anything celled is left where a celled
+        // answer is always left, and read from there.
+        Some(_) => {
+            let compiled = unsafe {
+                engine
+                    .get_function::<unsafe extern "C" fn(*mut u64) -> i64>("luarust_main")
+                    .map_err(|why| Declined {
+                        because: format!("the compiled program was lost: {why}"),
+                    })?
+            };
+            let mut bits: u64 = 0;
+            runtime::resume(emitter.constants, frames, emitter.templates, started);
+            let code = unsafe { compiled.call(&mut bits) };
+            (code, Some(bits))
+        }
+        None => {
+            let compiled = unsafe {
+                engine
+                    .get_function::<unsafe extern "C" fn() -> i64>("luarust_main")
+                    .map_err(|why| Declined {
+                        because: format!("the compiled program was lost: {why}"),
+                    })?
+            };
+            runtime::resume(emitter.constants, frames, emitter.templates, started);
+            (unsafe { compiled.call() }, None)
+        }
+    };
+    let (code, bits) = outcome;
     let _ = out.write_all(&runtime::taken());
     let _ = out.flush();
 
-    Ok(decode(outcome, &spans))
+    let ended = decode(code, &spans);
+    Ok(match entry {
+        Entry::Routine { .. } => Ended::Routine(ended.map(|()| match (answers, bits) {
+            (None, _) => None,
+            (Some(ty), Some(bits)) => Some(runtime::held(ty, bits)),
+            // Celled, and left where every celled answer is left.
+            (Some(_), None) => runtime::answer(),
+        })),
+        _ => Ended::Program(ended),
+    })
 }
 
 /// The LLVM IR, for looking at.
@@ -166,7 +255,7 @@ pub fn emit_ir(chunk: &Chunk) -> Result<String, Declined> {
     let engine = module
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(|why| Declined { because: format!("LLVM would not start: {why}") })?;
-    let mut emitter = Emitter::new(&context, &module, &engine, chunk);
+    let mut emitter = Emitter::new(&context, &module, &engine, chunk, Entry::Start);
     emitter.emit(chunk, &module);
     // Optimised, because that is what actually runs. `dis` is where the unoptimised
     // shape of a program is on show.
@@ -323,9 +412,8 @@ struct Emitter<'ctx> {
     spans: Vec<Span>,
     overflow: Overflow,
     division: Division,
-    /// Which instruction the top level is entered at. Nought for a program being started,
-    /// and a loop's first instruction for one the VM has been running and handed over.
-    entry_at: usize,
+    /// Where this module is entered.
+    entry: Entry,
     helpers: Helpers<'ctx>,
 }
 
@@ -367,6 +455,7 @@ impl<'ctx> Emitter<'ctx> {
         module: &Module<'ctx>,
         engine: &ExecutionEngine<'ctx>,
         chunk: &Chunk,
+        entry: Entry,
     ) -> Self {
         let i64_t = context.i64_type();
         let i32_t = context.i32_type();
@@ -572,15 +661,32 @@ impl<'ctx> Emitter<'ctx> {
             module.add_function("luarust_cell_bits", i64_t.fn_type(&[i64_t.into()], false), None);
         engine.add_global_mapping(&cell_bits, runtime::cell_bits as *const () as usize);
 
-        let main = module.add_function("luarust_main", i64_t.fn_type(&[], false), None);
-        let entry = context.append_basic_block(main, "entry");
+        // Entered inside a routine, `main` *is* that routine: same code, same registers,
+        // same way of handing an answer back -- a pointer to write it through, which is
+        // exactly what `Op::Return` already stores into. The difference is where it
+        // starts and that its frame is the live one rather than a fresh one.
+        let answers = match entry {
+            Entry::Routine { index, .. } => {
+                chunk.funcs[index].returns.is_some_and(|ty| !celled(ty))
+            }
+            _ => false,
+        };
+        let signature =
+            if answers { i64_t.fn_type(&[ptr_t.into()], false) } else { i64_t.fn_type(&[], false) };
+        let main = module.add_function("luarust_main", signature, None);
+        let block = context.append_basic_block(main, "entry");
         let builder = context.create_builder();
-        builder.position_at_end(entry);
+        builder.position_at_end(block);
+
+        let holding = match entry {
+            Entry::Routine { index, .. } => chunk.funcs[index].registers,
+            _ => chunk.registers,
+        };
 
         // Every VM register gets its own stack slot. LLVM keeps the ones that deserve it
         // in real registers, which is the pass this arrangement exists to feed.
         let mut regs = Vec::new();
-        for index in 0..chunk.registers {
+        for index in 0..holding {
             let alloca = builder
                 .build_alloca(context.i64_type(), &format!("r{index}"))
                 .expect("a register");
@@ -601,7 +707,7 @@ impl<'ctx> Emitter<'ctx> {
             spans: Vec::new(),
             overflow: chunk.overflow,
             division: chunk.division,
-            entry_at: 0,
+            entry,
             funcs: Vec::new(),
             constants: Vec::new(),
             frame: Vec::new(),
@@ -670,22 +776,36 @@ impl<'ctx> Emitter<'ctx> {
             self.funcs.push(declared);
         }
 
-        // Only what the program can reach gets a body. Every call names its target
-        // index and the language has no function pointers, so the reachable set from
-        // the top level is exact — and a chunk full of routines nobody calls costs
-        // compile time for every one of them otherwise. The declarations above stay:
-        // an unreferenced declaration is free, and the indices in `funcs` keep working.
-        fn calls(code: &[Op]) -> impl Iterator<Item = usize> + '_ {
-            code.iter().filter_map(|op| match op {
-                Op::Call { func, .. } => Some(*func as usize),
-                _ => None,
-            })
+        // Only what this entry can reach gets a body. Every call names its target index
+        // and the language has no function pointers, so the set is exact -- and a chunk
+        // full of routines nobody calls costs compile time for every one of them
+        // otherwise. The declarations above stay: an unreferenced declaration is free, and
+        // the indices in `funcs` keep working.
+        //
+        // "This entry" and not "the program": a loop handed over half way through a long
+        // top level can reach far less than the whole of it, and the routines only the
+        // earlier part called are no more worth compiling than the earlier part is.
+        fn calls_from(code: &[Op], from: usize) -> Vec<usize> {
+            blocks::reachable(code, from)
+                .into_iter()
+                .filter_map(|at| match code[at] {
+                    Op::Call { func, .. } => Some(func as usize),
+                    _ => None,
+                })
+                .collect()
         }
+        let (from_code, from_at) = match self.entry {
+            Entry::Routine { index, at } => (&chunk.funcs[index].code[..], at),
+            _ => (&chunk.code[..], self.entry.at()),
+        };
         let mut reachable = vec![false; chunk.funcs.len()];
-        let mut pending: Vec<usize> = calls(&chunk.code).collect();
+        let mut pending = calls_from(from_code, from_at);
+        // A routine being taken over is entered from Rust rather than called, and its body
+        // goes in `main`. Nothing marks it here unless it calls itself -- and if it does,
+        // it needs the ordinary copy beside `main` for the recursive call to land in.
         while let Some(index) = pending.pop() {
             if !std::mem::replace(&mut reachable[index], true) {
-                pending.extend(calls(&chunk.funcs[index].code));
+                pending.extend(calls_from(&chunk.funcs[index].code, 0));
             }
         }
 
@@ -699,16 +819,31 @@ impl<'ctx> Emitter<'ctx> {
             }
         }
 
-        // The top level, whose frame is the one the program starts in.
+        // What `main` runs: the top level, or -- when the VM was part way through a
+        // routine and handed it over -- that routine's own code, in `main` rather than in
+        // the function beside it, because it is entered from Rust and not from a call.
         self.builder
             .position_at_end(self.main.get_last_basic_block().expect("main has its entry"));
-        self.frame = vec![Value::Bool(false); chunk.registers];
+        let (code, spans) = match self.entry {
+            Entry::Routine { index, .. } => {
+                let routine = &chunk.funcs[index];
+                (&routine.code[..], &routine.spans[..])
+            }
+            _ => (&chunk.code[..], &chunk.spans[..]),
+        };
+        self.frame = vec![Value::Bool(false); self.regs.len()];
+
         // Every register a machine register can hold starts from what the VM left in it.
-        // Coming in at nought there is nothing to carry: the checker has proved every
-        // register is written before it is read, and the program has not run yet. Coming
-        // in at a loop head, everything the program did before the loop is in there.
-        if self.entry_at != 0 {
-            for index in 0..chunk.registers {
+        // Coming in at the beginning there is nothing to carry: the checker has proved
+        // every register is written before it is read, and the program has not run yet.
+        // Coming in at a loop head, everything done before the loop is live in there.
+        //
+        // No `cells_enter` either way. At the beginning the frame is the one the program
+        // starts in; part way through a routine it is the one the VM has been filling in,
+        // which was handed over whole. Entering a fresh one from a template would throw
+        // away the very thing this came here to continue.
+        if self.entry.carries() {
+            for index in 0..self.regs.len() {
                 let bits = self
                     .builder
                     .build_call(
@@ -723,7 +858,8 @@ impl<'ctx> Emitter<'ctx> {
                 self.builder.build_store(self.regs[index], bits).expect("a store");
             }
         }
-        self.walk(chunk, &chunk.code, &chunk.spans, false, self.entry_at);
+        let inside = matches!(self.entry, Entry::Routine { .. });
+        self.walk(chunk, code, spans, inside, self.entry.at());
         self.main_frame = std::mem::take(&mut self.frame);
     }
 
@@ -797,9 +933,16 @@ impl<'ctx> Emitter<'ctx> {
 
     /// Walk a run of instructions, emitting each into the block it belongs to.
     fn walk(&mut self, chunk: &Chunk, code: &[Op], spans: &[Span], inside: bool, entry: usize) {
+        // Only what this entry can reach. Coming in at nought that is everything, and
+        // coming in at a loop head it is the loop, its exit, and whatever they lead to --
+        // which is the point of asking rather than compiling the lot and hoping LLVM
+        // notices. An instruction nothing can reach has no block, so nothing can jump to
+        // it either, and the two agree by construction.
+        let live = blocks::reachable(code, entry);
         let made: std::collections::BTreeMap<usize, inkwell::basic_block::BasicBlock<'ctx>> =
             blocks::leaders(code)
                 .iter()
+                .filter(|at| live.contains(at))
                 .map(|at| (*at, self.context.append_basic_block(self.main, &format!("at{at}"))))
                 .collect();
         self.landings = made.clone();
@@ -810,6 +953,9 @@ impl<'ctx> Emitter<'ctx> {
         self.builder.build_unconditional_branch(made[&entry]).expect("a branch");
 
         for (at, op) in code.iter().enumerate() {
+            if !live.contains(&at) {
+                continue;
+            }
             if let Some(block) = made.get(&at) {
                 // Falling into a new block from an unterminated one is an ordinary jump.
                 let here = self.builder.get_insert_block().expect("a block");

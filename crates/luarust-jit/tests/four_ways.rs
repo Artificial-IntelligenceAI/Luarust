@@ -21,6 +21,9 @@ struct Eagerly {
     /// Whether anything was actually handed over, so a test can tell a program that
     /// switched from one that never had a loop to switch in.
     switched: bool,
+    /// Whether any of it was a loop inside a routine, which is the harder handover: it
+    /// comes back.
+    inside: bool,
 }
 
 impl Tier for Eagerly {
@@ -31,16 +34,22 @@ impl Tier for Eagerly {
     fn hot(
         &mut self,
         chunk: &Chunk,
+        routine: Option<usize>,
         at: usize,
-        registers: &[Value],
+        frames: Vec<Vec<Value>>,
         started: std::time::Instant,
         out: &mut dyn std::io::Write,
     ) -> Taken {
         self.switched = true;
-        match luarust_jit::resume(chunk, at, registers, started, out) {
-            Ok(outcome) => Taken::Finished(outcome),
-            Err(_) => Taken::Declined,
+        if routine.is_some() {
+            self.inside = true;
         }
+        let taken = match routine {
+            None => luarust_jit::resume(chunk, at, frames, started, out).map(Taken::Finished),
+            Some(index) => luarust_jit::resume_routine(chunk, index, at, frames, started, out)
+                .map(Taken::Returned),
+        };
+        taken.unwrap_or(Taken::Declined)
     }
 }
 
@@ -61,6 +70,12 @@ fn ended(out: Vec<u8>, outcome: Result<(), luarust_check::value::Stopped>) -> Ra
 /// Returns whether the tiering engine actually switched, so a caller can tell that its
 /// programs are exercising the thing and not merely passing through it.
 fn four_ways(source: &str, after: u32) -> bool {
+    four_ways_reporting(source, after).0
+}
+
+/// The same, saying both whether anything switched and whether any of it was inside a
+/// routine.
+fn four_ways_reporting(source: &str, after: u32) -> (bool, bool) {
     let file = SourceFile::new("test.lr", source);
     let lexed = luarust_lex::lex(source);
     assert!(lexed.ok(), "{}", luarust_diag::report(&file, &lexed.errors));
@@ -83,7 +98,7 @@ fn four_ways(source: &str, after: u32) -> bool {
     let outcome = luarust_jit::run(&chunk, &mut out).expect("the JIT takes every chunk");
     let compiled = ended(out, outcome);
 
-    let mut tier = Eagerly { after, switched: false };
+    let mut tier = Eagerly { after, switched: false, inside: false };
     let mut out = Vec::new();
     let outcome = luarust_vm::run_with(&chunk, &mut out, Some(&mut tier));
     let tiered = ended(out, outcome);
@@ -94,7 +109,7 @@ fn four_ways(source: &str, after: u32) -> bool {
         assert_eq!(ran.text, walked.text, "{name} printed something else\n\n{source}");
         assert_eq!(ran.fault, walked.fault, "{name} ended differently\n\n{source}");
     }
-    tier.switched
+    (tier.switched, tier.inside)
 }
 
 #[test]
@@ -208,12 +223,90 @@ fn generated_programs_agree_four_ways() {
 #[test]
 #[ignore = "a deep sweep for changes to the handover, not for every gate"]
 fn twenty_thousand_agree_four_ways() {
-    let mut switched = 0;
+    let (mut switched, mut inside) = (0, 0);
     for seed in 1..=20_000 {
-        if four_ways(&luarust_gen::program(seed).source, 1 + seed as u32 % 5) {
-            switched += 1;
-        }
+        let (took, in_routine) =
+            four_ways_reporting(&luarust_gen::program(seed).source, 1 + seed as u32 % 5);
+        switched += usize::from(took);
+        inside += usize::from(in_routine);
     }
-    println!("{switched} of 20000 were handed over part way through");
+    println!("{switched} of 20000 handed over part way through, {inside} inside a routine");
     assert!(switched > 5_000);
+    // The harder handover is the one that comes back, so a sweep that never took a loop
+    // inside a routine would be leaving half of this untested.
+    assert!(inside > 100, "only {inside} were inside a routine");
+}
+
+/// A loop inside a routine, which is the handover that has to come back.
+///
+/// The top level runs to the end of the program and never returns, so getting that wrong
+/// shows up as a wrong answer at most. A routine has to give an answer back, pop its
+/// frame, and leave the call underneath exactly as the VM left it -- and then the VM has
+/// to carry on interpreting a caller that has been sitting there the whole time.
+#[test]
+fn a_loop_inside_a_routine_comes_back() {
+    let source = "fn.local.ui64 ['triangle'] [ui64 'n'] {\n\
+                      var.local.mut.ui64 ['sum'] = [|0|];\n\
+                      loop.temp.range.ui64 ['i'] = [|1|, 'n'] {\n\
+                          set ['sum'] = [math { 'sum' + 'i' }];\n\
+                      }\n\
+                      return 'sum';\n\
+                  }\n\
+                  print[triangle[|10|] \" \" triangle[|100|] \" \" triangle[|4|]];";
+    for after in 1..=6 {
+        let (switched, inside) = four_ways_reporting(source, after);
+        assert!(switched, "nothing switched at {after}");
+        assert!(inside, "the switch was not inside the routine at {after}");
+    }
+}
+
+/// The same, for a routine whose answer cannot live in a machine register.
+#[test]
+fn a_routine_that_answers_with_something_celled() {
+    let source = "fn.local.er ['sixths'] [ui32 'n'] {\n\
+                      var.local.mut.er ['sum'] = [|0|];\n\
+                      loop.temp.range.ui32 ['i'] = [|1|, 'n'] {\n\
+                          set ['sum'] = [math { 'sum' + er |1/6| }];\n\
+                      }\n\
+                      return 'sum';\n\
+                  }\n\
+                  print[sixths[|6|] \" \" sixths[|3|]];";
+    for after in 1..=4 {
+        let (_, inside) = four_ways_reporting(source, after);
+        assert!(inside, "the switch was not inside the routine at {after}");
+    }
+}
+
+/// A routine that gives nothing back, and one that is called from inside another.
+#[test]
+fn a_routine_with_no_answer_and_one_nested_in_another() {
+    let source = "fn.local.nothing ['count'] [ui32 'n'] {\n\
+                      loop.temp.range.ui32 ['i'] = [|1|, 'n'] { print['i']; }\n\
+                  }\n\
+                  fn.local.nothing ['twice'] [ui32 'n'] {\n\
+                      loop.temp.range.ui32 ['j'] = [|1|, |2|] { count['n']; }\n\
+                  }\n\
+                  twice[|4|];\n\
+                  print[\" done\"];";
+    for after in 1..=5 {
+        let (_, inside) = four_ways_reporting(source, after);
+        assert!(inside, "the switch was not inside a routine at {after}");
+    }
+}
+
+/// A routine that faults after the join, which must fault the same way and in the same
+/// place as it would have on the VM.
+#[test]
+fn a_routine_that_stops_after_the_join() {
+    let source = "fn.local.i32 ['grind'] [i32 'n'] {\n\
+                      var.local.mut.i32 ['r'] = [|100|];\n\
+                      loop.temp.range.i32 ['i'] = [|1|, 'n'] {\n\
+                          set ['r'] = [math { 'r' div ('i' - i32 |9|) }];\n\
+                      }\n\
+                      return 'r';\n\
+                  }\n\
+                  print[grind[|20|]];";
+    for after in 1..=5 {
+        four_ways_reporting(source, after);
+    }
 }

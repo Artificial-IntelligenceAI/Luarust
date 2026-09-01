@@ -60,16 +60,24 @@ pub trait Tier {
     /// The loop beginning at `at` has gone round [`threshold`](Tier::threshold) times.
     /// Take it over if you can.
     ///
-    /// `registers` is the frame the VM has been filling in, live, and whatever takes over
-    /// must start from exactly those values. `started` is when the program started, which
-    /// is not when this was asked -- a clock that reset itself here would be reporting on
-    /// the compiler rather than on the program. Anything printed goes to `out`, after what
-    /// the VM has already printed.
+    /// `routine` says which code `at` is an instruction of -- `None` for the top level.
+    /// The two are not the same job: taking over the top level means running to the end of
+    /// the program, and taking over a routine means running it to its return and giving the
+    /// answer back.
+    ///
+    /// `frames` is every call the VM has open, outermost first, with the live registers of
+    /// each. Whatever takes over must start from exactly those values, and all of them are
+    /// handed over rather than only the hot one: they are the root set a collection walks,
+    /// and they are what the depth limit counts. `started` is when the program started,
+    /// which is not when this was asked -- a clock that reset itself here would be
+    /// reporting on the compiler rather than on the program. Anything printed goes to
+    /// `out`, after what the VM has already printed.
     fn hot(
         &mut self,
         chunk: &Chunk,
+        routine: Option<usize>,
         at: usize,
-        registers: &[Value],
+        frames: Vec<Vec<Value>>,
         started: Instant,
         out: &mut dyn Write,
     ) -> Taken;
@@ -83,6 +91,10 @@ pub enum Taken {
     /// ended. There is nothing for the VM to resume: entering at a loop head means
     /// running everything that follows it, the loop's own exit included.
     Finished(Result<(), Stopped>),
+    /// Compiled code ran a routine from the loop head to its return, and this is what it
+    /// gave back. The VM pops the frame and carries on interpreting the call underneath,
+    /// which never stopped waiting.
+    Returned(Result<Option<Value>, Stopped>),
 }
 
 /// One call in progress: where it is, what it is holding, and where its answer goes.
@@ -218,11 +230,10 @@ pub fn run_with(
     // The top level always runs, so it is translated up front; a routine is translated
     // the first time something enters it — the same reasoning that keeps the JIT from
     // compiling what nothing calls, at a much smaller price.
-    // Counted only where a count could be acted on. A hot loop inside a routine is a
-    // real thing and is not noticed yet: taking one over means returning to the middle of
-    // a call the VM is holding, where taking over the top level means running to the end
-    // of the program and never coming back. So the top level is counted, routines are
-    // not, and neither pays anything when nothing is listening.
+    // One flat set of counters for the whole run, handed out as code is widened: the top
+    // level up front and each routine the first time something enters it. Nothing is
+    // counted at all when nothing is listening, which is what keeps the plain VM paying
+    // nothing for machinery it is not using.
     let mut counters: Vec<u32> = Vec::new();
     let (top, threshold) = match &tier {
         // Never nought: a counter is compared after it is raised, so a threshold nothing
@@ -246,7 +257,11 @@ pub fn run_with(
             None => (&top[..], &chunk.spans[..]),
             Some(index) => {
                 if routines[index].is_none() {
-                    routines[index] = Some(widen(&chunk.funcs[index].code, None));
+                    let counted = match tier {
+                        Some(_) => widen(&chunk.funcs[index].code, Some(&mut counters)),
+                        None => widen(&chunk.funcs[index].code, None),
+                    };
+                    routines[index] = Some(counted);
                 }
                 (
                     &routines[index].as_ref().expect("filled just above")[..],
@@ -575,16 +590,28 @@ pub fn run_with(
                 }
             }
             Step::Hot { target, counter } => {
-                let frame = frames.last_mut().expect("a frame is always open");
-                frame.at = target;
-                // Never asked about again, whatever the answer: either compiled code ran
-                // the rest of the program, or there is no compiled code to be had.
+                frames.last_mut().expect("a frame is always open").at = target;
+                // Never asked about again, whatever the answer: either compiled code took
+                // it, or there is no compiled code to be had.
                 counters[counter as usize] = u32::MAX;
-                if let Some(Taken::Finished(outcome)) = tier
-                    .as_deref_mut()
-                    .map(|tier| tier.hot(chunk, target, &frame.registers, started, out))
-                {
-                    return outcome;
+                let Some(tier) = tier.as_deref_mut() else { continue 'activation };
+                // Every open call, outermost first. Cloned because compiled code is about
+                // to work on its own copy and the VM's is what it comes back to.
+                let open: Vec<Vec<Value>> =
+                    frames.iter().map(|frame| frame.registers.clone()).collect();
+                match tier.hot(chunk, routine, target, open, started, out) {
+                    Taken::Declined => {}
+                    Taken::Finished(outcome) => return outcome,
+                    Taken::Returned(Err(stopped)) => return Err(stopped),
+                    // The same thing a `return` does, because that is what happened: the
+                    // routine ran to its end, somewhere else.
+                    Taken::Returned(Ok(answer)) => {
+                        let finished = frames.pop().expect("a frame is always open");
+                        if let Some(answer) = answer {
+                            let caller = frames.last_mut().expect("something called it");
+                            caller.registers[finished.dst as usize] = answer;
+                        }
+                    }
                 }
             }
             Step::Collecting => {
