@@ -37,22 +37,36 @@ drop glue gone, discriminant branch gone, half the traffic — rather than addin
   handover to rebuild `Value` frames from raw+cells needs the per-PC type map below
   and is its own step.
 
-## The question the design has to answer, not dodge
+## The question the design had to answer — answered, by Tankun, as a setting
 
 The VM's `not_as_described` fault (R0016) exists because a chunk can arrive from
 anywhere and lie: today the tag in the register catches an instruction whose type
 disagrees with what the register holds. Raw words have no tag, so that net vanishes
 for every unboxed type — a lying chunk would compute nonsense instead of stopping.
 
-The principled replacement is to move the check from run time to load time: a widen
-pass that infers, per program point, the type each register holds — the checker's
-"an instruction's type is the type of the values it works on", verified over the
-chunk instead of trusted per instruction. A chunk that types inconsistently is
-refused as `Broken`, the way every other malformed chunk is. That is *stronger* than
-today's net (it refuses programs whose lie never executes), it is the same pass the
-tier handover will want later, and it keeps the rule that a loaded chunk proves
-itself. Sized honestly: it is dataflow over register types with joins at jump
-targets, not a large piece, but it is the prerequisite, not an add-on.
+The ruling: whether the VM re-checks or believes is the *project's* choice, one line
+in the file — `[run] chunks = "checked"` (default) or `"trusted"` — the same move
+that settled `div`/`mod`. It answers every future checker-proof at once, array
+bounds included, instead of one argument per feature: `"checked"` means the VM
+establishes everything itself whatever a chunk claims, `"trusted"` means it acts on
+the checker's proofs and a lying chunk is your problem. (Key name not final; the
+mechanism is. A checksum is joining the chunk format separately as an
+accident-catcher — what the setting governs is deliberate lies, the difference
+between the JVM's verify-your-bytecode and CPython's don't-run-what-you-don't-trust.)
+
+For unboxing under the default, the net still has to hold, so the check moves from
+run time to load time: a pass that infers, per program point, the type each register
+holds — the checker's "an instruction's type is the type of the values it works on",
+verified over the chunk instead of trusted per instruction. A chunk that types
+inconsistently is refused as `Broken`, the way every other malformed chunk is.
+Stronger than today's net (it refuses programs whose lie never executes), it is the
+same per-PC map the tier handover wants later, and `"trusted"` simply skips it.
+Worth stating plainly: even without the pass, a lying chunk against raw registers
+computes wrong answers rather than anything memory-unsafe — cells always hold real
+`Value`s and the heap checks its own handles — so the pass defends the *fault
+contract*, not the process. `no_byte_anywhere_can_make_it_panic` runs under the
+default and must keep passing; under `"trusted"` the invariant is different and
+smaller: a well-formed chunk behaves identically in either mode.
 
 ## Measuring it
 
