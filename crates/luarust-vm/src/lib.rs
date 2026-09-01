@@ -307,8 +307,11 @@ trait File {
     fn put(&mut self, at: chunk::Reg, value: Value);
     /// One element out of an array and into a register, each arrangement its own way —
     /// the word file straight from the stored bits, the boxed one through the `Value`
-    /// it keeps anyway. `false` when there is no such element.
-    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize) -> bool;
+    /// it keeps anyway. `false` when there is no such element. `element` is the side
+    /// the register lives on: a decimal is bits in the heap and a cell in the file,
+    /// and routing by what the heap can give instead of where the register lives put
+    /// d64 elements in the wrong place — found by seed 96 within the hour.
+    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize, element: Ty) -> bool;
     /// One argument, caller's register to callee's, whatever it holds.
     fn argument(&mut self, at: usize, from: &Self, src: usize);
     /// Every root a collection must see.
@@ -372,7 +375,7 @@ impl File for Boxed {
             (slot, value) => *slot = value,
         }
     }
-    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize) -> bool {
+    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize, _element: Ty) -> bool {
         match heap::read(handle, index) {
             Some(held) => {
                 self.put(dst, held);
@@ -477,11 +480,20 @@ impl File for Split {
             value => self.cells_now()[at as usize] = value,
         }
     }
-    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize) -> bool {
-        // Bits straight to the word, which is nearly every array there is; a wide,
-        // text or exact element goes the Value way, and out-of-range says so.
-        if let Some(bits) = heap::read_bits(handle, index) {
-            self.raw[dst as usize] = bits;
+    fn load_element(&mut self, dst: chunk::Reg, handle: u32, index: usize, element: Ty) -> bool {
+        // Bits straight to the word — but only for a register that *lives* in its
+        // word. A decimal is bits in the heap and a cell here, and the wide, text and
+        // exact elements go the Value way regardless.
+        if !celled(element)
+            && let Some(bits) = heap::read_bits(handle, index)
+        {
+            // An element that is itself an array is a handle, and a handle written
+            // anywhere must be mirrored where the collector looks — `put` knows.
+            if matches!(element, Ty::Array(_)) {
+                self.put(dst, Value::Num { ty: element, bits });
+            } else {
+                self.raw[dst as usize] = bits;
+            }
             return true;
         }
         match heap::read(handle, index) {
@@ -654,7 +666,7 @@ fn engine<F: File>(
                 };
                 let index = offset(shapes[shape as usize].dims(), handle, file, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                if !file.load_element(dst, handle, index) {
+                if !file.load_element(dst, handle, index, shapes[shape as usize].element) {
                     return Err(Stopped {
                         fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
                         span: spans[here],
