@@ -1193,28 +1193,35 @@ it drew is not comparable with itself.
 | | 100M | vs C | | 100M | vs C |
 | --- | --- | --- | --- | --- | --- |
 | **x86-64**, AMD EPYC 9V74 | | | **Apple M5** | | |
-| C, clang -O2 | 425 ms | 1.00× | Rust, rustc -O | 202 ms | 0.90× |
-| Rust, rustc -O | 442 ms | 1.04× | **Luarust**, native | **222 ms** | **0.98×** |
-| Java 21 | 463 ms | 1.09× | C, clang -O2 | 225 ms | 1.00× |
-| **Luarust**, whole JIT | **464 ms** | **1.09×** | **Luarust**, whole JIT | **238 ms** | **1.06×** |
-| PyPy 7.3 | 506 ms | 1.19× | Java 21 | 265 ms | 1.18× |
-| Lua 5.4 | 796 ms | 1.87× | PyPy 7.3 | 286 ms | 1.27× |
-| LuaJIT | 882 ms | 2.08× | **Luarust**, hot JIT | **291 ms** | **1.29×** |
-| Luarust, bytecode VM | 2,432 ms | 5.72× | Lua 5.5 | 406 ms | 1.80× |
-| CPython | 9,534 ms | 22.43× | LuaJIT 2.1 | 434 ms | 1.92× |
-| Luarust, tree-walker | 13,350 ms | 31.41× | Luarust, bytecode VM | 839 ms | 3.72× |
-| | | | Luarust, tree-walker | 2,619 ms | 11.62× |
-| | | | CPython 3.14 | 3,683 ms | 16.34× |
+| C, clang -O2 | 425 ms | 1.00× | Rust, rustc -O | 201 ms | 0.90× |
+| Rust, rustc -O | 442 ms | 1.04× | C, clang -O2 | 223 ms | 1.00× |
+| Java 21 | 463 ms | 1.09× | **Luarust**, native | **224 ms** | **1.01×** |
+| **Luarust**, whole JIT | **464 ms** | **1.09×** | **Luarust**, whole JIT | **231 ms** | **1.04×** |
+| PyPy 7.3 | 506 ms | 1.19× | Java 21 | 262 ms | 1.17× |
+| Lua 5.4 | 796 ms | 1.87× | Go 1.26 | 268 ms | 1.20× |
+| LuaJIT | 882 ms | 2.08× | PyPy 7.3 | 284 ms | 1.27× |
+| Luarust, bytecode VM | 2,432 ms | 5.72× | **Luarust**, hot JIT | **289 ms** | **1.30×** |
+| CPython | 9,534 ms | 22.43× | Lua 5.5 | 393 ms | 1.76× |
+| Luarust, tree-walker | 13,350 ms | 31.41× | LuaJIT 2.1 | 452 ms | 2.03× |
+| | | | Luarust, bytecode VM | 757 ms | 3.40× |
+| | | | Luarust, tree-walker | 2,628 ms | 11.79× |
+| | | | CPython 3.14 | 3,823 ms | 17.16× |
 
 **Two machines, because one was not enough to tell the truth with.** The left column is a
 GitHub runner; the right is an idle Apple M5. Same commit, same programs, and they do not
 agree about where this language stands.
 
-**Compiled ahead of time it comes second, ahead of C.** 2.17 ns an iteration against
-clang's 2.22 — the same emitter and the same passes as the JIT, with the compile paid at
-build time instead of inside the measurement. It is one benchmark and the margin is a
-couple of percent, so read it as *level with C* rather than as beating it; what it rules
-out is a language that needs an interpreter to be understood.
+**Compiled ahead of time it is level with C.** 2.17 ns an iteration against clang's 2.19 —
+the same emitter and the same passes as the JIT, with the compile paid at build time rather
+than inside the measurement. The two swap places between runs, which is the point: read it
+as *level with C*, not as beating it. What it rules out is a language that needs an
+interpreter to be understood.
+
+**Go is here for contrast**, at 1.20× C. It exposes no intrinsics at all — the supported
+way to hand-write vector code in Go is Plan 9 assembly in a separate file — and it is still
+comfortably in the compiled tier. Which is the argument against putting SIMD in a language:
+a compiler that can prove enough gets most of the way without asking the programmer for
+anything.
 
 The whole-chunk JIT survives the move: ahead of PyPy on both, level with Java on x86-64
 and ahead of it on the M5, and between 1.00× and 1.04× C once the fixed costs are taken
@@ -1265,18 +1272,19 @@ iteration costs:
 
 | | M5 ns/iter | vs C | x86-64 ns/iter | vs C |
 | --- | --- | --- | --- | --- |
-| Rust, rustc -O | 1.98 | 0.90× | 4.39 | 1.04× |
-| Luarust, native | 2.17 | 0.98× | — | — |
-| C, clang -O2 | 2.22 | 1.00× | 4.22 | 1.00× |
-| Luarust, whole JIT | 2.31 | 1.04× | 4.23 | 1.00× |
-| Java 21 | 2.47 | 1.11× | 4.23 | 1.00× |
-| PyPy | 2.74 | 1.24× | 4.58 | 1.09× |
-| Luarust, hot JIT | 2.83 | 1.28× | — | — |
-| Lua | 4.06 | 1.83× | 7.92 | 1.88× |
-| LuaJIT | 4.31 | 1.95× | 8.79 | 2.08× |
-| Luarust, bytecode VM | 8.43 | 3.80× | 24.20 | 5.73× |
-| Luarust, tree-walker | 26.15 | 11.81× | 133.47 | 31.63× |
-| CPython | 36.60 | 16.52× | 95.24 | 22.57× |
+| Rust, rustc -O | 2.07 | 0.94× | 4.39 | 1.04× |
+| Luarust, native | 2.17 | 0.99× | — | — |
+| C, clang -O2 | 2.19 | 1.00× | 4.22 | 1.00× |
+| Luarust, whole JIT | 2.20 | 1.00× | 4.23 | 1.00× |
+| Java 21 | 2.50 | 1.14× | 4.23 | 1.00× |
+| Go 1.26 | 2.63 | 1.20× | — | — |
+| PyPy | 2.68 | 1.22× | 4.58 | 1.09× |
+| Luarust, hot JIT | 2.75 | 1.25× | — | — |
+| Lua | 3.86 | 1.76× | 7.92 | 1.88× |
+| LuaJIT | 4.23 | 1.93× | 8.79 | 2.08× |
+| Luarust, bytecode VM | 7.37 | 3.36× | 24.20 | 5.73× |
+| Luarust, tree-walker | 25.32 | 11.55× | 133.47 | 31.63× |
+| CPython | 37.40 | 17.06× | 95.24 | 22.57× |
 
 Lua is ahead of LuaJIT on both machines for a reason worth knowing: LuaJIT is Lua 5.1,
 where every number is a double, so its `%` is floating-point, while 5.4 and 5.5 have real

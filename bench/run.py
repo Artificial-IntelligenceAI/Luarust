@@ -38,6 +38,7 @@ TOOLS = {
     "luajit":  "/opt/homebrew/bin/luajit",
     "pypy3":   "/opt/homebrew/bin/pypy3",
     "python":  "/opt/homebrew/bin/python3.14",
+    "go":      "/opt/homebrew/bin/go",
     "luarust": str(ROOT / "target/release/luarust"),
 }
 
@@ -80,6 +81,10 @@ def measure(n):
     subprocess.run([TOOLS["clang"], "-O2", "-o", f"{build}/loop_c", f"{build}/loop.c"], check=True)
     subprocess.run([TOOLS["rustc"], "-O", "-o", f"{build}/loop_rs", f"{build}/loop.rs"], check=True)
     subprocess.run([TOOLS["javac"], "-d", build, f"{build}/Loop.java"], check=True)
+    # Go wants a module around it, and builds into the same folder as everything else.
+    pathlib.Path(build, "loop.go").write_text(sized("loop.go", n))
+    pathlib.Path(build, "go.mod").write_text("module bench\n\ngo 1.21\n")
+    subprocess.run([TOOLS["go"], "build", "-o", f"{build}/loop_go", "loop.go"], cwd=build, check=True)
     for name in ("loop.lua", "loop.py"):
         pathlib.Path(build, name).write_text(sized(name, n))
 
@@ -90,6 +95,7 @@ def measure(n):
     took["PyPy 7.3"] = timed([TOOLS["pypy3"], f"{build}/loop.py"])
     took["Lua 5.5"] = timed([TOOLS["lua"], f"{build}/loop.lua"])
     took["LuaJIT 2.1"] = timed([TOOLS["luajit"], f"{build}/loop.lua"])
+    took["Go 1.26"] = timed([f"{build}/loop_go"])
 
     # Luarust's engines. The project file goes beside a copy of the source, so the one in
     # the repository is never rewritten to run a benchmark.

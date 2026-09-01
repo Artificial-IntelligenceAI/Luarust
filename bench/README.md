@@ -3,7 +3,8 @@
 `python3 bench/run.py` — builds and runs the same loop in every language here, at ten
 million and a hundred million iterations, and prints the three tables the README carries.
 
-The loop is `sum = (sum + i) mod 1000000007`. Each value needs the one before it, so it
+The loop is `sum = (sum + i) mod 1000000007`, written seven times over: C, Rust, Java,
+Go, Lua, Python and Luarust. Each value needs the one before it, so it
 cannot be folded into a formula, vectorised, or run out of order: everybody actually
 loops, and what is being measured is one add and one remainder.
 
