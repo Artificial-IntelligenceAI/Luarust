@@ -59,10 +59,29 @@ asked the heap for the array's length again in order to do it. A profile of the 
 thirty per cent of its samples inside that, building faults for a program that had none.
 
     array loop, 30M reads      before      after
-      bytecode VM              3,385 ms    651 ms
-      tree-walker              1,010 ms  1,033 ms
+      bytecode VM              3,385 ms    478 ms
+      tree-walker              1,010 ms  1,013 ms
 
-`ok_or_else` and it is gone. The tell was there to be read for a long time: the VM was
+Three things, in the order a profile found them. `ok_or` built a fault -- formatting a
+message, allocating a `String`, asking the heap for the length again -- for every element
+that was fine: `ok_or_else` and it is gone, 3,385 to 651. Then `offset` looked the array's
+*shape* up per element, through another thread local and another `RefCell`, to fetch
+something that cannot change while a program runs: resolved once when the instruction is
+widened, 569 to 478. Between them, dropping a redundant length lookup, 588 to 569.
+
+For scale, on the same loop: LuaJIT 11 ms, Lua 5.5's VM 76 ms, CPython 1,081 ms. Six times
+Lua's VM is a great deal better than forty-four times, and is still six times. What is left
+is `heap::read` itself -- a thread local, a `RefCell` borrow, a table index and a `Value`
+built, for every element -- which is the same machinery the `memory(read)` caveat below
+wants replaced by a spans table read through a raw pointer. One piece of work would answer
+both.
+
+**And it broke something, which the fuzzer caught.** Dropping the length check from
+`offset` was safe for reads, because `heap::read` checks and the error path reports it. It
+was not safe for *writes*: `heap::store` also checks and returns whether it wrote, and
+`Op::StoreAt` had been discarding that answer for as long as `offset` made it unreachable.
+An out-of-range write became a silent no-op. Seed 7894, found in the 200,000 the change was
+gated on, fixed by having the write path report what the read path already reported. The tell was there to be read for a long time: the VM was
 *three times slower than the tree-walker* on array code, which is backwards, and the reason
 is that the tree-walker already wrote `ok_or_else` on the same line.
 

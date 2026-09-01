@@ -24,6 +24,7 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
+use luarust_core::ty::MAX_RANK;
 use luarust_core::{BinOp, Ty};
 use luarust_core::heap;
 use luarust_core::value::{
@@ -156,6 +157,14 @@ enum Micro {
     Mul { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
     Div { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
     Mod { ty: Ty, dst: chunk::Reg, lhs: chunk::Reg, rhs: chunk::Reg },
+    /// Reading one element, with the array's shape already looked up.
+    ///
+    /// `Op::At` carries a type, and a type only *names* a shape -- finding the real one
+    /// means a table, behind a thread local, behind a `RefCell`, and then copying the
+    /// whole thing out. That happened on every element read, to fetch something that
+    /// cannot change while a program runs. It is fetched here instead, once, when the
+    /// instruction is first widened.
+    At { dst: chunk::Reg, array: chunk::Reg, at: u16, rank: u8, dims: [u32; MAX_RANK] },
     Other(Op),
 }
 
@@ -173,6 +182,12 @@ fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>) -> Vec<Micro> {
                 let counter = counters.len() as u32;
                 counters.push(0);
                 Micro::Back { target, counter }
+            }
+            Op::At { dst, array, at, rank, ty } => {
+                let shape = ty.array().expect("only an array is indexed");
+                let mut dims = [0u32; MAX_RANK];
+                dims[..shape.dims().len()].copy_from_slice(shape.dims());
+                Micro::At { dst, array, at, rank, dims }
             }
             Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Add { ty, dst, lhs, rhs }
@@ -325,6 +340,31 @@ pub fn run_with(
                     break Step::Hot { target: target as usize, counter };
                 }
                 at = target as usize;
+            }
+            Micro::At { dst, array, at, rank, dims } => {
+                let Some(handle) = handle_of(&registers[array as usize]) else {
+                    return Err(Stopped {
+                        fault: not_as_described("this says it indexes an array"),
+                        span: spans[here],
+                    });
+                };
+                let index = offset(&dims[..], handle, registers, at, rank)
+                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
+                let held = heap::read(handle, index).ok_or_else(|| Stopped {
+                    fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
+                    span: spans[here],
+                })?;
+                // A field at a time, for the reason the arithmetic does it: an array of
+                // numbers read in a loop writes the same register every pass, and a
+                // whole-value write is a sixteen-byte store that the next instruction's
+                // narrow load waits on.
+                match (&mut registers[dst as usize], held) {
+                    (Value::Num { ty: t, bits: b }, Value::Num { ty, bits }) => {
+                        *t = ty;
+                        *b = bits;
+                    }
+                    (slot, held) => *slot = held,
+                }
             }
             Micro::Add { ty, dst, lhs, rhs } => {
                 int_arm!(BinOp::Add, ty, dst, lhs, rhs, registers, spans, here, chunk.overflow)
@@ -481,27 +521,11 @@ pub fn run_with(
                 }
             }
 
-            Op::At { dst, array, at, rank, ty } => {
-                let Some(handle) = handle_of(&registers[array as usize]) else {
-                    return Err(Stopped {
-                        fault: not_as_described("this says it indexes an array"),
-                        span: spans[here],
-                    });
-                };
-                let index = offset(ty, handle, registers, at, rank)
-                    .map_err(|fault| Stopped { fault, span: spans[here] })?;
-                // `ok_or_else`, and the difference is not style. `ok_or` builds its
-                // argument whether or not it is wanted, so every element that *was* there
-                // still paid for a fault describing the one time it might not be --
-                // `out_of_range` formats a message, which allocates a `String`, and it
-                // asked the heap for the length again to do it. A profile of a loop
-                // summing thirty million elements had thirty per cent of its samples in
-                // there, building errors for a program that never had one.
-                registers[dst as usize] = heap::read(handle, index).ok_or_else(|| Stopped {
-                    fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
-                    span: spans[here],
-                })?;
-            }
+            // Widened into `Micro::At` before anything runs, so it cannot arrive here.
+            // Left as a case rather than a catch-all: if a future `widen` stops handling
+            // it, this stops compiling instead of quietly costing a shape lookup an
+            // element again.
+            Op::At { .. } => unreachable!("every `At` is widened"),
 
             Op::StoreAt { array, at, rank, value, ty } => {
                 let Some(handle) = handle_of(&registers[array as usize]) else {
@@ -510,10 +534,22 @@ pub fn run_with(
                         span: spans[here],
                     });
                 };
-                let index = offset(ty, handle, registers, at, rank)
+                let shape = ty.array().expect("only an array is indexed");
+                let index = offset(shape.dims(), handle, registers, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 let held = registers[value as usize].clone();
-                heap::store(handle, index, &held);
+                // The answer is not decoration. `offset` no longer checks the upper bound
+                // of an array that grows -- the heap knows the real length and is about to
+                // look anyway -- so this is where writing past the end is caught. It was
+                // discarded here for as long as `offset` caught it first, and the moment
+                // that stopped being true an out-of-range write became a silent no-op.
+                // The fuzzer found it on seed 7894.
+                if !heap::store(handle, index, &held) {
+                    return Err(Stopped {
+                        fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
+                        span: spans[here],
+                    });
+                }
             }
 
             Op::Count { dst, array, ty } => {
@@ -712,25 +748,25 @@ fn handle_of(value: &Value) -> Option<u32> {
 
 /// Where an index lands, counted from one and flattened row by row.
 fn offset(
-    ty: Ty,
+    dims: &[u32],
     handle: u32,
     registers: &[Value],
     at: u16,
     rank: u8,
 ) -> Result<usize, Box<Fault>> {
-    let of = ty.array().expect("only an array is indexed");
-    let dims = of.dims();
+    let dims = &dims[..dims.iter().position(|d| *d == 0).unwrap_or(dims.len())];
     let mut flat = 0usize;
 
     for place in 0..rank as usize {
         let held = registers[at as usize + place].as_i128().unwrap_or(0);
-        let past = if dims.is_empty() {
-            heap::length(handle) as i128
-        } else {
-            i128::from(dims[place])
-        };
-        if held < 1 || held > past {
-            return Err(out_of_range(held, past));
+        // A shaped array knows its bounds without asking. One that grows does not -- and
+        // `heap::read` is about to check the index against the real length anyway, so
+        // asking here as well meant two trips through the heap for every element read,
+        // the second of them computing a number only the error path ever looks at. Too
+        // small an index is still caught here, because that one nothing downstream sees.
+        let past = (!dims.is_empty()).then(|| i128::from(dims[place]));
+        if held < 1 || past.is_some_and(|past| held > past) {
+            return Err(out_of_range(held, past.unwrap_or_else(|| heap::length(handle) as i128)));
         }
         flat = flat * dims.get(place).copied().unwrap_or(1) as usize + (held as usize - 1);
     }
