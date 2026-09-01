@@ -111,7 +111,16 @@ ends, and machine code whose context was dropped is a dangling pointer.
 - **A counter fires once.** If the JIT declines, that loop is never asked about again.
 - **Nothing counts bare calls.** A leaf routine with no loop in it never trips any
   counter however often it is called, so it is never kept. Counting calls as well as
-  back edges is the remaining half of "hot because it is called".
+  back edges is the remaining half of "hot because it is called" — but measured, it
+  is blocked on something else first. The VM makes a whole interpreted leaf call in
+  38 ns; one call *into kept code* costs 151 ns before the body runs, because every
+  call re-installs the module's constant and template tables, clones every open
+  frame for the root set, and round-trips the output buffer. Counting calls today
+  would compile leaves into code that runs them four times slower. The prerequisite
+  is a slim re-entry — tables installed once per module, the root set borrowed
+  rather than copied — and only then is a call-hotness policy worth designing. For
+  the routines the cache already keeps, the 151 ns sits under bodies that save
+  thousands, which is why it was never visible.
 
 ## Testing it
 
