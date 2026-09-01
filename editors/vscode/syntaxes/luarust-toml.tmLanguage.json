@@ -36,7 +36,7 @@
       }
     },
     "key": {
-      "match": "^\\s*(overflow|float-printing|division|no-visibility-stated|embed-source|decimal-encoding|mode)\\s*(?==)",
+      "match": "^\\s*(overflow|float-printing|division|no-visibility-stated|embed-source|decimal-encoding|target-cpu|mode)\\s*(?==)",
       "captures": {
         "1": {
           "name": "support.type.property-name.luarust-toml"

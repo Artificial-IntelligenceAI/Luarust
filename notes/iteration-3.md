@@ -113,6 +113,37 @@ So the order, if any of it happens: parallel loops first, isolated tasks second,
 shared-memory threads last if ever, because that one argues with the first line of the
 README.
 
+**Array loops do not vectorise, and the reason is not where it looks.** Measured
+2026-09-01. Summing an array compiles to this, once optimised:
+
+```llvm
+in.range:
+  %base    = tail call ptr @luarust_array_base(i64 %array)   ; every iteration
+  %offset  = shl nuw nsw i64 %from.nought37, 3
+  %slot    = getelementptr i8, ptr %base, i64 %offset
+  %element = load i64, ptr %slot, align 8
+  %add     = add i64 %element, %r1.036
+```
+
+The element read is already an inline load, which is right. What is wrong is that the base
+pointer is fetched by a call on every pass, and an opaque call in a loop stops LLVM
+hoisting anything across it or vectorising any of it.
+
+The obvious fix is not the fix. Declaring `luarust_array_base` as
+`readonly nounwind willreturn` is *true* and changes nothing measurable -- tried, 178 ms
+against 170 on a thirty-million-element sweep, which is inside this machine's drift, so it
+was taken back out rather than kept as churn. LICM still will not hoist the call, because
+the call sits under the bounds check: hoisting it would run it on a loop that turns out to
+have no iterations. What would let it hoist is `speculatable`, and that would be a lie --
+`heap::base_of` indexes a `Vec`, so a speculated call on a bad handle panics a program that
+was going to be fine.
+
+So the thing actually in the way is **the bounds check**, and the thing that would remove it
+is the value-range analysis proving the index in range -- the same machinery that already
+proves a dividend non-negative. Do that and the check goes, the call becomes unconditional,
+`readonly` becomes enough to hoist it, and what is left is a strided load and an integer-add
+reduction, which LLVM vectorises without being asked twice. Three wins from one proof.
+
 ## Not iteration 3
 
 Caching aside, the hot JIT still cannot count *bare calls* — a routine with no loop in it,

@@ -21,6 +21,8 @@ pub struct Project {
     pub visibility_required: bool,
     /// `[build] embed-source` — whether a chunk carries the text it was built from.
     pub embed_source: bool,
+    /// `[build] target-cpu` — which machine `luarust native` is producing a program for.
+    pub target_cpu: TargetCpu,
     /// `[build] decimal-encoding` — which of IEEE 754's two ways of writing a decimal
     /// significand a chunk uses. They hold the same numbers, so nothing about arithmetic
     /// depends on it; it decides the bit pattern that gets written out.
@@ -65,6 +67,24 @@ pub enum Engine {
     Whole,
     /// Interpreted until something turns out to be worth compiling, and compiled then.
     Hot,
+}
+
+/// Which machine an ahead-of-time program is being made for.
+///
+/// Native output means machine code for the machine that will *run* it, and that machine
+/// is not this one unless somebody says so. Compiling for whatever the build machine
+/// happens to have is how a binary picks up instructions the target does not implement and
+/// dies on the first one — which would quietly make "runs where nothing is installed" mean
+/// "runs where nothing is installed, on this exact processor".
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TargetCpu {
+    /// Whatever every processor of this architecture can do. Runs anywhere the
+    /// architecture does.
+    #[default]
+    Portable,
+    /// Everything the machine doing the building can do, which is faster and runs only on
+    /// processors at least as capable.
+    ThisMachine,
 }
 
 /// How much of a binary float a program writes out.
@@ -129,6 +149,9 @@ impl Default for Project {
             visibility_required: false,
             embed_source: true,
             dpd: false,
+            // Portable, because native output is for the machine that will run it and that
+            // machine is not this one unless somebody says so.
+            target_cpu: TargetCpu::Portable,
             // Off, because a program that never makes an array has nothing to collect and
             // should not carry a collector. Saying `"silent"` is what turns it on.
             gc: Collect::Off,
@@ -222,7 +245,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Diagnostic::new("C0003", format!("`{key}` is not under any section."))
                     .primary(locate(body, start, trimmed), "written here")
                     .rule("a setting belongs to the section above it")
-                    .tip("`overflow`, `no-visibility-stated`, `float-printing` and `division` are `[defaults]`; `embed-source` and `decimal-encoding` are `[build]`; `mode` is `[run]` and `[gc]`.")
+                    .tip("`overflow`, `no-visibility-stated`, `float-printing` and `division` are `[defaults]`; `embed-source`, `decimal-encoding` and `target-cpu` are `[build]`; `mode` is `[run]` and `[gc]`.")
                     .fix("put a section header above it."),
             );
             continue;
@@ -243,6 +266,11 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 "true" => project.embed_source = true,
                 "false" => project.embed_source = false,
                 _ => errors.push(bad_value(key, raw, span, "`true` or `false`")),
+            },
+            ("build", "target-cpu") => match unquote(raw) {
+                Some("portable") => project.target_cpu = TargetCpu::Portable,
+                Some("this-machine") => project.target_cpu = TargetCpu::ThisMachine,
+                _ => errors.push(bad_value(key, raw, span, "`\"portable\"` or `\"this-machine\"`")),
             },
             ("build", "decimal-encoding") => match unquote(raw) {
                 Some("bid") => project.dpd = false,
@@ -290,7 +318,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                         "defaults" => "`[defaults]` has `overflow`, `no-visibility-stated`, `float-printing` and `division`.",
                         "gc" => "`[gc]` has `mode`.",
                         "run" => "`[run]` has `mode`.",
-                        _ => "`[build]` has `embed-source` and `decimal-encoding`.",
+                        _ => "`[build]` has `embed-source`, `decimal-encoding` and `target-cpu`.",
                     })
                     .fix("delete it, or correct the spelling."),
             ),

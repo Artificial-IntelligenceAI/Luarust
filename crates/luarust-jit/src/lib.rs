@@ -374,11 +374,15 @@ fn compile_and_run(
 /// Nothing about LLVM survives into the result. The object links against `luarust-native`,
 /// which is the runtime and no compiler at all -- which is the whole point: thirty-two
 /// megabytes belongs to the machine that built the program, not the one that runs it.
-pub fn write_object(chunk: &Chunk, to: &std::path::Path) -> Result<(), Declined> {
+pub fn write_object(
+    chunk: &Chunk,
+    to: &std::path::Path,
+    for_this_machine: bool,
+) -> Result<(), Declined> {
     let context = Context::create();
     let module = context.create_module("luarust");
     native_module(&context, &module, chunk)?;
-    write_out(&module, to)
+    write_out(&module, to, for_this_machine)
 }
 
 /// The ahead-of-time module's optimised IR, for looking at and for guarding.
@@ -415,19 +419,37 @@ fn native_module<'ctx>(
     Ok(())
 }
 
-/// Write a module out as an object file for this machine.
-fn write_out(module: &Module<'_>, to: &std::path::Path) -> Result<(), Declined> {
+/// Write a module out as an object file.
+///
+/// The JIT names the host's exact processor because it is compiling for the machine it is
+/// standing on. This is not that: the program is for whatever runs it, so unless somebody
+/// says otherwise it is built for what every processor of this architecture can do.
+/// Naming the host here is how a binary picks up an instruction the target does not have
+/// and dies on the first one.
+fn write_out(
+    module: &Module<'_>,
+    to: &std::path::Path,
+    for_this_machine: bool,
+) -> Result<(), Declined> {
     if Target::initialize_native(&InitializationConfig::default()).is_err() {
         return Err(Declined { because: "LLVM has no back end for this machine".into() });
     }
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple)
         .map_err(|why| Declined { because: format!("no target for this machine: {why}") })?;
+    let (cpu, features) = if for_this_machine {
+        (
+            TargetMachine::get_host_cpu_name().to_string(),
+            TargetMachine::get_host_cpu_features().to_string(),
+        )
+    } else {
+        ("generic".to_string(), String::new())
+    };
     let machine = target
         .create_target_machine(
             &triple,
-            &TargetMachine::get_host_cpu_name().to_string(),
-            &TargetMachine::get_host_cpu_features().to_string(),
+            &cpu,
+            &features,
             OptimizationLevel::Aggressive,
             // Position-independent and the ordinary code model, because this is going into
             // a real executable rather than into memory the JIT already owns.

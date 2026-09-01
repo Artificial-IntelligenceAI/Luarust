@@ -52,6 +52,13 @@ const SETTINGS = {
           ["false", "the line table only -- four bytes a line, and faults still point"],
         ],
       },
+      "target-cpu": {
+        what: "which machine `luarust native` is building a program for",
+        values: [
+          ['"portable"', "everything the architecture guarantees -- runs anywhere it does"],
+          ['"this-machine"', "everything the builder has -- faster, and needs a processor as capable"],
+        ],
+      },
       "decimal-encoding": {
         what: "which of IEEE 754's two ways of writing a decimal significand a chunk uses",
         values: [

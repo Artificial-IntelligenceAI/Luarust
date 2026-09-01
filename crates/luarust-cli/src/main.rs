@@ -208,7 +208,7 @@ fn act(path: PathBuf, then: Then) -> ExitCode {
         #[cfg(feature = "jit")]
         Then::Native => {
             let chunk = luarust_vm::compile(&program);
-            native(&chunk, &path)
+            native(&chunk, &path, project.target_cpu == luarust_conf::TargetCpu::ThisMachine)
         }
 
         Then::Build => {
@@ -690,9 +690,9 @@ fn ending(outcome: &Result<(), luarust_check::value::Stopped>) -> String {
 /// program. That is the ordinary bargain for compiling ahead of time, and it is the
 /// machine that already has a Luarust toolchain on it.
 #[cfg(feature = "jit")]
-fn native(chunk: &luarust_vm::Chunk, path: &Path) -> ExitCode {
+fn native(chunk: &luarust_vm::Chunk, path: &Path, for_this_machine: bool) -> ExitCode {
     let object = path.with_extension("o");
-    if let Err(declined) = luarust_jit::write_object(chunk, &object) {
+    if let Err(declined) = luarust_jit::write_object(chunk, &object, for_this_machine) {
         eprintln!("this could not be compiled ahead of time: {}", declined.because);
         return ExitCode::from(2);
     }

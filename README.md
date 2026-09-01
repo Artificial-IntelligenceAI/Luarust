@@ -691,6 +691,7 @@ division = "floored"
 [build]
 embed-source = false
 decimal-encoding = "dpd"
+target-cpu = "portable"
 
 [gc]
 mode = "silent"
@@ -702,6 +703,14 @@ that file — whatever a file says about itself is the last word on it.
 
 Comments are `#`, as in any TOML file, at the start of a line or after a value.
 `luarust check Luarust.toml` reads it as a project file and says what is wrong with it.
+
+`target-cpu` decides which machine `luarust native` is building a program *for*. It is
+`"portable"` by default — everything the architecture guarantees, and nothing this
+particular processor happens to add — because native output is for the machine that will
+run it, and that machine is not this one unless somebody says so. `"this-machine"` uses
+everything the builder has, which is faster and runs only on a processor at least as
+capable. Getting this wrong is not a slow program: it is an illegal instruction on the
+first one the target does not implement.
 
 `[build]` is about what gets delivered rather than what gets accepted. `embed-source`
 decides whether a compiled chunk carries the text it was built from. With it off, the
