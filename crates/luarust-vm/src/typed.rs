@@ -50,11 +50,22 @@ pub fn well_typed(chunk: &Chunk) -> Result<(), Broken> {
 }
 
 /// One body, to its fixed point.
+///
+/// State is kept only where ways meet — at the entry and at every jump target — and
+/// *threaded* through the straight-line stretch between one and the next, mutably,
+/// with nothing cloned. The first version kept a state per instruction instead, which
+/// on a straight-line program is a register-count vector cloned once per statement:
+/// quadratic, and measured at it — +93 ms to load twelve thousand statements, on the
+/// one path that exists to start at once. Blocks make the same walk linear there: one
+/// door, one clone, one pass.
 fn walk(chunk: &Chunk, code: &[Op], routine: Option<&Routine>) -> Result<(), Broken> {
     let registers = match routine {
         Some(routine) => routine.registers,
         None => chunk.registers,
     };
+    if code.is_empty() {
+        return Ok(());
+    }
     let mut entry = Slots { held: vec![Slot::Unset; registers] };
     if let Some(routine) = routine {
         for (register, ty) in routine.params.iter().enumerate() {
@@ -62,41 +73,97 @@ fn walk(chunk: &Chunk, code: &[Op], routine: Option<&Routine>) -> Result<(), Bro
         }
     }
 
-    // The state known at each instruction's door, and which doors want another look.
-    let mut at_door: Vec<Option<Slots>> = vec![None; code.len()];
-    if code.is_empty() {
-        return Ok(());
+    // Where ways can meet, so where state has to be kept and merged.
+    let mut door = vec![false; code.len()];
+    door[0] = true;
+    for op in code {
+        for target in targets_of(*op) {
+            if let Some(is) = door.get_mut(target) {
+                *is = true;
+            }
+        }
     }
-    at_door[0] = Some(entry);
-    let mut asking = vec![0usize];
 
-    while let Some(here) = asking.pop() {
-        let mut state = at_door[here].clone().expect("only asked about doors with state");
-        let op = code[here];
-        step(chunk, op, here, &mut state)?;
-        for gone in goes_to(op, here, code.len()) {
-            let merged = match &at_door[gone] {
-                None => state.clone(),
-                Some(seen) => {
-                    let merged = Slots {
-                        held: seen
-                            .held
-                            .iter()
-                            .zip(&state.held)
-                            .map(|(a, b)| join(*a, *b))
-                            .collect(),
-                    };
-                    if merged == *seen {
-                        continue;
+    let mut at_door: Vec<Option<Slots>> = vec![None; code.len()];
+    at_door[0] = Some(entry);
+    // Lowest first: the graph is almost entirely forward, so working in program order
+    // reaches the fixed point in one pass over straight code and a couple over loops.
+    let mut asking = std::collections::BTreeSet::new();
+    asking.insert(0usize);
+
+    while let Some(start) = asking.pop_first() {
+        let mut state = at_door[start].clone().expect("only doors with state are asked");
+        let mut here = start;
+        loop {
+            let op = code[here];
+            step(chunk, op, here, &mut state)?;
+
+            // Hand the state to every jump target, and keep walking on the fall-through
+            // while there is one that no merge guards.
+            let arrive = |gone: usize,
+                              with: &Slots,
+                              at_door: &mut Vec<Option<Slots>>,
+                              asking: &mut std::collections::BTreeSet<usize>| {
+                let merged = match &at_door[gone] {
+                    None => with.clone(),
+                    Some(seen) => {
+                        let merged = Slots {
+                            held: seen
+                                .held
+                                .iter()
+                                .zip(&with.held)
+                                .map(|(a, b)| join(*a, *b))
+                                .collect(),
+                        };
+                        if merged == *seen {
+                            return;
+                        }
+                        merged
                     }
-                    merged
-                }
+                };
+                at_door[gone] = Some(merged);
+                asking.insert(gone);
             };
-            at_door[gone] = Some(merged);
-            asking.push(gone);
+
+            match op {
+                Op::Jump { target } => {
+                    arrive(target as usize, &state, &mut at_door, &mut asking);
+                    break;
+                }
+                Op::Return { .. } | Op::ReturnNothing | Op::Halt => break,
+                Op::JumpIfFalse { target, .. }
+                | Op::JumpIfTrue { target, .. }
+                | Op::JumpIfGreater { target, .. }
+                | Op::JumpIfEqual { target, .. } => {
+                    arrive(target as usize, &state, &mut at_door, &mut asking);
+                }
+                _ => {}
+            }
+
+            here += 1;
+            if here == code.len() {
+                break;
+            }
+            if door[here] {
+                arrive(here, &state, &mut at_door, &mut asking);
+                break;
+            }
         }
     }
     Ok(())
+}
+
+/// Every instruction a jump in `op` can land on.
+fn targets_of(op: Op) -> impl Iterator<Item = usize> {
+    match op {
+        Op::Jump { target }
+        | Op::JumpIfFalse { target, .. }
+        | Op::JumpIfTrue { target, .. }
+        | Op::JumpIfGreater { target, .. }
+        | Op::JumpIfEqual { target, .. } => Some(target as usize),
+        _ => None,
+    }
+    .into_iter()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -252,22 +319,3 @@ fn array_of(state: &Slots, array: u16, here: usize) -> Result<Ty, Broken> {
     }
 }
 
-/// Where an instruction can go next.
-fn goes_to(op: Op, here: usize, len: usize) -> Vec<usize> {
-    let next = here + 1;
-    let step = match op {
-        Op::Jump { target } => return vec![target as usize],
-        Op::Return { .. } | Op::ReturnNothing | Op::Halt => return Vec::new(),
-        Op::JumpIfFalse { target, .. }
-        | Op::JumpIfTrue { target, .. }
-        | Op::JumpIfGreater { target, .. }
-        | Op::JumpIfEqual { target, .. } => {
-            if next < len {
-                return vec![target as usize, next];
-            }
-            return vec![target as usize];
-        }
-        _ => next,
-    };
-    if step < len { vec![step] } else { Vec::new() }
-}

@@ -98,3 +98,46 @@ fn the_unwritten_and_the_disagreed_are_refused_only_when_read() {
         "a dead disagreement was refused"
     );
 }
+
+/// A straight-line program of `statements` declarations, the shape that exposed the
+/// first version's quadratic: registers grow with statements, and a pass keeping state
+/// per instruction cloned a register-count vector once per statement.
+fn straight_line(statements: usize) -> String {
+    let mut source = String::new();
+    for n in 0..statements {
+        match n % 3 {
+            0 => source.push_str(&format!("var.local.i64 ['a{n}'] = [|{n}|];\n")),
+            1 => source.push_str(&format!("var.local.b64 ['a{n}'] = [|1.5|];\n")),
+            // Always reads a slot two back, which the cycle keeps `i64`.
+            _ => source.push_str(&format!(
+                "var.local.i64 ['a{n}'] = [math {{ 'a{}' + 1 }}];\n",
+                n - 2
+            )),
+        }
+    }
+    source.push_str("print['a0' \\n];\n");
+    source
+}
+
+/// One big chunk rather than many small ones: the corpus proves no false refusals,
+/// this proves the pass is willing to read a real program's worth in one sitting.
+#[test]
+fn twelve_thousand_statements_type_in_one_chunk() {
+    let chunk = chunk_of(&straight_line(12_000));
+    luarust_vm::typed::well_typed(&chunk).expect("a large honest chunk types");
+}
+
+/// The scaling curve, for eyes rather than assertions: each doubling should roughly
+/// double the cost. The quadratic this replaced quadrupled it.
+#[test]
+#[ignore = "a measurement, run by hand with --nocapture"]
+fn the_pass_scales_linearly() {
+    for statements in [1_500, 3_000, 6_000, 12_000, 24_000] {
+        let chunk = chunk_of(&straight_line(statements));
+        let t0 = std::time::Instant::now();
+        for _ in 0..8 {
+            luarust_vm::typed::well_typed(&chunk).expect("it types");
+        }
+        println!("{statements:6} statements: {:?} for 8 passes", t0.elapsed());
+    }
+}
