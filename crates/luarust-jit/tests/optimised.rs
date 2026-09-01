@@ -94,3 +94,38 @@ fn the_native_path_adds_a_main_and_its_tables_and_nothing_else() {
     theirs.retain(|name| name != "luarust_start" && name != "luarust_finish");
     assert_eq!(declared(&in_memory), theirs, "the two paths want different helpers");
 }
+
+/// A loop over an array vectorises.
+///
+/// It did not for the whole of this language's life, and nothing said so: the answers were
+/// right, every path agreed, and an array loop quietly cost ninety times what it should.
+/// What was in the way was two runtime calls per element — one to find the array's base
+/// and one to check the index — that LLVM had to assume might write anything.
+///
+/// The fix was to say they only read, in the spelling modern LLVM actually consults. The
+/// guard is here rather than a comment because the failure is invisible from the outside:
+/// a program with no vector instructions in it prints exactly what one with them prints.
+#[test]
+fn a_loop_over_an_array_reaches_the_vector_unit() {
+    let chunk = chunk_of(
+        "var.local.mut.array.ui64 ['xs'] = [filled[|100000|, |3|]];\n\
+         var.local.mut.ui64 ['total'] = [|0|];\n\
+         loop.temp.range.ui32 ['i'] = [|1|, |100000|] {\n\
+             set ['total'] = [math { 'total' + 'xs'['i'] }];\n\
+         }\n\
+         print['total'];",
+    );
+    let ir = luarust_jit::emit_ir(&chunk).expect("the JIT takes this");
+
+    let vectors = ir.matches(" x i64>").count();
+    assert!(vectors > 0, "the array loop did not vectorise:\n{ir}");
+
+    // And the reason it can: the base pointer is fetched outside the loop, not per
+    // element. A loop body that still calls for it has not been hoisted, whatever else
+    // the optimiser managed.
+    let in_the_loop = ir
+        .split("\n\n")
+        .filter(|block| block.contains("phi i64"))
+        .any(|block| block.contains("@luarust_array_base"));
+    assert!(!in_the_loop, "the base pointer is still fetched every iteration:\n{ir}");
+}

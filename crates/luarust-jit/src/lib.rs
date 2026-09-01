@@ -572,7 +572,28 @@ fn optimise(module: &Module<'_>) {
     ) else {
         return;
     };
-    let _ = module.run_passes("default<O3>", &machine, PassBuilderOptions::create());
+    // Twice, and the second one is not superstition.
+    //
+    // `luarust_array_base` and `luarust_array_len` are opaque calls that a loop over an
+    // array makes on every pass. Telling LLVM they only read memory is what allows them
+    // out of the loop -- but the first run does not take them out, and a second identical
+    // run does. The attributes unlock a hoist that only becomes available after other
+    // passes have reshaped the loop, and by then the run that would have used it is over.
+    // Checked by hand with `opt -passes='default<O3>'` on the module this had already
+    // finished with: the call left the loop on the second pass and not the first.
+    //
+    // The cost is compile time on a module that is already small. What it buys is an array
+    // loop that fetches its base pointer once instead of once per element.
+    // The module is told which machine it is for before anything optimises it. Without a
+    // triple LLVM has a data layout and no target, and several analyses answer more
+    // cautiously than they need to.
+    module.set_triple(&triple);
+    let options = PassBuilderOptions::create();
+    options.set_loop_interleaving(true);
+    options.set_loop_vectorization(true);
+    options.set_loop_slp_vectorization(true);
+    options.set_loop_unrolling(true);
+    let _ = module.run_passes("default<O3>", &machine, options);
 }
 
 /// Turn what the compiled program returned back into a fault.
@@ -832,12 +853,55 @@ impl<'ctx> Emitter<'ctx> {
             ptr_t.fn_type(&[i64_t.into()], false),
             None,
         );
+        // What an array loop costs turns on these four words.
+        //
+        // Undeclared, a call might write anything, so nothing can be hoisted across it and
+        // nothing vectorises -- and it is not enough to say it about one of them. A loop
+        // over an array calls *both* of these on every pass, `base` to find the elements
+        // and `len` to check the index, and one silent call poisons the other: LLVM will
+        // not lift a `readonly` call past a call it must assume writes memory. Saying it
+        // about `base` alone changes nothing at all, which is exactly what measuring it
+        // showed before `len` was looked at.
+        //
+        // All four are true of both. They read the table of arrays and nothing else, they
+        // always return, they never unwind, and they have no effect worth speculating
+        // about -- the pointer and the length of an array that is already there.
+        let promise = |function: FunctionValue<'ctx>| {
+            for name in ["nounwind", "willreturn", "speculatable"] {
+                let kind = inkwell::attributes::Attribute::get_named_enum_kind_id(name);
+                function.add_attribute(
+                    inkwell::attributes::AttributeLoc::Function,
+                    context.create_enum_attribute(kind, 0),
+                );
+            }
+            // `memory(read)`, and not the `readonly` that means the same thing.
+            //
+            // `readonly` is the old spelling. LLVM upgrades one when it *parses* it, which
+            // is why `opt` acted on this and setting the enum attribute here did not --
+            // the same pipeline, the same module, and a hoist in one and not the other,
+            // for a whole evening. Modern analyses read the `memory` attribute and nothing
+            // else looks at the legacy name.
+            //
+            // The value is the memory-effects bitmask: two bits per location, and `Ref`
+            // -- reads, never writes -- in every one of them. Every one, and not the three
+            // that would have been enough to get the hoist: these do read other memory,
+            // the table of arrays being exactly that, and claiming otherwise would be a
+            // faster lie.
+            let read_everywhere = 0b01_01_01_01;
+            let memory = inkwell::attributes::Attribute::get_named_enum_kind_id("memory");
+            function.add_attribute(
+                inkwell::attributes::AttributeLoc::Function,
+                context.create_enum_attribute(memory, read_everywhere),
+            );
+        };
+        promise(array_base);
         if let Some(engine) = engine {
             engine.add_global_mapping(&array_base, runtime::array_base as *const () as usize);
         }
 
         let array_len =
             module.add_function("luarust_array_len", i64_t.fn_type(&[i64_t.into()], false), None);
+        promise(array_len);
         if let Some(engine) = engine {
             engine.add_global_mapping(&array_len, runtime::array_len as *const () as usize);
         }

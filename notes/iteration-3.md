@@ -113,52 +113,43 @@ So the order, if any of it happens: parallel loops first, isolated tasks second,
 shared-memory threads last if ever, because that one argues with the first line of the
 README.
 
-**Array loops cost about ninety times what they should.** Measured 2026-09-01, summing a
+**Array loops are level with C, and were ninety times off it until 2026-09-01.** Summing a
 hundred thousand `ui64` elements repeatedly, slope taken between 300 and 3000 rounds so
 process start is out of it:
 
-    C, clang -O2        0.06 ns per element
-    Luarust, native     5.18 ns per element
+                        before      after
+    C, clang -O2        0.06 ns     0.05 ns
+    Luarust, native     5.18 ns     0.05 ns
 
-That is the number to hold against the headline. On the scalar benchmark Luarust is 1.01x
-C; on an array loop it is nearly two orders of magnitude behind, and a README that only
-quotes the first is quoting the flattering half. C's loop is real and was checked -- ten
-times the rounds takes ten times the work once startup is subtracted -- it is simply
-vectorised, four elements at a time, where this is one element every twenty cycles.
+**What was wrong.** A loop over an array made two runtime calls on every element --
+`luarust_array_base` to find where the elements are, `luarust_array_len` to check the
+index. Both were declared with no attributes, so LLVM had to assume each might write any
+memory. Nothing could be hoisted across them and nothing vectorised, and the storage
+underneath was fine the whole time: an array of `ui64` really is a run of 64-bit words and
+the element read really was an ordinary load.
 
-What *is* already right is the storage. An array of `ui64` is a real run of 64-bit words,
-not a vector of boxed values, and the element read compiles to an ordinary load. The cost
-is entirely in what surrounds the load.
+**What took a whole evening.** Saying `readonly` on both is true, lands in the IR, and
+changes nothing. Running the pipeline twice changes nothing. Setting the loop-vectorisation
+and unrolling tuning options changes nothing. Setting the module triple changes nothing.
+And all the while `opt -passes='default<O3>'` on the *same* module hoisted the call clear
+out to the outermost preheader, and `opt -passes='loop-mssa(licm)'` alone did it too.
 
-**And the reason is not where it looks.** Measured 2026-09-01. Summing an array compiles to this, once optimised:
+The difference was the spelling. `readonly` is the old name for the attribute; LLVM
+upgrades one when it *parses* it, which is why `opt` acted on it and setting the enum
+attribute in-process did not. Nothing modern looks at the legacy name. Setting `memory`
+instead -- the bitmask, two bits a location, `Ref` in every one -- hoists the call and
+vectorises the loop.
 
-```llvm
-in.range:
-  %base    = tail call ptr @luarust_array_base(i64 %array)   ; every iteration
-  %offset  = shl nuw nsw i64 %from.nought37, 3
-  %slot    = getelementptr i8, ptr %base, i64 %offset
-  %element = load i64, ptr %slot, align 8
-  %add     = add i64 %element, %r1.036
-```
+Worth knowing for the next time an attribute seems to do nothing: check what the *printed*
+IR calls it, not what you set.
 
-The element read is already an inline load, which is right. What is wrong is that the base
-pointer is fetched by a call on every pass, and an opaque call in a loop stops LLVM
-hoisting anything across it or vectorising any of it.
-
-The obvious fix is not the fix. Declaring `luarust_array_base` as
-`readonly nounwind willreturn` is *true* and changes nothing measurable -- tried, 178 ms
-against 170 on a thirty-million-element sweep, which is inside this machine's drift, so it
-was taken back out rather than kept as churn. LICM still will not hoist the call, because
-the call sits under the bounds check: hoisting it would run it on a loop that turns out to
-have no iterations. What would let it hoist is `speculatable`, and that would be a lie --
-`heap::base_of` indexes a `Vec`, so a speculated call on a bad handle panics a program that
-was going to be fine.
-
-So the thing actually in the way is **the bounds check**, and the thing that would remove it
-is the value-range analysis proving the index in range -- the same machinery that already
-proves a dividend non-negative. Do that and the check goes, the call becomes unconditional,
-`readonly` becomes enough to hoist it, and what is left is a strided load and an integer-add
-reduction, which LLVM vectorises without being asked twice. Three wins from one proof.
+**One caveat on the claim.** `memory(read)` says these calls only read. They also take a
+`RefCell` borrow, which writes a flag -- so it is very slightly stronger than the truth.
+Nothing compiled ever reads that flag, every borrow is balanced inside the call, and the
+ordering that actually matters still holds: the calls that *grow* an array carry no
+attributes, so LLVM treats them as writing everything and will not lift a read across one.
+Making the claim exactly true means reading the base and length without touching the
+`RefCell` -- a small spans table read through a raw pointer -- and is worth doing.
 
 ## Not iteration 3
 
