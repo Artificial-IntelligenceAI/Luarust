@@ -24,7 +24,6 @@ pub use chunk::{Chunk, Op};
 pub use compile::compile;
 pub use serialize::{Broken, Loaded, read, write};
 
-use luarust_core::ty::MAX_RANK;
 use luarust_core::{BinOp, Ty};
 use luarust_core::heap;
 use luarust_core::value::{
@@ -164,7 +163,7 @@ enum Micro {
     /// whole thing out. That happened on every element read, to fetch something that
     /// cannot change while a program runs. It is fetched here instead, once, when the
     /// instruction is first widened.
-    At { dst: chunk::Reg, array: chunk::Reg, at: u16, rank: u8, dims: [u32; MAX_RANK] },
+    At { dst: chunk::Reg, array: chunk::Reg, at: u16, rank: u8, shape: u8 },
     Other(Op),
 }
 
@@ -184,10 +183,8 @@ fn widen(code: &[Op], mut counters: Option<&mut Vec<u32>>) -> Vec<Micro> {
                 Micro::Back { target, counter }
             }
             Op::At { dst, array, at, rank, ty } => {
-                let shape = ty.array().expect("only an array is indexed");
-                let mut dims = [0u32; MAX_RANK];
-                dims[..shape.dims().len()].copy_from_slice(shape.dims());
-                Micro::At { dst, array, at, rank, dims }
+                let Ty::Array(shape) = ty else { return Micro::Other(op) };
+                Micro::At { dst, array, at, rank, shape }
             }
             Op::Binary { op: BinOp::Add, ty, dst, lhs, rhs, .. } if ty.is_integer() => {
                 Micro::Add { ty, dst, lhs, rhs }
@@ -279,6 +276,12 @@ pub fn run_with(
     // level up front and each routine the first time something enters it. Nothing is
     // counted at all when nothing is listening, which is what keeps the plain VM paying
     // nothing for machinery it is not using.
+    // Every array shape the program named, taken once. Asking for one per element read
+    // is a thread local, a `RefCell` and a copy, for something that cannot change while a
+    // program runs — and putting the dimensions in the instruction instead made every
+    // instruction fetch in the whole machine eight bytes heavier, which the arithmetic
+    // pays for too.
+    let shapes = luarust_core::ty::shapes();
     let mut counters: Vec<u32> = Vec::new();
     let (top, threshold) = match &tier {
         // Never nought: a counter is compared after it is raised, so a threshold nothing
@@ -341,14 +344,14 @@ pub fn run_with(
                 }
                 at = target as usize;
             }
-            Micro::At { dst, array, at, rank, dims } => {
+            Micro::At { dst, array, at, rank, shape } => {
                 let Some(handle) = handle_of(&registers[array as usize]) else {
                     return Err(Stopped {
                         fault: not_as_described("this says it indexes an array"),
                         span: spans[here],
                     });
                 };
-                let index = offset(&dims[..], handle, registers, at, rank)
+                let index = offset(shapes[shape as usize].dims(), handle, registers, at, rank)
                     .map_err(|fault| Stopped { fault, span: spans[here] })?;
                 let held = heap::read(handle, index).ok_or_else(|| Stopped {
                     fault: out_of_range(index as i128 + 1, heap::length(handle) as i128),
@@ -758,15 +761,33 @@ fn offset(
     let mut flat = 0usize;
 
     for place in 0..rank as usize {
-        let held = registers[at as usize + place].as_i128().unwrap_or(0);
+        // The index at sixty-four bits, which is every width this language has. It was
+        // `as_i128`, and widening cost a match, a pair of 128-bit shifts and 128-bit
+        // comparisons on every element read, to hold a number that never needed the room.
+        // The same mistake as `Division::apply` made, in a hotter place.
+        let held: i64 = match &registers[at as usize + place] {
+            Value::Num { ty, bits } if ty.is_signed() => {
+                let shift = 64 - ty.int_bits().unwrap_or(64);
+                ((*bits << shift) as i64) >> shift
+            }
+            // An unsigned index past `i64::MAX` is past the end of any array there could
+            // be, so holding it down keeps the comparison in one register. The fault path
+            // reads the real value again to report it.
+            Value::Num { bits, .. } => (*bits).min(i64::MAX as u64) as i64,
+            _ => 0,
+        };
         // A shaped array knows its bounds without asking. One that grows does not -- and
         // `heap::read` is about to check the index against the real length anyway, so
         // asking here as well meant two trips through the heap for every element read,
         // the second of them computing a number only the error path ever looks at. Too
         // small an index is still caught here, because that one nothing downstream sees.
-        let past = (!dims.is_empty()).then(|| i128::from(dims[place]));
+        let past = (!dims.is_empty()).then(|| i64::from(dims[place]));
         if held < 1 || past.is_some_and(|past| held > past) {
-            return Err(out_of_range(held, past.unwrap_or_else(|| heap::length(handle) as i128)));
+            let reported = registers[at as usize + place].as_i128().unwrap_or(0);
+            return Err(out_of_range(
+                reported,
+                past.map_or_else(|| heap::length(handle) as i128, i128::from),
+            ));
         }
         flat = flat * dims.get(place).copied().unwrap_or(1) as usize + (held as usize - 1);
     }
@@ -810,4 +831,16 @@ fn fewer_than_none() -> Box<Fault> {
         "an array holds none or more",
         "give it a length of nought or more.",
     ))
+}
+
+#[cfg(test)]
+mod sizes {
+    #[test]
+    fn micro_is_not_bigger_than_the_op_it_widens() {
+        // Every instruction fetch loads one of these, so its size is a cost the whole
+        // dispatch loop pays whether or not the wide variant is the one running.
+        let micro = std::mem::size_of::<super::Micro>();
+        let op = std::mem::size_of::<crate::Op>();
+        assert!(micro <= op, "Micro is {micro} bytes against Op's {op}");
+    }
 }

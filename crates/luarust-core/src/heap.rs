@@ -337,8 +337,17 @@ pub fn element_of(index: u32) -> Ty {
 /// Element `at`, as a value. `None` when there is no such element.
 pub fn read(index: u32, at: usize) -> Option<Value> {
     HEAP.with(|heap| {
-        let heap = heap.borrow();
-        let array = &heap[index as usize];
+        // Read without the borrow flag. `borrow()` is a read, a compare, a write and a
+        // second write when the guard drops, on every element a loop touches — for a check
+        // that cannot fail here. Nothing between this line and the end of the function
+        // touches the heap again: `load` reads one element and builds a value out of it,
+        // and the only heap it could reach is this one, which it does not.
+        //
+        // # Safety
+        // The heap is one thread's, and no `&mut` to it can be live: everything that takes
+        // one does so inside its own `HEAP.with`, and none of them calls this.
+        let heap = unsafe { &*heap.as_ptr() };
+        let array = heap.get(index as usize)?;
         if at >= array.len() {
             return None;
         }

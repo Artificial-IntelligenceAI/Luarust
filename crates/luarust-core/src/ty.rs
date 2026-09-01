@@ -76,6 +76,16 @@ pub fn intern(shape: Shape) -> Option<u8> {
 }
 
 /// The shape an array type names.
+/// Every shape a program named, copied out once.
+///
+/// The table is append-only and a program's shapes are all interned before it runs, so a
+/// snapshot is the whole truth for as long as it runs. Something that reads shapes in a
+/// loop takes one of these rather than asking `shape_of` per element — that is a thread
+/// local and a `RefCell` and a copy, to fetch what cannot change.
+pub fn shapes() -> Vec<Shape> {
+    SHAPES.with(|table| table.borrow().clone())
+}
+
 pub fn shape_of(index: u8) -> Shape {
     SHAPES.with(|table| table.borrow()[index as usize])
 }
