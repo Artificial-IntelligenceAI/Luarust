@@ -21,14 +21,27 @@ loops, and what is being measured is one add and one remainder.
 | **Lua** | the language Luarust is a ripoff of |
 | **LuaJIT** | what a very good tracing JIT does with that language |
 | **CPython** | the interpreter everybody has actually used |
-| **lust-rs** | typed Lua that compiles, written in Rust |
 | **Luau** | typed Lua that compiles, written in C++ |
-| **Ravi** | typed Lua that compiles, written in C, through LLVM |
+| **lust-rs** | typed Lua that compiles, written in Rust |
+
+and every way this language has of running a program:
+
+| | |
+| --- | --- |
+| **Luarust, native** | compiled ahead of time; the target needs nothing |
+| **Luarust, whole JIT** | all of it through LLVM before it starts |
+| **Luarust, hot JIT** | interpreted until a loop proves itself |
+| **Luarust, bytecode VM** | the bytecode, interpreted |
+| **Luarust, tree-walker** | the reference implementation, and the oracle |
+
+**Every method, not the flattering ones.** The tree-walker is in the standard set and it
+is an order of magnitude off the VM. A standard set that quietly dropped its slowest row
+would be a worse instrument than not having one.
 
 Named in `SUITES` in `run.py` rather than being whatever happened to be installed, so a
-variant later means naming a different list and not arguing about which rows a table has.
-Luarust's own rows are not in the suite: they are what is being measured, and this is the
-field.
+variant later means naming a different list and not arguing about which rows a table has —
+and so that a row missing from a table is a decision somebody made rather than a tool
+somebody forgot to install.
 
 ## The last three rows are the ones that matter
 
@@ -36,11 +49,6 @@ Everything above them is a language with different aims. These three share the p
 **take Lua, add static types, and use the types to compile.** That is this project's whole
 idea, and all three of them had it first.
 
-- **[Ravi](https://github.com/dibyendumajumdar/ravi)** is the closest by design — a dialect
-  of Lua 5.3 with optional static typing, an **LLVM JIT** and an ahead-of-time compiler,
-  which is Luarust's architecture down to the code generator. It modifies the VM to exploit
-  the types rather than checking them and lowering to stock Lua, which is the line Typed Lua
-  and Teal stop at. Written in C. Built from source, against LLVM; there is no package.
 - **[Luau](https://luau.org)** is the most finished — Roblox's Lua, gradual types, its own
   native code generator, and more hours of production use than everything else here put
   together. Written in C++. The standalone `luau` CLI is what gets timed, not the engine
@@ -49,15 +57,37 @@ idea, and all three of them had it first.
   `cargo install lust-rs`; its JIT is x86-64 only, so on an arm64 machine the row is its
   interpreter, and `.github/workflows/lust-probe.yml` looks at it on hardware that suits it.
 
-**None of them is "the closest thing to Luarust", and this file said lust-rs was.** That
-was one example wearing a superlative: it was the one this project had happened to
-investigate, and no comparison had been made. Ravi is closer by design and Luau is closer
-by maturity, and which of the three is *closest* depends on the axis, so the table names
-the axis instead of ranking them.
+**Neither is "the closest thing to Luarust", and this file said lust-rs was.** That was one
+example wearing a superlative: it was the one this project had happened to investigate, and
+no comparison had been made. The table names the axis each is closest on and ranks nothing.
+
+## Known, and not standard
+
+`KNOWN` in `run.py` is everything the harness can run. Two rows are in it and not in `std`,
+because a standard set is a list somebody chose rather than everything that would go.
+
+**PyPy** — the harness runs it and `std` does not ask for it.
+
+**[Ravi](https://github.com/dibyendumajumdar/ravi)** — and this one is out for a reason
+worth writing down, because by design it is the closest thing to Luarust that exists: a
+dialect of Lua 5.3 with optional static typing, an **LLVM JIT** and an ahead-of-time
+compiler, which is this language's architecture down to the code generator. It modifies the
+VM to exploit the types rather than checking them and lowering to stock Lua, where Typed Lua
+and Teal stop.
+
+It is out of `std` because installing it is not one command. There is no package; it builds
+from source against LLVM, its own Dockerfile pins CMake 3.14, and it has not been touched
+since February 2025 — CMake 4 dropped compatibility below 3.10 and all three of its
+`CMakeLists.txt` ask for 3.12. And its build defaults `ASAN` to **ON**, so a stock
+`cmake .. && make` produces a Ravi crippled by the address sanitizer. A number from that
+build sitting in a table next to Luarust's would flatter this language for no reason at
+all, which is a worse outcome than an empty row.
+
+`bench/loop.ravi` and its runner are kept for whoever does it properly:
+`cmake -DCMAKE_BUILD_TYPE=Release -DASAN=OFF ..`.
 
 A row for something not installed says `not installed` rather than going quietly missing —
-the same rule the native row has had since it could fail to link. Three of eleven are
-absent on the machine this was written on.
+the same rule the native row has had since it could fail to link.
 
 **PyPy is known but not standard.** `run.py` can run it and `std` does not ask for it. The
 set is a list somebody chose, not everything the machine has.

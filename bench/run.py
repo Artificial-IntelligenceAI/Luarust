@@ -68,11 +68,15 @@ TOOLS = {
     "luarust": str(ROOT / "target/release/luarust"),
 }
 
-# The standard set: what Luarust is measured against, and nothing else. Named rather than
-# implied, so that adding a variant later means naming a different list here instead of
-# arguing about which rows a table happens to have.
+# The standard set. Named rather than implied, so that adding a variant later means
+# naming a different list here instead of arguing about which rows a table happens to
+# have -- and so that a row missing from a table is a decision somebody made rather than
+# a tool somebody forgot to install.
 #
-# Luarust's own rows are not in it. They are what is being measured; this is the field.
+# It names Luarust's own ways of running as well as the field. Every method, not the
+# flattering ones: the tree-walker is in here and it is thirty times slower than C, which
+# is the point. A standard set that quietly dropped the slow row would be a worse
+# instrument than one that did not exist.
 SUITES = {
     "std": [
         "C, clang -O2",
@@ -83,20 +87,30 @@ SUITES = {
         "Lua 5.5",
         "LuaJIT 2.1",
         "CPython 3.14",
-        # The three that share this language's premise rather than just its shape: typed
-        # Lua that compiles. Ravi and Luau got there first, in C and C++; lust-rs is the
-        # one that got there in Rust.
-        "lust-rs",
+        # Typed Lua that compiles, which is this language's premise: one that got there in
+        # C++ and one that got there in Rust.
         "Luau",
-        "Ravi",
+        "lust-rs",
+        # Every way this language has of running a program.
+        "Luarust, native",
+        "Luarust, whole JIT",
+        "Luarust, hot JIT",
+        "Luarust, bytecode VM",
+        "Luarust, tree-walker",
     ],
 }
 
-# Every language the harness knows how to run, standard set or not. A row here and not in
-# a suite is one somebody has to ask for -- PyPy is the first of those, kept because the
-# work of running it is already done and dropped from `std` because `std` is a list
-# somebody chose rather than everything that happened to be installed.
-KNOWN = SUITES["std"] + ["PyPy 7.3"]
+# Every row the harness knows how to run, standard set or not. One here and not in a
+# suite is one somebody has to ask for.
+#
+# `Ravi` is the other of those, and it is the closest thing to this language by design --
+# Lua 5.3 with optional static typing, an LLVM JIT and an ahead-of-time compiler. It is
+# out of `std` because building it is not one command: it wants a CMake old enough for a
+# project last touched in February 2025, and defaults its build to the address sanitizer,
+# which would put a crippled Ravi in a table beside Luarust and flatter this language for
+# no reason. `bench/loop.ravi` and the runner are kept for whoever wants to do it
+# properly.
+KNOWN = SUITES["std"] + ["PyPy 7.3", "Ravi"]
 
 def version(tool, *args):
     try:
@@ -180,6 +194,8 @@ def measure(n, wanted):
         ("Luarust, bytecode VM", "vm", "run"),
         ("Luarust, tree-walker", "vm", "interp"),
     ]:
+        if label not in wanted:
+            continue
         folder = tempfile.mkdtemp(prefix="luarust-bench-lr-")
         pathlib.Path(folder, "loop.lr").write_text(sized("loop.lr", n))
         pathlib.Path(folder, "Luarust.toml").write_text(f'[run]\nmode = "{mode}"\n')
@@ -189,6 +205,9 @@ def measure(n, wanted):
     # is deliberately outside the measurement -- that cost is paid by whoever ships it,
     # not by whoever runs it, which is the whole difference between this row and the rest
     # of the Luarust ones.
+    if "Luarust, native" not in wanted:
+        row("CPython 3.14", [TOOLS["python"], f"{build}/loop.py"])
+        return took
     folder = tempfile.mkdtemp(prefix="luarust-bench-native-")
     pathlib.Path(folder, "loop.lr").write_text(sized("loop.lr", n))
     pathlib.Path(folder, "Luarust.toml").write_text('[run]\nmode = "vm"\n')
