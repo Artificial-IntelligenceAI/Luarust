@@ -39,8 +39,38 @@ TOOLS = {
     "pypy3":   "/opt/homebrew/bin/pypy3",
     "python":  "/opt/homebrew/bin/python3.14",
     "go":      "/opt/homebrew/bin/go",
+    "node":    shutil.which("node") or "node",
+    # `cargo install lust-rs`. Its JIT is x86-64 only, so on an arm64 machine this row is
+    # its interpreter and says so; `.github/workflows/lust-probe.yml` is where it gets
+    # looked at on hardware that suits it.
+    "lust":    shutil.which("lust") or "lust",
     "luarust": str(ROOT / "target/release/luarust"),
 }
+
+# The standard set: what Luarust is measured against, and nothing else. Named rather than
+# implied, so that adding a variant later means naming a different list here instead of
+# arguing about which rows a table happens to have.
+#
+# Luarust's own rows are not in it. They are what is being measured; this is the field.
+SUITES = {
+    "std": [
+        "C, clang -O2",
+        "Rust, rustc -O",
+        "Java 21",
+        "JavaScript, node",
+        "Go 1.26",
+        "Lua 5.5",
+        "LuaJIT 2.1",
+        "CPython 3.14",
+        "lust-rs",
+    ],
+}
+
+# Every language the harness knows how to run, standard set or not. A row here and not in
+# a suite is one somebody has to ask for -- PyPy is the first of those, kept because the
+# work of running it is already done and dropped from `std` because `std` is a list
+# somebody chose rather than everything that happened to be installed.
+KNOWN = SUITES["std"] + ["PyPy 7.3"]
 
 def version(tool, *args):
     try:
@@ -73,7 +103,7 @@ def expected(n):
     return str((n * (n + 1) // 2) % 1000000007)
 
 
-def measure(n):
+def measure(n, wanted):
     """Every runner, at one size. Returns {name: (ms, answer)}."""
     build = tempfile.mkdtemp(prefix="luarust-bench-")
     for name, out in [("loop.c", "loop.c"), ("loop.rs", "loop.rs"), ("Loop.java", "Loop.java")]:
@@ -85,17 +115,30 @@ def measure(n):
     pathlib.Path(build, "loop.go").write_text(sized("loop.go", n))
     pathlib.Path(build, "go.mod").write_text("module bench\n\ngo 1.21\n")
     subprocess.run([TOOLS["go"], "build", "-o", f"{build}/loop_go", "loop.go"], cwd=build, check=True)
-    for name in ("loop.lua", "loop.py"):
+    for name in ("loop.lua", "loop.py", "loop.js", "loop.lust"):
         pathlib.Path(build, name).write_text(sized(name, n))
 
     took = {}
-    took["C, clang -O2"] = timed([f"{build}/loop_c"])
-    took["Rust, rustc -O"] = timed([f"{build}/loop_rs"])
-    took["Java 21"] = timed([TOOLS["java"], "-cp", build, "Loop"])
-    took["PyPy 7.3"] = timed([TOOLS["pypy3"], f"{build}/loop.py"])
-    took["Lua 5.5"] = timed([TOOLS["lua"], f"{build}/loop.lua"])
-    took["LuaJIT 2.1"] = timed([TOOLS["luajit"], f"{build}/loop.lua"])
-    took["Go 1.26"] = timed([f"{build}/loop_go"])
+
+    def row(label, argv, cwd=None):
+        """Run one language, if this suite asked for it and the machine has it."""
+        if label not in wanted:
+            return
+        if not pathlib.Path(argv[0]).exists() and shutil.which(argv[0]) is None:
+            # Said out loud rather than left as a missing row, the same as the native one.
+            took[label] = (None, f"not installed: {argv[0]}")
+            return
+        took[label] = timed(argv, cwd)
+
+    row("C, clang -O2", [f"{build}/loop_c"])
+    row("Rust, rustc -O", [f"{build}/loop_rs"])
+    row("Java 21", [TOOLS["java"], "-cp", build, "Loop"])
+    row("PyPy 7.3", [TOOLS["pypy3"], f"{build}/loop.py"])
+    row("Lua 5.5", [TOOLS["lua"], f"{build}/loop.lua"])
+    row("LuaJIT 2.1", [TOOLS["luajit"], f"{build}/loop.lua"])
+    row("Go 1.26", [f"{build}/loop_go"])
+    row("JavaScript, node", [TOOLS["node"], f"{build}/loop.js"])
+    row("lust-rs", [TOOLS["lust"], f"{build}/loop.lust"])
 
     # Luarust's engines. The project file goes beside a copy of the source, so the one in
     # the repository is never rewritten to run a benchmark.
@@ -127,12 +170,18 @@ def measure(n):
         # archive, and a table quietly one row short is worse than one that explains.
         took["Luarust, native"] = (None, f"not built: {built.stderr.strip()[:120]}")
 
-    took["CPython 3.14"] = timed([TOOLS["python"], f"{build}/loop.py"])
+    row("CPython 3.14", [TOOLS["python"], f"{build}/loop.py"])
     return took
 
 
 def main():
-    at = {n: measure(n) for n in SIZES}
+    asked = sys.argv[1] if len(sys.argv) > 1 else "std"
+    if asked not in SUITES:
+        print(f"no suite named {asked!r}. There is: {', '.join(sorted(SUITES))}")
+        return 2
+    wanted = SUITES[asked]
+    print(f"suite: {asked} — {', '.join(wanted)}")
+    at = {n: measure(n, wanted) for n in SIZES}
     small, big = SIZES[0], SIZES[-1]
 
     wrong = [
