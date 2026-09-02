@@ -44,9 +44,50 @@ Three things already in the code, none of them put there for this:
 ## Why the VM cannot call the JIT
 
 The JIT reads chunks, so it depends on `luarust-vm`; a dependency the other way would close
-the circle. So the VM takes a `Tier` and the CLI implements it -- which is also what keeps
-`luarust-run` at a few hundred kilobytes. A runtime with no compiler in it installs no tier,
-never counts a back edge, and runs a chunk asking for `"hot"` on the VM without comment.
+the circle. So the VM takes a `Tier` and something above both implements it. A build with
+no compiler in it installs no tier, never counts a back edge, and runs a chunk asking for
+`"hot"` on the VM -- which is what keeps a runtime at a few hundred kilobytes.
+
+**Two details of that changed on 2026-09-02 and this section used to say otherwise.**
+
+`Compiling` lived in the CLI, on the reasoning that it was the one place holding both
+halves. The circle is still real; the other half of that reasoning -- that the JIT has no
+business driving the VM -- was a preference, and it stopped being affordable when a second
+binary wanted a hot loop taken off it. It lives in `luarust-jit` now, which is the only
+crate that has to exist for either caller to work.
+
+That second binary is `luarust-run --features jit`, off by default. A runtime that does not
+ask still has no compiler in it at all; what the feature buys is that shipping a program
+which wants `"hot"` means shipping a *runtime* rather than the toolchain. It is worth more
+than it looks: stripped, the runtime is 0.6 MB, the runtime with a JIT 42.7 MB, and the
+toolchain with a JIT 100.2 MB -- because `write_object` calls `Target::initialize_all` so
+`luarust native` can build for a machine that is not this one, and the toolchain therefore
+links a code generator for every architecture LLVM has. A runtime compiles for the machine
+it is standing on and wants exactly one of them.
+
+And it no longer happens *without comment*. A build with no JIT now says once, on `stderr`,
+that the chunk asked for an engine it has not got and is running on the VM. Refusing to run
+would help nobody; running several times slower than asked and saying nothing is a
+different thing, and it was only noticed because `luarust jit` on the same build explains
+itself at length while a chunk asking for the same thing got silence.
+
+## What "compile once, run anywhere" does and does not cover
+
+The chunk is compiled once and runs anywhere. The *machine code* is not: there is no
+cross-run cache anywhere in `luarust-jit`, and `Compiling.kept` is a `Vec` in the process
+that goes when the process does. So a `"hot"` program compiles from bytecode to machine
+code on every single run, on every machine, and throws it away at exit. Twenty thousand
+iterations of an add loop: 4.4 ms on the VM, 7.0 ms hot, and the difference is LLVM being
+paid again.
+
+Which makes the three properties pick-two. `"vm"` compiles once and runs anywhere and is
+not fast. `"hot"` runs anywhere and is fast and recompiles every run. `native` compiles
+once and is fast and runs on one target -- the README says as much, that it "trades the
+anywhere for a binary that needs nothing on the machine it lands on."
+
+A cross-run cache keyed on the chunk's checksum -- FNV-1a, already in the file and already
+verified before any field is believed -- would give `"hot"` the third property. Nobody has
+asked for it and it is a real piece of work, not a footnote.
 
 ## Loops inside routines
 
