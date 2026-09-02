@@ -2621,3 +2621,114 @@ impl<'ctx> Emitter<'ctx> {
         }
     }
 }
+
+/// The thing that takes a hot loop off the VM.
+///
+/// This used to live in the CLI, on the reasoning that it was the one place holding both
+/// halves: the VM cannot reach the JIT without closing a dependency circle, and the JIT
+/// has no business driving the VM. The first half is still true and the second was a
+/// preference, which stopped being affordable the moment a second binary wanted a hot
+/// loop taken off it — `luarust-run` with its `jit` feature on. Two copies of a tier
+/// would be worse than one in the crate that has to exist for either of them to work.
+///
+/// Nothing that does not link the JIT can name this, which is the property the old
+/// arrangement was really protecting.
+pub struct Compiling {
+    /// What has been kept, or refused, per routine. Empty until the first loop goes hot,
+    /// since a program with no hot loop should pay nothing for a cache it never fills.
+    kept: Vec<Kept>,
+}
+
+impl Compiling {
+    /// A tier that has taken nothing yet.
+    pub fn new() -> Self {
+        Compiling { kept: Vec::new() }
+    }
+}
+
+impl Default for Compiling {
+    fn default() -> Self {
+        Compiling::new()
+    }
+}
+
+/// One routine's standing with the cache.
+enum Kept {
+    /// Never gone hot, so never compiled.
+    Unasked,
+    /// Compiled and held; every later call of it runs here.
+    Code(CompiledRoutine),
+    /// The JIT declined it once, which will not change by asking again.
+    Refused,
+}
+
+impl luarust_vm::Tier for Compiling {
+    fn hot(
+        &mut self,
+        chunk: &luarust_vm::Chunk,
+        routine: Option<usize>,
+        at: usize,
+        frames: Vec<Vec<luarust_core::value::Value>>,
+        started: std::time::Instant,
+        out: &mut dyn std::io::Write,
+    ) -> luarust_vm::Taken {
+        // A routine that went hot once will be called again — that is what hot means —
+        // so it is compiled for keeps as well as for this activation. The activation
+        // that tripped the counter is mid-loop and needs the resumed shape; every call
+        // after it enters at the top, on the kept one.
+        if let Some(index) = routine {
+            if self.kept.is_empty() {
+                self.kept.resize_with(chunk.funcs.len(), || Kept::Unasked);
+            }
+            if matches!(self.kept[index], Kept::Unasked) {
+                self.kept[index] = match compile_routine(chunk, index) {
+                    Ok(code) => Kept::Code(code),
+                    Err(declined) => {
+                        eprintln!(
+                            "the JIT declined to keep this routine: {}. Its calls stay \
+                             on the VM.",
+                            declined.because
+                        );
+                        Kept::Refused
+                    }
+                };
+            }
+        }
+        let taken = match routine {
+            None => resume(chunk, at, frames, started, out)
+                .map(luarust_vm::Taken::Finished),
+            Some(index) => resume_routine(chunk, index, at, frames, started, out)
+                .map(luarust_vm::Taken::Returned),
+        };
+        match taken {
+            Ok(taken) => taken,
+            Err(declined) => {
+                eprintln!(
+                    "the JIT declined this loop: {}. Carrying on with the VM.",
+                    declined.because
+                );
+                luarust_vm::Taken::Declined
+            }
+        }
+    }
+
+    fn keeps(&self, routine: usize) -> bool {
+        matches!(self.kept.get(routine), Some(Kept::Code(_)))
+    }
+
+    fn call(
+        &mut self,
+        _chunk: &luarust_vm::Chunk,
+        routine: usize,
+        open: &[&Vec<luarust_core::value::Value>],
+        fresh: Vec<luarust_core::value::Value>,
+        started: std::time::Instant,
+        out: &mut dyn std::io::Write,
+    ) -> Result<Option<luarust_core::value::Value>, luarust_core::value::Stopped> {
+        let Kept::Code(code) = &self.kept[routine] else {
+            unreachable!("only asked about a routine `keeps` said yes to");
+        };
+        code.call(open, fresh, started, out)
+    }
+}
+

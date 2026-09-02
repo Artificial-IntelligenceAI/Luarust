@@ -8,6 +8,15 @@ license.workspace = true
 name = "luarust-run"
 path = "src/main.rs"
 
+[features]
+default = []
+# Off by default, and that is the whole point: a runtime built without this carries no
+# compiler at all, which is what makes it 461 KB. Built with it, a chunk asking for
+# `[run] mode = "hot"` gets what it asked for on a machine that never had the toolchain.
+jit = ["dep:luarust-jit"]
+
 [dependencies]
+luarust-core = { path = "../luarust-core" }
 luarust-diag = { path = "../luarust-diag" }
+luarust-jit = { path = "../luarust-jit", optional = true }
 luarust-vm = { path = "../luarust-vm", default-features = false }

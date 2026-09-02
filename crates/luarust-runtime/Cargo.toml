@@ -10,7 +10,5 @@ publish = false
 # that only runs one needs the arithmetic, the heap and the printing, which is this. Keeping
 # them apart is what lets an ahead-of-time binary link the second without the first.
 [dependencies]
-luarust-check = { path = "../luarust-check" }
 luarust-core = { path = "../luarust-core" }
 luarust-num = { path = "../luarust-num" }
-luarust-parse = { path = "../luarust-parse" }

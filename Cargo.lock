@@ -202,7 +202,9 @@ dependencies = [
 name = "luarust-run"
 version = "0.0.0"
 dependencies = [
+ "luarust-core",
  "luarust-diag",
+ "luarust-jit",
  "luarust-vm",
 ]
 
@@ -210,10 +212,8 @@ dependencies = [
 name = "luarust-runtime"
 version = "0.0.0"
 dependencies = [
- "luarust-check",
  "luarust-core",
  "luarust-num",
- "luarust-parse",
 ]
 
 [[package]]

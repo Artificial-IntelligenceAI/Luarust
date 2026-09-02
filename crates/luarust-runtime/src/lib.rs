@@ -5,9 +5,9 @@
 //! functions the interpreter and the VM use. That is not a shortcut: it is what keeps the
 //! three paths giving the same answers instead of nearly the same ones.
 
-use luarust_check::value::{Fault, Overflow, Value, binary_op, compare, format_of, negate};
+use luarust_core::value::{Fault, Overflow, Value, binary_op, compare, format_of, negate};
 use luarust_num::binary::{self, Comparison, Round};
-use luarust_parse::ast::{BinOp, Ty};
+use luarust_core::{BinOp, Ty};
 use std::cell::RefCell;
 use std::time::Instant;
 
@@ -323,7 +323,7 @@ pub extern "C" fn cell_time_now(dst: u64, tag: u32) {
     put(dst, Value::float(ty, bits));
 }
 
-fn fault_code(fault: &luarust_check::value::Fault) -> i64 {
+fn fault_code(fault: &luarust_core::value::Fault) -> i64 {
     match fault.code {
         "R0002" => DIVIDE_BY_ZERO,
         "R0003" => REMAINDER_BY_ZERO,
@@ -676,7 +676,7 @@ pub fn fault_of(outcome: i64) -> Fault {
             code: "R0011",
             message: format!(
                 "this has called itself {} deep.",
-                luarust_check::value::DEPTH_LIMIT
+                luarust_core::value::DEPTH_LIMIT
             ),
             rule: "a call may only go so deep before the program is stopped",
             fix: "give the recursion a case that stops, or write it as a loop.".into(),

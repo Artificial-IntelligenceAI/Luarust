@@ -39,17 +39,27 @@ start, and the whole of what is known to be safe today.
 
 ## How big it is, honestly
 
-Small. Not a headline.
+Small. Not a headline, and smaller than the first draft of this note claimed.
 
-The case for it was partly that a `mode = "vm"` project cannot reach the JIT's speed
-without carrying thirty-two megabytes of LLVM, and that is wrong: **`luarust native` is
-level with C** — 2.17 ns an iteration against clang's 2.19 — and ships nothing extra on
-the target, because LLVM is only ever on the build machine. Anyone chasing speed has that
-answer already.
+That draft argued the niche was a deployment which wants **one portable `.lrc` rather than
+a per-target build matrix**, on the grounds that reaching the JIT's speed otherwise meant
+carrying thirty-two megabytes of LLVM to a stranger's machine. Tankun's answer to that was
+that 32 MB is about eight photographs, and nobody has ever declined software over it. He
+is right, and it took four goes to get there — the claim started as "`hot` cannot travel
+to a stranger's machine" and shrank every time it was checked:
 
-What is left is the deployment that wants **one portable `.lrc` rather than a per-target
-build matrix**, running on 461 KB of `luarust-run`. A real niche, and a bounded amount of
-work. If the measurement says the check is worth two per cent, say so and stop.
+- **`hot` travels.** LLVM is statically linked; the only dynamic dependencies of a
+  JIT-capable binary are `libzstd` and the system `libc++`. Nothing needs installing.
+- **LLVM was not the reason.** It was a packaging decision — `luarust-run` had no `jit`
+  feature and no way to gain one. It has one now.
+- **The front end was not the weight either.** It is 712 KB of a 32 MB binary, about two
+  per cent.
+- **And 32 MB is not a burden.** Node is 50–90 MB and a JDK is 180.
+
+So the honest case for `[run] chunks` is not that a portable deployment is *forced* onto
+the VM. It is that it *chooses* the VM — one file, 461 KB to run it on, no build matrix —
+and the setting is what makes that choice a little cheaper. Worth a bounded amount of
+work, and no more.
 
 ## Measure it first, and not by reading the code
 
