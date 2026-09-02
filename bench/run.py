@@ -20,6 +20,19 @@ ROOT = HERE.parent
 RUNS = 3
 SIZES = [10_000_000, 100_000_000]
 
+def newest_rokit(tool, binary):
+    """The newest version of a Rokit-managed tool, or `None` if it is not installed.
+
+    Rokit's own `bin` entries are shims that refuse to run outside a project manifest, so
+    the binary under `tool-storage` is what a benchmark can actually call.
+    """
+    store = pathlib.Path.home() / ".rokit" / "tool-storage" / tool.replace("/", "/")
+    if not store.is_dir():
+        return None
+    found = sorted(store.glob(f"*/{binary}"))
+    return str(found[-1]) if found else None
+
+
 def sized(name, n):
     """One source file with the iteration count filled in."""
     text = (HERE / name).read_text()
@@ -44,9 +57,11 @@ TOOLS = {
     # its interpreter and says so; `.github/workflows/lust-probe.yml` is where it gets
     # looked at on hardware that suits it.
     "lust":    shutil.which("lust") or "lust",
-    # Roblox's Lua. Gradual types and a native code generator; the standalone CLI is what
-    # is timed here, not the engine inside Studio.
-    "luau":    shutil.which("luau") or "luau",
+    # Roblox's Lua. The standalone CLI, not the engine inside Studio -- and not `lune`
+    # either, which embeds the same VM behind its own runtime. Rokit keeps its tools under
+    # a version, so the newest is found rather than a version being written down here to
+    # rot.
+    "luau":    shutil.which("luau") or newest_rokit("luau-lang/luau", "luau") or "luau",
     # A dialect of Lua 5.3 with optional static typing and an LLVM JIT -- this language's
     # design, arrived at first and written in C. Built from source; there is no package.
     "ravi":    shutil.which("ravi") or "ravi",
@@ -150,6 +165,10 @@ def measure(n, wanted):
     row("Go 1.26", [f"{build}/loop_go"])
     row("JavaScript, node", [TOOLS["node"], f"{build}/loop.js"])
     row("lust-rs", [TOOLS["lust"], f"{build}/loop.lust"])
+    # No `--codegen`. It was measured and it is *slower* on this loop -- 4.73 ns an
+    # iteration against 4.36 -- because Luau has no integer type, so `%` is `fmod`, and
+    # native code generation cannot call `fmod` better than the interpreter can. Every
+    # other row is its language at its best, and for Luau on this shape that is plain.
     row("Luau", [TOOLS["luau"], f"{build}/loop.luau"])
     row("Ravi", [TOOLS["ravi"], f"{build}/loop.ravi"])
 

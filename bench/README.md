@@ -80,6 +80,22 @@ JavaScript uses plain numbers rather than `BigInt`: every value the loop holds s
 2^53, so a double holds each one exactly. `BigInt` would be measuring an allocator and is
 not what anybody writes for arithmetic this size.
 
+**Luau runs without `--codegen`, and that is Luau at its best here.** Its native code
+generator was measured and is *slower* on this loop — 4.73 ns an iteration against 4.36.
+Luau has no integer type, so `%` on numbers is `fmod`, and native code cannot call `fmod`
+better than the interpreter can. Wrapping the loop in a function, which is how Luau's
+codegen is usually given something to work on, changes nothing. Every other row is its
+language at its best and this one is too; the flag is named here so that reads as a
+measurement rather than an oversight.
+
+**Which is the one asymmetry worth stating.** The loop is a remainder, and a language with
+64-bit integers does an integer remainder while a language whose only number is a double
+calls `fmod`. Lua 5.4 and later, Java, Go, C, Rust and Luarust are in the first group;
+JavaScript, Luau and LuaJIT are in the second. That is a real difference between those
+languages and not an artefact of the harness — but it is most of what separates the two
+groups here, and a reader comparing across the line should know that is what they are
+looking at.
+
 Build the release binary first, with the JIT in it, and the runtime archive beside it, or
 the Luarust rows have nothing to measure and the native one cannot be linked:
 
