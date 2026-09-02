@@ -518,7 +518,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `loop` `.temp|.perm` `.range` `.type` `[` name `]` `=` `[` from `,` to `]` `{` body `}`
+    /// `loop` `.temp|.perm` `[.para]` `.range` `.type` `[` name `]` `=` `[` from `,` to `]` `{` body `}`
     /// `loop.…` — a counting loop or a conditional one, told apart by the chain.
     fn loop_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span; // `loop`
@@ -527,27 +527,45 @@ impl<'a> Parser<'a> {
         let mut lifetime: Option<(Lifetime, Span)> = None;
         let mut kind: Option<(String, Span)> = None;
         let mut ty: Option<(Ty, Span)> = None;
+        // Where the loop said it may go round on several cores at once. A `Span` rather
+        // than a `bool` because everything a parallel loop is later refused for wants to
+        // point at the word that asked for it.
+        let mut para: Option<Span> = None;
         for (word, span) in &chain {
             match word.as_str() {
                 "temp" => lifetime = Some((Lifetime::Temp, *span)),
                 "perm" => lifetime = Some((Lifetime::Perm, *span)),
+                "para" => para = Some(*span),
                 "range" | "while" => kind = Some((word.clone(), *span)),
                 other => match Ty::from_word(other) {
                     Some(found) => ty = Some((found, *span)),
                     None => self.errors.push(
                         Diagnostic::new("E0102", format!("`{other}` is not part of a loop."))
                             .primary(*span, "written here")
-                            .rule("a loop's chain says how long its counter lives, what kind of loop it is, and the counter's type")
-                            .fix("use `temp` or `perm`, then `range` or `while`, then a type."),
+                            .rule("a loop's chain says how long its counter lives, whether it goes round in parallel, what kind of loop it is, and the counter's type")
+                            .fix("use `temp` or `perm`, then `para` if it should, then `range` or `while`, then a type."),
                     ),
                 },
             }
         }
 
         if kind.as_ref().is_some_and(|(word, _)| word == "while") {
+            // A `while` loop has no bounds and no counter it owns, so there is nothing to
+            // divide between threads and nothing that says how many passes there will be.
+            // Refused here rather than at the checker, because it is a fact about the
+            // shape of the loop and not about what its body does.
+            if let Some(span) = para {
+                self.errors.push(
+                    Diagnostic::new("E0135", "a `while` loop cannot go round in parallel.".to_string())
+                        .primary(span, "written here")
+                        .rule("`para` divides a known number of passes between threads, and a `while` loop does not know how many it will make")
+                        .tip("a counting loop's bounds are settled before it starts, which is what lets its passes be handed out.")
+                        .fix("delete `para`, or write it as `loop.temp.para.range` with bounds."),
+                );
+            }
             return self.while_loop(start, lifetime, ty).map(Stmt::While);
         }
-        self.counting_loop(start, lifetime, kind, ty).map(Stmt::Loop)
+        self.counting_loop(start, lifetime, kind, ty, para).map(Stmt::Loop)
     }
 
     /// `loop.while [ … ] { … }`, with a counter only if the chain asked for one.
@@ -638,6 +656,7 @@ impl<'a> Parser<'a> {
         lifetime: Option<(Lifetime, Span)>,
         kind: Option<(String, Span)>,
         ty: Option<(Ty, Span)>,
+        para: Option<Span>,
     ) -> Result<Loop> {
 
         let Some((lifetime, lifetime_span)) = lifetime else {
@@ -701,6 +720,7 @@ impl<'a> Parser<'a> {
         let end = self.advance(); // `}`
 
         Ok(Loop {
+            para,
             span: start.to(end.span),
             lifetime,
             lifetime_span,

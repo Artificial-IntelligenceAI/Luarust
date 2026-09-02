@@ -114,7 +114,7 @@
       "name": "support.type.luarust"
     },
     "control": {
-      "match": "\\b(handback|else-if|reached|return|while|range|break|else|loop|temp|perm|when|if)\\b",
+      "match": "\\b(handback|else-if|reached|return|while|range|break|else|loop|temp|perm|para|when|if)\\b",
       "name": "keyword.control.luarust"
     },
     "declaration": {

@@ -200,6 +200,14 @@ pub struct Print {
 #[derive(Clone, Debug)]
 pub struct Loop {
     pub span: Span,
+    /// Where `para` was written, when it was. A loop that says it may go round on several
+    /// cores at once -- an ordinary counting loop in every other way, which is the point:
+    /// deleting the word leaves a loop that means the same thing and runs in order.
+    ///
+    /// The span rather than a flag, because every later refusal wants to point at the word
+    /// that asked, and because the tree-walker ignoring it is what keeps the oracle: run
+    /// sequentially, a parallel loop is always a valid execution of itself.
+    pub para: Option<Span>,
     pub lifetime: Lifetime,
     pub lifetime_span: Span,
     pub counter: Ident,
