@@ -71,23 +71,45 @@ would help nobody; running several times slower than asked and saying nothing is
 different thing, and it was only noticed because `luarust jit` on the same build explains
 itself at length while a chunk asking for the same thing got silence.
 
-## What "compile once, run anywhere" does and does not cover
+## "Compile once, run anywhere" covers this, and an earlier version of this note said it did not
 
-The chunk is compiled once and runs anywhere. The *machine code* is not: there is no
-cross-run cache anywhere in `luarust-jit`, and `Compiling.kept` is a `Vec` in the process
-that goes when the process does. So a `"hot"` program compiles from bytecode to machine
-code on every single run, on every machine, and throws it away at exit. Twenty thousand
-iterations of an add loop: 4.4 ms on the VM, 7.0 ms hot, and the difference is LLVM being
-paid again.
+The chunk is compiled once and runs anywhere. The *machine code* is not cached: there is
+no cross-run cache anywhere in `luarust-jit`, and `Compiling.kept` is a `Vec` in the
+process that goes when the process does. So a `"hot"` program compiles from bytecode to
+machine code on every run and throws it away at exit. Twenty thousand iterations of an add
+loop: 4.4 ms on the VM, 7.0 ms hot, and the difference is LLVM being paid again.
 
-Which makes the three properties pick-two. `"vm"` compiles once and runs anywhere and is
-not fast. `"hot"` runs anywhere and is fast and recompiles every run. `native` compiles
-once and is fast and runs on one target -- the README says as much, that it "trades the
-anywhere for a binary that needs nothing on the machine it lands on."
+This note previously called that a *loss* of "compile once" and set the three properties
+out as pick-two, with `"hot"` failing the first. That was wrong, and wrong in a way worth
+recording rather than quietly deleting.
 
-A cross-run cache keyed on the chunk's checksum -- FNV-1a, already in the file and already
-verified before any field is believed -- would give `"hot"` the third property. Nobody has
-asked for it and it is a real piece of work, not a footnote.
+**Java does exactly the same thing.** HotSpot interprets, counts, compiles hot methods, and
+discards the machine code when the JVM exits; the next run does all of it again. Standard
+HotSpot has never cached JIT output between runs. So "compile once, run anywhere" has only
+ever meant the *source to bytecode* step -- `javac` runs once and the `.jar` runs anywhere
+a JVM is -- and what the JIT does afterwards was never part of the claim.
+
+Which makes the mapping exact:
+
+| Java | Luarust |
+| --- | --- |
+| `javac` | `luarust build` |
+| `.jar` | `.lrc` |
+| the JVM | `luarust-run` |
+| HotSpot's tiered JIT | `[run] mode = "hot"` |
+| GraalVM native-image | `luarust native` |
+
+Both middle rows recompile every run. Both bottom rows are the way out of that, and both
+give up portability to get it. `"hot"` is compile-once-run-anywhere in the only sense the
+phrase has ever had.
+
+What survives is the narrow observation that led to the wrong one: **a JIT's output is not
+amortised across runs**, so a short-lived program invoked ten thousand times pays LLVM ten
+thousand times. That is a property of JITs and not of ours, it is equally true of the JVM,
+and it is why both languages have an ahead-of-time path. A cross-run cache keyed on the
+chunk's checksum -- FNV-1a, already in the file and already verified before any field is
+believed -- would change it. Nobody has asked for it and it is a real piece of work.
+
 
 ## Loops inside routines
 

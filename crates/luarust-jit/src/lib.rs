@@ -42,14 +42,20 @@ pub struct Declined {
 
 /// Whether the JIT will take a program at all.
 ///
-/// The types it has no instructions for — `b128`, `b256`, `str` — live in numbered cells
-/// on the Rust side, and compiled code carries the number.
+/// It takes all of them, and has since functions stopped being a problem — the types it
+/// has no instructions for (`b128`, `b256`, `str`) live in numbered cells on the Rust
+/// side, and a cell number used to be decided once at compile time, so a function that
+/// called itself overwrote the cells its caller was still using. The cells are a stack
+/// now. Two hundred thousand generated programs a run, and the JIT takes every one.
 ///
-/// Which is exactly why functions are declined for now. A cell number is decided when the
-/// code is compiled, so every call to a function would share one set of cells, and a
-/// function that called itself would overwrite the cells its caller was still using. The
-/// fix is a stack of cells rather than a fixed row of them; until then a program with
-/// functions in it goes to the VM, which has no such problem.
+/// This is kept rather than deleted because *whether* is the right question to ask here,
+/// and the answer being "always, so far" is worth being able to change in one place.
+///
+/// Note what it means for `Declined` everywhere else: none of the ten places that build
+/// one is about the program. They are LLVM refusing to start, refusing to make a target
+/// machine, losing the code it just compiled, or failing to write an object. A decline is
+/// a broken toolchain and not an unsuitable program, which is why `[run] engine =
+/// "required"` treats one as fatal rather than falling back to the VM.
 pub fn accepts(_chunk: &Chunk) -> Result<(), Declined> {
     Ok(())
 }
@@ -2652,6 +2658,15 @@ impl Default for Compiling {
     }
 }
 
+/// Where a loop head came from, so a fault about it can point at the source.
+fn span_of(chunk: &Chunk, routine: Option<usize>, at: usize) -> luarust_diag::Span {
+    let spans = match routine {
+        None => &chunk.spans,
+        Some(index) => &chunk.funcs[index].spans,
+    };
+    spans.get(at).copied().unwrap_or_default()
+}
+
 /// One routine's standing with the cache.
 enum Kept {
     /// Never gone hot, so never compiled.
@@ -2702,6 +2717,34 @@ impl luarust_vm::Tier for Compiling {
         };
         match taken {
             Ok(taken) => taken,
+            // A decline is never "this program is unsuitable" -- every one of them is
+            // LLVM failing at something. So a project that said it required the engine is
+            // told, rather than quietly given the interpreter it asked not to have.
+            Err(declined) if !chunk.insistence.may_fall_back() => {
+                let fault = luarust_core::value::Fault::of(
+                    "R0016",
+                    format!(
+                        "this program requires the `hot` engine, and the JIT declined a \
+                         loop: {}.",
+                        declined.because
+                    ),
+                    "a program that requires an engine is not quietly run without it",
+                    "the JIT failing is a broken toolchain rather than an unsuitable \
+                     program -- check LLVM 21 is where this build expects it. Or set \
+                     `[run] engine = \"optional\"` and it will carry on with the VM.",
+                );
+                let span = span_of(chunk, routine, at);
+                match routine {
+                    None => luarust_vm::Taken::Finished(Err(luarust_core::value::Stopped {
+                        fault: Box::new(fault),
+                        span,
+                    })),
+                    Some(_) => luarust_vm::Taken::Returned(Err(luarust_core::value::Stopped {
+                        fault: Box::new(fault),
+                        span,
+                    })),
+                }
+            }
             Err(declined) => {
                 eprintln!(
                     "the JIT declined this loop: {}. Carrying on with the VM.",

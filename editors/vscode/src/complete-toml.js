@@ -79,6 +79,14 @@ const SETTINGS = {
           ['"hot"', "interpreted, and a loop that proves itself is compiled and jumped into"],
         ],
       },
+      engine: {
+        what: "how hard the project insists on having that engine",
+        values: [
+          ['"optional"', "no JIT on the machine? run on the VM, and say so -- the default"],
+          ['"required"', "no JIT on the machine? refuse to run rather than run it slowly"],
+          ['"bundled"', "`luarust build` puts a runtime that has the engine beside the chunk"],
+        ],
+      },
     },
   },
   gc: {

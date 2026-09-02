@@ -394,9 +394,21 @@ fn run_as_asked(
     if chunk.engine == luarust_core::value::Engine::Whole {
         match luarust_jit::run(chunk, out) {
             Ok(outcome) => return outcome,
-            Err(declined) => {
-                eprintln!("the JIT declined this program: {}. Running it on the VM.", declined.because);
+            Err(declined) if !chunk.insistence.may_fall_back() => {
+                eprintln!(
+                    "this program requires `[run] mode = \"whole\"` and the JIT declined \
+                     it: {}.\n\nA decline is LLVM failing at something rather than the \
+                     program being unsuitable, so this has not been run on the VM \
+                     instead. Set `[run] engine = \"optional\"` if that is what you \
+                     want.",
+                    declined.because
+                );
+                std::process::exit(2);
             }
+            Err(declined) => eprintln!(
+                "the JIT declined this program: {}. Running it on the VM.",
+                declined.because
+            ),
         }
     }
     #[cfg(feature = "jit")]
