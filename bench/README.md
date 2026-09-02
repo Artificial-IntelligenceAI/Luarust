@@ -21,6 +21,7 @@ loops, and what is being measured is one add and one remainder.
 | **Lua** | the language Luarust is a ripoff of |
 | **LuaJIT** | what a very good tracing JIT does with that language |
 | **CPython** | the interpreter everybody has actually used |
+| **PyPy** | and what a tracing JIT does with that language |
 | **Luau** | typed Lua that compiles, written in C++ |
 
 and every way this language has of running a program:
@@ -61,8 +62,6 @@ no comparison had been made. The table names the axis each is closest on and ran
 
 `KNOWN` in `run.py` is everything the harness can run. Two rows are in it and not in `std`,
 because a standard set is a list somebody chose rather than everything that would go.
-
-**PyPy** — the harness runs it and `std` does not ask for it.
 
 **lust-rs** — Lua-shaped, typed, JIT, written in Rust, which made it the closest match by
 implementation. `cargo install lust-rs`, and its JIT is x86-64 only so an arm64 machine
