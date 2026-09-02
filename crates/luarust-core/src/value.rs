@@ -44,6 +44,54 @@ pub enum Engine {
     Hot,
 }
 
+/// How hard a project insists on the engine it asked for.
+///
+/// `[run] mode` says which engine a program wants and has always been a preference: a
+/// build with no compiler in it runs the chunk on the VM instead, because refusing to run
+/// a program because the fastest way of running it is unavailable would help nobody. That
+/// is the right default and it is the wrong *only* answer — a project shipping something
+/// that is unusably slow interpreted has no way to say so, and finds out from its users.
+///
+/// So the preference stays and the project says how much it is a preference.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Insistence {
+    /// Run on the VM when the engine is not there, and say so. What every chunk written
+    /// before this setting existed meant, and what one that does not mention it means.
+    #[default]
+    Optional,
+    /// Refuse to run rather than run the slow way. For a program whose whole point is the
+    /// speed, where quietly taking twenty times longer is worse than stopping.
+    Required,
+    /// As `Required`, and `luarust build` puts a runtime that has the engine beside the
+    /// chunk, so the pair is what gets shipped. A chunk cannot bundle anything by itself;
+    /// this is what the *build* does, and what the chunk carries is the requirement.
+    Bundled,
+}
+
+impl Insistence {
+    pub fn tag(self) -> u32 {
+        match self {
+            Insistence::Optional => 0,
+            Insistence::Required => 1,
+            Insistence::Bundled => 2,
+        }
+    }
+
+    pub fn from_tag(tag: u32) -> Option<Insistence> {
+        Some(match tag {
+            0 => Insistence::Optional,
+            1 => Insistence::Required,
+            2 => Insistence::Bundled,
+            _ => return None,
+        })
+    }
+
+    /// Whether a build without the engine may run the chunk anyway.
+    pub fn may_fall_back(self) -> bool {
+        matches!(self, Insistence::Optional)
+    }
+}
+
 impl Engine {
     pub fn tag(self) -> u32 {
         match self {

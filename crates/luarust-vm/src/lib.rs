@@ -661,6 +661,46 @@ impl File for Split {
     }
 }
 
+/// What a build with no compiler in it should do about a chunk that wanted one.
+///
+/// `[run] mode` names an engine and `[run] engine` says how much the project meant it.
+/// The default is still a preference — a program that would rather be fast runs slowly
+/// rather than not at all — and a project whose program is unusable interpreted can now
+/// say so instead of finding out from its users.
+pub enum Without {
+    /// Nothing was asked for that is not here.
+    Fine,
+    /// Asked for, not here, and the project said running anyway is acceptable.
+    FallingBack(String),
+    /// Asked for, not here, and the project said no.
+    Refused(String),
+}
+
+/// Decide, and say it in words the person holding the wrong binary can act on.
+///
+/// `whose` names the thing that has no compiler in it, and `how` is the command that
+/// builds one that has.
+pub fn without_a_compiler(chunk: &Chunk, whose: &str, how: &str) -> Without {
+    use luarust_core::value::Engine;
+    let asked = match chunk.engine {
+        Engine::Vm => return Without::Fine,
+        Engine::Whole => "whole",
+        Engine::Hot => "hot",
+    };
+    if chunk.insistence.may_fall_back() {
+        return Without::FallingBack(format!(
+            "this chunk asks for `[run] mode = \"{asked}\"` and {whose} has no JIT in it, \
+             so it runs on the bytecode VM. Build one that has:\n\n    {how}\n"
+        ));
+    }
+    Without::Refused(format!(
+        "this chunk asks for `[run] mode = \"{asked}\"` and says `[run] engine = \
+         \"required\"`, and {whose} has no JIT in it. It has not been run. Build one that \
+         has:\n\n    {how}\n\nOr set `[run] engine = \"optional\"` in the project that \
+         built it, and it will run on the VM instead."
+    ))
+}
+
 /// Run a compiled chunk.
 pub fn run(chunk: &Chunk, out: &mut impl Write) -> Result<(), Stopped> {
     engine::<Split>(chunk, out, None, true)

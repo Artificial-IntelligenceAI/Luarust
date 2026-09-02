@@ -770,6 +770,16 @@ That rule is why there are two binaries and not one.
 compiled, and it has no lexer, parser, checker or program generator linked into it at all
 — those are facts about writing Luarust, not about running it.
 
+A JIT it will carry, if asked: `cargo build --release -p luarust-run --features jit`. That
+is not the same as carrying one on the chance, since a build that does not ask still has no
+compiler in it. What it buys is that shipping a program which wants `"hot"` means shipping
+a *runtime*, rather than the toolchain, which would put a lexer, a parser, a checker, a
+disassembler and a program generator on a machine that only ever had to run one program.
+It is also much smaller than the toolchain for a reason that is not the front end:
+`luarust native` calls `Target::initialize_all` so it can build for a machine that is not
+this one, so the toolchain links a code generator for **every architecture LLVM has**. A
+runtime compiles for the machine it is standing on and wants exactly one.
+
 It has no project file either, and never looks for one. A chunk carries what its project
 decided — `overflow`, `[gc] mode`, `float-printing`, `division` — so a program keeps its
 own answers wherever it is run, on a machine that has never seen the `Luarust.toml` it
@@ -785,6 +795,35 @@ mode = "vm"      # the bytecode, interpreted; nothing is compiled
 mode = "whole"   # all of it through LLVM before it starts
 mode = "hot"     # interpreted until a loop proves itself, compiled from there
 ```
+
+And how much the project means it:
+
+```toml
+[run]
+mode = "hot"
+engine = "optional"   # no JIT on the machine? run on the VM, and say so — the default
+engine = "required"   # no JIT on the machine? refuse to run
+engine = "bundled"    # `luarust build` puts a runtime that has it beside the chunk
+```
+
+`"optional"` is what a chunk written before this setting existed means, and what one that
+does not mention it means. It is the right default and it was for a while the only
+behaviour, which is a different thing: a program that is unusable interpreted had no way to
+say so and found out from its users.
+
+`"bundled"` cannot conjure a runtime, any more than `luarust native` can conjure a target's
+libc — something has to have built one. `luarust build` looks for a `luarust-run` beside
+the toolchain, asks it what engines it has, and copies it only if the answer covers what
+the chunk wants:
+
+```bash
+$ luarust build add.lr
+add.lrc — 561 bytes
+luarust-run — 55559552 bytes, and it can do `hot`
+```
+
+Asking is the only way to know. The two runtimes differ by a cargo feature and by nothing
+visible in the file, which is what `luarust-run --engines` is for.
 
 A program that starts, does a little and exits wants `"vm"`, where nothing is spent
 compiling. A program that runs for hours wants `"whole"`, where a few milliseconds of LLVM

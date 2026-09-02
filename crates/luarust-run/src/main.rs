@@ -48,26 +48,32 @@ fn engine(
             return luarust_vm::run_with(chunk, out, Some(&mut tier));
         }
     }
-    #[cfg(not(feature = "jit"))]
-    said_nothing(chunk);
     luarust_vm::run(chunk, out)
 }
 
-/// Say that an engine the chunk asked for is not in this build.
-///
-/// Once, not per loop, and to `stderr` so it never lands in a program's own output.
+/// Say what the chunk asked for that this runtime has not got, and whether that is fatal.
+#[cfg(feature = "jit")]
+fn engine_check(_chunk: &luarust_vm::Chunk) -> Result<(), ExitCode> {
+    Ok(())
+}
+
 #[cfg(not(feature = "jit"))]
-fn said_nothing(chunk: &luarust_vm::Chunk) {
-    let asked = match chunk.engine {
-        luarust_core::value::Engine::Whole => "whole",
-        luarust_core::value::Engine::Hot => "hot",
-        luarust_core::value::Engine::Vm => return,
-    };
-    eprintln!(
-        "this chunk asks for `[run] mode = \"{asked}\"` and this runtime has no JIT in \
-         it, so it runs on the bytecode VM. A runtime built with `--features jit` \
-         honours it."
-    );
+fn engine_check(chunk: &luarust_vm::Chunk) -> Result<(), ExitCode> {
+    match luarust_vm::without_a_compiler(
+        chunk,
+        "this runtime",
+        "cargo build --release -p luarust-run --features jit",
+    ) {
+        luarust_vm::Without::Fine => Ok(()),
+        luarust_vm::Without::FallingBack(say) => {
+            eprintln!("{say}");
+            Ok(())
+        }
+        luarust_vm::Without::Refused(say) => {
+            eprintln!("{say}");
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -75,6 +81,20 @@ fn main() -> ExitCode {
         eprintln!("luarust-run <file.lrc>");
         return ExitCode::from(2);
     };
+
+    // What this runtime can honour, one engine per line, for whoever is about to bundle
+    // it. A build asking is the only caller, and it needs a machine-readable answer
+    // rather than a size on disk -- the two runtimes differ by a cargo feature, not by
+    // anything visible in the file.
+    if path == "--engines" {
+        println!("vm");
+        #[cfg(feature = "jit")]
+        {
+            println!("whole");
+            println!("hot");
+        }
+        return ExitCode::SUCCESS;
+    }
 
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -98,6 +118,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if let Err(code) = engine_check(&loaded.chunk) {
+        return code;
+    }
 
     let mut out = std::io::stdout().lock();
     let outcome = engine(&loaded.chunk, &mut out);

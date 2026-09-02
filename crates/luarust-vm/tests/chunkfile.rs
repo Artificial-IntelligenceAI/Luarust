@@ -243,13 +243,15 @@ fn a_line_table_that_could_not_have_come_from_a_file_is_refused() {
     let mut bytes = serialize::write_with(&chunk, "t.lr", COUNTING, false, false);
 
     // Where the line table begins: the magic, then a word each for the version, overflow,
-    // collecting, float printing, the engine and the division, then the register count,
-    // then the path, then the flag saying there is no source and the count of lines.
-    let table = 8 + (4 * 7) + (4 + "t.lr".len()) + 4 + 4;
+    // collecting, float printing, the engine, how hard the project insisted on it, and the
+    // division, then the register count, then the path, then the flag saying there is no
+    // source and the count of lines.
+    let table = 8 + (4 * 8) + (4 + "t.lr".len()) + 4 + 4;
 
     // Checked rather than trusted. This is a byte offset into a format that grows a field
     // now and then, and a test that pokes the wrong four bytes still passes for the wrong
-    // reason -- which is exactly what happened when `[run] mode` was added.
+    // reason -- which is exactly what happened when `[run] mode` was added, and what this
+    // caught again when `[run] engine` was.
     assert_eq!(
         u32::from_le_bytes(bytes[table..table + 4].try_into().expect("four bytes")),
         0,

@@ -44,6 +44,7 @@ fn runs_off_the_end() -> Chunk {
         collect: Default::default(),
         floats: Default::default(),
         engine: Default::default(),
+        insistence: Default::default(),
         division: Default::default(),
         funcs: Vec::new(),
     }

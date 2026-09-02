@@ -96,6 +96,10 @@ pub struct Chunk {
     /// Which engine the project asked for. A build that has not got it runs the VM
     /// instead: a preference that cannot be met is not an error.
     pub engine: Engine,
+    /// How hard the project insisted on `engine`. Travels for the same reason `engine`
+    /// does: `luarust-run` has no project file, and a requirement nobody carried is not a
+    /// requirement.
+    pub insistence: luarust_core::value::Insistence,
     /// How a division rounds. One setting for `div` and `mod` together, so the two always
     /// describe the same division.
     pub division: Division,

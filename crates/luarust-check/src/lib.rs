@@ -17,7 +17,7 @@ mod range;
 // needs the checker only before it does. It is still named from here.
 pub use luarust_core::value;
 
-use crate::value::{Division, Engine, Floats};
+use crate::value::{Division, Engine, Floats, Insistence};
 use ir::Checked;
 use luarust_core::heap::Collect;
 use luarust_diag::{Diagnostic, Span};
@@ -48,6 +48,8 @@ pub struct Start {
     pub collect: Collect,
     pub floats: Floats,
     pub engine: Engine,
+    /// How hard the project insisted on `engine`.
+    pub insistence: Insistence,
     pub division: Division,
 }
 
@@ -59,6 +61,7 @@ impl Default for Start {
             collect: Collect::Off,
             floats: Floats::Exact,
             engine: Engine::Vm,
+            insistence: Insistence::Optional,
             division: Division::Floored,
         }
     }
@@ -81,6 +84,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         collect: start.collect,
         floats: start.floats,
         engine: start.engine,
+        insistence: start.insistence,
         division: start.division,
         visibility_required: start.visibility_required,
         signatures: HashMap::new(),
@@ -114,6 +118,7 @@ pub fn check_with(program: &ast::Program, start: Start) -> (Checked, Vec<Diagnos
         collect: checker.collect,
         floats: checker.floats,
         engine: checker.engine,
+        insistence: checker.insistence,
         division: checker.division,
     };
     // A program with faults never runs, so there is nothing to prove about one.
@@ -130,6 +135,7 @@ struct Checker {
     collect: Collect,
     floats: Floats,
     engine: Engine,
+    insistence: Insistence,
     division: Division,
     visibility_required: bool,
     /// Every function's name, and where it sits in `funcs`.

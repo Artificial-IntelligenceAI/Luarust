@@ -9,7 +9,7 @@
 
 use crate::chunk::{Chunk, Op, Reg, Routine};
 use luarust_core::heap::Collect;
-use luarust_core::value::{Division, Engine, Floats};
+use luarust_core::value::{Division, Engine, Floats, Insistence};
 use luarust_check::ir::{Checked, Expr, Item, Stmt};
 use luarust_check::value::{Overflow, Value, one_of};
 use luarust_diag::Span;
@@ -84,6 +84,7 @@ impl Compiler {
                 collect: program.collect,
                 floats: program.floats,
                 engine: program.engine,
+                insistence: program.insistence,
                 division: program.division,
                 funcs: Vec::new(),
             },
@@ -112,6 +113,7 @@ impl Compiler {
                 collect: Collect::default(),
                 floats: Floats::default(),
                 engine: Engine::default(),
+                insistence: Insistence::default(),
                 division: Division::default(),
                 funcs: Vec::new(),
             },

@@ -33,6 +33,8 @@ pub struct Project {
     pub floats: Floats,
     /// `[run] mode` — which engine runs the chunk.
     pub engine: Engine,
+    /// `[run] engine` — how hard the project insists on having it.
+    pub insistence: Insistence,
     /// `[defaults] division` — how a division rounds, and which way its remainder leans.
     pub division: Division,
 }
@@ -55,10 +57,25 @@ pub enum Division {
 
 /// Which engine runs a chunk.
 ///
+/// How hard a project insists on `[run] mode`.
+///
+/// `mode` says which engine; this says what happens on a machine that has not got it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Insistence {
+    /// Run on the VM instead, and say so.
+    #[default]
+    Optional,
+    /// Refuse to run.
+    Required,
+    /// Refuse to run, and have `luarust build` ship a runtime that has the engine.
+    Bundled,
+}
+
 /// A project says how it wants its programs run, and the chunk carries the answer, so a
 /// machine with only `luarust-run` on it does what the project asked. A build with no JIT
-/// in it runs the VM whatever the chunk says -- the setting is a preference, and a
-/// preference that cannot be met is not an error.
+/// in it runs the VM whatever the chunk says, unless `[run] engine` says otherwise -- the
+/// setting is a preference by default, and `Insistence` is where a project says it is not
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     /// The bytecode, interpreted.
@@ -161,6 +178,7 @@ impl Default for Project {
             // The VM, because it needs nothing and starts at once. Asking for `"whole"`
             // is asking for LLVM, and that should be said rather than assumed.
             engine: Engine::Vm,
+            insistence: Insistence::Optional,
             // Floored, which is what `mod` has always done here and what the README
             // documents. `div` used to truncate, so the two disagreed and `q × b + r`
             // was not `a`; this is the setting that made them one decision.
@@ -245,7 +263,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Diagnostic::new("C0003", format!("`{key}` is not under any section."))
                     .primary(locate(body, start, trimmed), "written here")
                     .rule("a setting belongs to the section above it")
-                    .tip("`overflow`, `no-visibility-stated`, `float-printing` and `division` are `[defaults]`; `embed-source`, `decimal-encoding` and `target-cpu` are `[build]`; `mode` is `[run]` and `[gc]`.")
+                    .tip("`overflow`, `no-visibility-stated`, `float-printing` and `division` are `[defaults]`; `embed-source`, `decimal-encoding` and `target-cpu` are `[build]`; `mode` is `[run]` and `[gc]`, and `engine` is `[run]`.")
                     .fix("put a section header above it."),
             );
             continue;
@@ -299,6 +317,17 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                 Some("hot") => project.engine = Engine::Hot,
                 _ => errors.push(bad_value(key, raw, span, "`\"vm\"`, `\"whole\"` or `\"hot\"`")),
             },
+            ("run", "engine") => match unquote(raw) {
+                Some("optional") => project.insistence = Insistence::Optional,
+                Some("required") => project.insistence = Insistence::Required,
+                Some("bundled") => project.insistence = Insistence::Bundled,
+                _ => errors.push(bad_value(
+                    key,
+                    raw,
+                    span,
+                    "`\"optional\"`, `\"required\"` or `\"bundled\"`",
+                )),
+            },
             ("gc", "mode") => match unquote(raw) {
                 Some("off") => project.gc = Collect::Off,
                 Some("silent") => project.gc = Collect::Silent,
@@ -317,7 +346,7 @@ pub fn read(text: &str) -> (Project, Vec<Diagnostic>) {
                     .tip(match section.as_str() {
                         "defaults" => "`[defaults]` has `overflow`, `no-visibility-stated`, `float-printing` and `division`.",
                         "gc" => "`[gc]` has `mode`.",
-                        "run" => "`[run]` has `mode`.",
+                        "run" => "`[run]` has `mode` and `engine`.",
                         _ => "`[build]` has `embed-source`, `decimal-encoding` and `target-cpu`.",
                     })
                     .fix("delete it, or correct the spelling."),

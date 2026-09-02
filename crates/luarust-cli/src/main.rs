@@ -194,6 +194,11 @@ fn act(path: PathBuf, then: Then, target: Option<&str>) -> ExitCode {
                     luarust_conf::Engine::Whole => luarust_core::value::Engine::Whole,
                     luarust_conf::Engine::Hot => luarust_core::value::Engine::Hot,
                 },
+                insistence: match project.insistence {
+                    luarust_conf::Insistence::Optional => luarust_core::value::Insistence::Optional,
+                    luarust_conf::Insistence::Required => luarust_core::value::Insistence::Required,
+                    luarust_conf::Insistence::Bundled => luarust_core::value::Insistence::Bundled,
+                },
                 division: match project.division {
                     luarust_conf::Division::Floored => luarust_core::value::Division::Floored,
                     luarust_conf::Division::Truncated => luarust_core::value::Division::Truncated,
@@ -244,6 +249,11 @@ fn act(path: PathBuf, then: Then, target: Option<&str>) -> ExitCode {
             match std::fs::write(&out, &bytes) {
                 Ok(()) => {
                     println!("{} — {} bytes", out.display(), bytes.len());
+                    if project.insistence == luarust_conf::Insistence::Bundled
+                        && let Err(code) = bundle_runtime(&chunk, &out)
+                    {
+                        return code;
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(why) => {
@@ -255,6 +265,9 @@ fn act(path: PathBuf, then: Then, target: Option<&str>) -> ExitCode {
 
         Then::Run => {
             let chunk = luarust_vm::compile(&program);
+            if let Err(code) = engine_check(&chunk) {
+                return code;
+            }
             let mut out = std::io::stdout().lock();
             finish(run_as_asked(&chunk, &mut out), &mut out, &source)
         }
@@ -320,6 +333,9 @@ fn run_chunk(bytes: &[u8], path: &Path, then: Then) -> ExitCode {
             ExitCode::SUCCESS
         }
         Then::Run => {
+            if let Err(code) = engine_check(&loaded.chunk) {
+                return code;
+            }
             let source = loaded.source.file(loaded.path.clone());
             let mut out = std::io::stdout().lock();
             finish(run_as_asked(&loaded.chunk, &mut out), &mut out, &source)
@@ -388,27 +404,96 @@ fn run_as_asked(
         let mut tier = luarust_jit::Compiling::new();
         return luarust_vm::run_with(chunk, out, Some(&mut tier));
     }
-    // A preference that cannot be met is not an error, and it is not nothing either.
-    // Typing `luarust jit` on a build without one gets an explanation; a chunk asking for
-    // the same thing on the same build got silence, and ran several times slower than it
-    // asked to with nobody told. Once, to `stderr`, so a program's own output is clean.
-    #[cfg(not(feature = "jit"))]
-    {
-        let asked = match chunk.engine {
-            luarust_core::value::Engine::Whole => Some("whole"),
-            luarust_core::value::Engine::Hot => Some("hot"),
-            luarust_core::value::Engine::Vm => None,
-        };
-        if let Some(asked) = asked {
-            eprintln!(
-                "this chunk asks for `[run] mode = \"{asked}\"` and this build has no \
-                 JIT, so it runs on the bytecode VM:\n\n    \
-                 cargo build --release -p luarust-cli --features jit\n\n\
-                 which needs LLVM 21."
-            );
+    luarust_vm::run(chunk, out)
+}
+
+/// Put a runtime that can honour this chunk's engine beside the chunk.
+///
+/// `engine = "bundled"` cannot conjure a runtime any more than `luarust native` can
+/// conjure a target's libc: something has to have built one already. So this looks for a
+/// `luarust-run` beside the toolchain that is running, asks it what engines it has, and
+/// copies it only if the answer covers what the chunk wants. Asking is the only way to
+/// know — the two runtimes differ by a cargo feature and not by anything in the file.
+fn bundle_runtime(chunk: &luarust_vm::Chunk, chunk_path: &Path) -> Result<(), ExitCode> {
+    let wanted = match chunk.engine {
+        luarust_core::value::Engine::Vm => {
+            println!("  nothing to bundle: `mode = \"vm\"` needs no compiler.");
+            return Ok(());
+        }
+        luarust_core::value::Engine::Whole => "whole",
+        luarust_core::value::Engine::Hot => "hot",
+    };
+
+    let name = format!("luarust-run{}", std::env::consts::EXE_SUFFIX);
+    let Some(runtime) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|beside| beside.join(&name)))
+        .filter(|found| found.is_file())
+    else {
+        eprintln!(
+            "`[run] engine = \"bundled\"` needs a `{name}` beside this toolchain to copy, \
+             and there is not one. Build it:\n\n    \
+             cargo build --release -p luarust-run --features jit\n"
+        );
+        return Err(ExitCode::from(2));
+    };
+
+    let engines = match std::process::Command::new(&runtime).arg("--engines").output() {
+        Ok(said) if said.status.success() => String::from_utf8_lossy(&said.stdout).into_owned(),
+        _ => {
+            eprintln!("{} would not say what engines it has.", runtime.display());
+            return Err(ExitCode::from(2));
+        }
+    };
+    if !engines.lines().any(|line| line.trim() == wanted) {
+        eprintln!(
+            "`[run] engine = \"bundled\"` wants a runtime that can do `{wanted}`, and \
+             {} has only: {}. Build one that can:\n\n    \
+             cargo build --release -p luarust-run --features jit\n",
+            runtime.display(),
+            engines.split_whitespace().collect::<Vec<_>>().join(", ")
+        );
+        return Err(ExitCode::from(2));
+    }
+
+    let beside = chunk_path.with_file_name(&name);
+    match std::fs::copy(&runtime, &beside) {
+        Ok(bytes) => {
+            println!("{} — {bytes} bytes, and it can do `{wanted}`", beside.display());
+            Ok(())
+        }
+        Err(why) => {
+            eprintln!("{} could not be written: {why}", beside.display());
+            Err(ExitCode::from(2))
         }
     }
-    luarust_vm::run(chunk, out)
+}
+
+/// Say what a chunk asked for that this build has not got, and whether that is fatal.
+///
+/// A build with the JIT in it can honour anything a chunk asks for, so it never speaks.
+#[cfg(feature = "jit")]
+fn engine_check(_chunk: &luarust_vm::Chunk) -> Result<(), ExitCode> {
+    Ok(())
+}
+
+#[cfg(not(feature = "jit"))]
+fn engine_check(chunk: &luarust_vm::Chunk) -> Result<(), ExitCode> {
+    match luarust_vm::without_a_compiler(
+        chunk,
+        "this build",
+        "cargo build --release -p luarust-cli --features jit",
+    ) {
+        luarust_vm::Without::Fine => Ok(()),
+        luarust_vm::Without::FallingBack(say) => {
+            eprintln!("{say}");
+            Ok(())
+        }
+        luarust_vm::Without::Refused(say) => {
+            eprintln!("{say}");
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 /// Find and read the `Luarust.toml` for a file, if its project has one.
