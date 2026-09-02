@@ -22,7 +22,6 @@ loops, and what is being measured is one add and one remainder.
 | **LuaJIT** | what a very good tracing JIT does with that language |
 | **CPython** | the interpreter everybody has actually used |
 | **Luau** | typed Lua that compiles, written in C++ |
-| **lust-rs** | typed Lua that compiles, written in Rust |
 
 and every way this language has of running a program:
 
@@ -53,9 +52,6 @@ idea, and all three of them had it first.
   native code generator, and more hours of production use than everything else here put
   together. Written in C++. The standalone `luau` CLI is what gets timed, not the engine
   inside Studio.
-- **lust-rs** is the closest in implementation — Lua-shaped, typed, JIT, written in Rust.
-  `cargo install lust-rs`; its JIT is x86-64 only, so on an arm64 machine the row is its
-  interpreter, and `.github/workflows/lust-probe.yml` looks at it on hardware that suits it.
 
 **Neither is "the closest thing to Luarust", and this file said lust-rs was.** That was one
 example wearing a superlative: it was the one this project had happened to investigate, and
@@ -67,6 +63,10 @@ no comparison had been made. The table names the axis each is closest on and ran
 because a standard set is a list somebody chose rather than everything that would go.
 
 **PyPy** — the harness runs it and `std` does not ask for it.
+
+**lust-rs** — Lua-shaped, typed, JIT, written in Rust, which made it the closest match by
+implementation. `cargo install lust-rs`, and its JIT is x86-64 only so an arm64 machine
+times its interpreter. Out of `std` on 2026-09-02.
 
 **[Ravi](https://github.com/dibyendumajumdar/ravi)** — and this one is out for a reason
 worth writing down, because by design it is the closest thing to Luarust that exists: a
@@ -118,13 +118,33 @@ codegen is usually given something to work on, changes nothing. Every other row 
 language at its best and this one is too; the flag is named here so that reads as a
 measurement rather than an oversight.
 
-**Which is the one asymmetry worth stating.** The loop is a remainder, and a language with
-64-bit integers does an integer remainder while a language whose only number is a double
-calls `fmod`. Lua 5.4 and later, Java, Go, C, Rust and Luarust are in the first group;
-JavaScript, Luau and LuaJIT are in the second. That is a real difference between those
-languages and not an artefact of the harness — but it is most of what separates the two
-groups here, and a reader comparing across the line should know that is what they are
-looking at.
+**Which is the asymmetry worth stating, and it matters for exactly one row.** This loop is
+a remainder, and a language with 64-bit integers does an integer remainder while a language
+whose only number is a double calls `fmod`. Lua 5.4 and later, Java, Go, C, Rust and
+Luarust are in the first group; JavaScript, Luau and LuaJIT are in the second.
+
+An earlier version of this file said that was "most of what separates the two groups". It
+is not. Fifty million iterations, with and without the remainder, measured rather than
+reasoned about:
+
+| | add only | add + remainder | what the remainder costs |
+| --- | ---: | ---: | ---: |
+| Lua 5.5 | 1.72 ns | 3.81 ns | +2.09 |
+| Luau | 2.63 ns | 4.24 ns | +1.61 |
+| **LuaJIT** | **0.56 ns** | 4.28 ns | **+3.72** |
+
+**LuaJIT is the row it explains, and it explains the whole of it.** On the bare add it is
+0.56 ns — three times faster than Lua 5.5, plainly tracing and compiling the loop, and it
+would sit near the top of the table. One `fmod` an iteration costs it almost twice what the
+same remainder costs Lua and erases the entire lead. Its 1.91x here is this benchmark being
+the worst possible shape for LuaJIT, not LuaJIT being slow, and a table that does not say so
+is misleading about the fastest interpreter in the set.
+
+**It does not explain Luau at all.** Luau is slower than Lua 5.5 with the remainder removed
+entirely, 2.63 against 1.72, so `fmod` is not why it is behind. Its interpreter is simply
+slower than Lua 5.5's on a tight scalar loop. Why is not established here — plausibly it is
+tuned for what Roblox actually runs, which is tables and vectors and method calls rather
+than arithmetic in a loop — and that is a guess, labelled as one, not a finding.
 
 Build the release binary first, with the JIT in it, and the runtime archive beside it, or
 the Luarust rows have nothing to measure and the native one cannot be linked:

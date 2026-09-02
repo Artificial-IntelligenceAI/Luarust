@@ -87,10 +87,9 @@ SUITES = {
         "Lua 5.5",
         "LuaJIT 2.1",
         "CPython 3.14",
-        # Typed Lua that compiles, which is this language's premise: one that got there in
-        # C++ and one that got there in Rust.
+        # Typed Lua that compiles, which is this language's premise. Luau is the one of
+        # those that installs in a command.
         "Luau",
-        "lust-rs",
         # Every way this language has of running a program.
         "Luarust, native",
         "Luarust, whole JIT",
@@ -110,7 +109,7 @@ SUITES = {
 # which would put a crippled Ravi in a table beside Luarust and flatter this language for
 # no reason. `bench/loop.ravi` and the runner are kept for whoever wants to do it
 # properly.
-KNOWN = SUITES["std"] + ["PyPy 7.3", "Ravi"]
+KNOWN = SUITES["std"] + ["PyPy 7.3", "Ravi", "lust-rs"]
 
 def version(tool, *args):
     try:
