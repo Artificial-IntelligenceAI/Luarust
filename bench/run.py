@@ -44,6 +44,12 @@ TOOLS = {
     # its interpreter and says so; `.github/workflows/lust-probe.yml` is where it gets
     # looked at on hardware that suits it.
     "lust":    shutil.which("lust") or "lust",
+    # Roblox's Lua. Gradual types and a native code generator; the standalone CLI is what
+    # is timed here, not the engine inside Studio.
+    "luau":    shutil.which("luau") or "luau",
+    # A dialect of Lua 5.3 with optional static typing and an LLVM JIT -- this language's
+    # design, arrived at first and written in C. Built from source; there is no package.
+    "ravi":    shutil.which("ravi") or "ravi",
     "luarust": str(ROOT / "target/release/luarust"),
 }
 
@@ -62,7 +68,12 @@ SUITES = {
         "Lua 5.5",
         "LuaJIT 2.1",
         "CPython 3.14",
+        # The three that share this language's premise rather than just its shape: typed
+        # Lua that compiles. Ravi and Luau got there first, in C and C++; lust-rs is the
+        # one that got there in Rust.
         "lust-rs",
+        "Luau",
+        "Ravi",
     ],
 }
 
@@ -115,7 +126,7 @@ def measure(n, wanted):
     pathlib.Path(build, "loop.go").write_text(sized("loop.go", n))
     pathlib.Path(build, "go.mod").write_text("module bench\n\ngo 1.21\n")
     subprocess.run([TOOLS["go"], "build", "-o", f"{build}/loop_go", "loop.go"], cwd=build, check=True)
-    for name in ("loop.lua", "loop.py", "loop.js", "loop.lust"):
+    for name in ("loop.lua", "loop.py", "loop.js", "loop.lust", "loop.luau", "loop.ravi"):
         pathlib.Path(build, name).write_text(sized(name, n))
 
     took = {}
@@ -139,6 +150,8 @@ def measure(n, wanted):
     row("Go 1.26", [f"{build}/loop_go"])
     row("JavaScript, node", [TOOLS["node"], f"{build}/loop.js"])
     row("lust-rs", [TOOLS["lust"], f"{build}/loop.lust"])
+    row("Luau", [TOOLS["luau"], f"{build}/loop.luau"])
+    row("Ravi", [TOOLS["ravi"], f"{build}/loop.ravi"])
 
     # Luarust's engines. The project file goes beside a copy of the source, so the one in
     # the repository is never rewritten to run a benchmark.

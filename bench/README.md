@@ -21,19 +21,43 @@ loops, and what is being measured is one add and one remainder.
 | **Lua** | the language Luarust is a ripoff of |
 | **LuaJIT** | what a very good tracing JIT does with that language |
 | **CPython** | the interpreter everybody has actually used |
-| **lust-rs** | the closest thing to Luarust that already exists |
+| **lust-rs** | typed Lua that compiles, written in Rust |
+| **Luau** | typed Lua that compiles, written in C++ |
+| **Ravi** | typed Lua that compiles, written in C, through LLVM |
 
 Named in `SUITES` in `run.py` rather than being whatever happened to be installed, so a
 variant later means naming a different list and not arguing about which rows a table has.
 Luarust's own rows are not in the suite: they are what is being measured, and this is the
 field.
 
-**lust-rs is in `std` on purpose.** It is Lua-shaped, written in Rust, typed, and it has a
-JIT — nearly Luarust's own pitch, arrived at independently. It is the comparison hardest to
-explain away, which is the argument for keeping it in the standard set rather than as a
-curiosity. `cargo install lust-rs`; its JIT is x86-64 only, so on an arm64 machine the row
-is its interpreter. Without it the row says `not installed` rather than going quietly
-missing.
+## The last three rows are the ones that matter
+
+Everything above them is a language with different aims. These three share the premise:
+**take Lua, add static types, and use the types to compile.** That is this project's whole
+idea, and all three of them had it first.
+
+- **[Ravi](https://github.com/dibyendumajumdar/ravi)** is the closest by design — a dialect
+  of Lua 5.3 with optional static typing, an **LLVM JIT** and an ahead-of-time compiler,
+  which is Luarust's architecture down to the code generator. It modifies the VM to exploit
+  the types rather than checking them and lowering to stock Lua, which is the line Typed Lua
+  and Teal stop at. Written in C. Built from source, against LLVM; there is no package.
+- **[Luau](https://luau.org)** is the most finished — Roblox's Lua, gradual types, its own
+  native code generator, and more hours of production use than everything else here put
+  together. Written in C++. The standalone `luau` CLI is what gets timed, not the engine
+  inside Studio.
+- **lust-rs** is the closest in implementation — Lua-shaped, typed, JIT, written in Rust.
+  `cargo install lust-rs`; its JIT is x86-64 only, so on an arm64 machine the row is its
+  interpreter, and `.github/workflows/lust-probe.yml` looks at it on hardware that suits it.
+
+**None of them is "the closest thing to Luarust", and this file said lust-rs was.** That
+was one example wearing a superlative: it was the one this project had happened to
+investigate, and no comparison had been made. Ravi is closer by design and Luau is closer
+by maturity, and which of the three is *closest* depends on the axis, so the table names
+the axis instead of ranking them.
+
+A row for something not installed says `not installed` rather than going quietly missing —
+the same rule the native row has had since it could fail to link. Three of eleven are
+absent on the machine this was written on.
 
 **PyPy is known but not standard.** `run.py` can run it and `std` does not ask for it. The
 set is a list somebody chose, not everything the machine has.
