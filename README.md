@@ -7,8 +7,6 @@ Luarust's method is compile once to a `.lrc` that runs anywhere (Like Java's), a
 
 Putting it simply: **Luarust** is/will be a language that **could be compiled in many methods**, so you could **choose what is best for you**.
 
-We ran some benchmarks, **Luarust is one of the slowest languages ever 😭.** 
-
 ### Why pick Luarust, and why not
 | Why pick Luarust | Why not |
 | --- | --- |
@@ -28,8 +26,7 @@ We ran some benchmarks, **Luarust is one of the slowest languages ever 😭.**
 | Arrays are stored as arrays: packed by element width, so ten million `ui8`s take ten million bytes, and compiled code reads one with a load rather than a call | An array holds scalars, so there are no arrays of arrays and nothing in the language can contain itself |
 | Compile once, run anywhere is literal: one `.lrc` file, little-endian everywhere, and a **461 KB** runtime to run it on | Building the JIT needs LLVM 21 exactly — 20 works but is unsupported, because a code generator CI never runs cannot be promised to agree with the other two paths |
 | Three implementations — a tree-walker, a bytecode VM, and an LLVM JIT — that must agree bit for bit on 200,000 generated programs before anything ships | Three implementations is also three places for a bug to hide. The fuzzer found one where `0` and `-0` shared a constant slot, which had been there for as long as the pool had |
-| Only what a program uses gets delivered, and `[gc] mode` is off until asked for — a program that makes no arrays pays nothing for a collector, measurably: 125 ms either way | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
-| 1.04× C on an M5 and 1.38× on x86-64, from a language nobody has optimised — and the bytecode VM went from 9.37× C to 5.82× in one afternoon | Both of those numbers came from finding something switched off or written wrong, not from being clever: the JIT was never asked to run LLVM's optimiser, and the VM was doing a store x86-64 cannot forward |
+| Only what a program uses gets delivered, and `[gc] mode` is off until asked for — a program that makes no arrays carries no collector at all | There is not much to leave out yet, so this is a promise about the future as much as a fact about now |
 | It is small enough to read. Thirteen crates, about 20,500 lines, and the whole thing fits in a head | It is one person's hobby project at version 0.0.0, and stability is **not a guarantee** |
 
 ## Declaring things
@@ -458,18 +455,15 @@ mode = "hot"
 last time, and `"aggressive"` does it every four kilobytes. Two hundred thousand arrays of
 two hundred `ui64`, made and forgotten one at a time:
 
-| `[gc] mode` | peak memory | time |
-| --- | --- | --- |
-| `"off"` | 359.7 MB | 103 ms |
-| `"silent"` | 3.3 MB | 74 ms |
-| `"aggressive"` | 2.0 MB | 70 ms |
+| `[gc] mode` | peak memory |
+| --- | --- |
+| `"off"` | 359.7 MB |
+| `"silent"` | 3.3 MB |
+| `"aggressive"` | 2.0 MB |
 
-Collecting is *faster* than not collecting here, which is not a trick: three hundred and
-sixty megabytes have to be asked for, faulted in and given back, and reusing one slot two
-hundred thousand times does none of that. And a program that makes no arrays pays nothing
-either way — 125 ms with collection off and 125 ms with it at its most eager — because
-what it costs to ask is a load and a compare on the line that makes an array, and that
-line never runs.
+A program that makes no arrays pays nothing for a collector either way, because what it
+costs to ask is a load and a compare on the line that makes an array, and that line never
+runs.
 
 It is **mark and sweep**, and nothing more elaborate is needed. An array's elements are
 scalars, so no value in this language can contain itself and there are no cycles to chase;
@@ -485,8 +479,7 @@ What compiled code does instead is keep a copy. Register `n` already has cell `n
 values machine code cannot hold, and a handle rides in a register perfectly well — so it
 is written to its cell as well, and the frames become the root set. That is one store per
 handle written, and handles are written when an array is made or moved, never in the loop
-that reads one. On the benchmark, which makes no arrays, collection at its most eager
-costs nothing measurable: 276 ms against 276 ms.
+that reads one.
 
 | a loop making 200,000 arrays | `"off"` | `"silent"` |
 | --- | --- | --- |
@@ -832,26 +825,14 @@ and the other the real one.
 
 `"hot"` is the one that does not need to be told which it is. It interprets, counts how
 often each loop goes round, and when one passes ten thousand it compiles **what that loop
-can reach** and jumps into the middle of it with the registers the VM was holding. Four
-programs, the same command and the same file:
+can reach** and jumps into the middle of it with the registers the VM was holding.
 
-| | `mode = "vm"` | `mode = "whole"` | `mode = "hot"` |
-|---|---|---|---|
-| adds up to 100 | 4.7 ms | 6.7 ms | **4.6 ms** |
-| twenty million iterations | 214 ms | **52 ms** | 63 ms |
-| forty routines, none of them hot | 4.8 ms | 47.7 ms | **8.6 ms** |
-| forty routines, one called three million times | 525 ms | 154 ms | **120 ms** |
-
-It costs what the VM costs when nothing is worth compiling, and beats compiling everything
-when only part of a program is worth it. The 4.7 ms is a process starting and a file being
-lexed, parsed, checked and compiled to bytecode; `"whole"` pays LLVM on top of that for a
-loop of a hundred, and `"hot"` never asks.
-
-The last two rows are the same forty routines. `"whole"` compiles all of them because the
-program might call any; `"hot"` is asked from inside one particular loop, and every call
-names its target, so it compiles the one routine that loop reaches and leaves the other
-thirty-nine alone. On the third row the hot loop calls nothing at all, and the entire
-compile is thirty-nine routines that no longer happen.
+It costs what the VM costs when nothing is worth compiling, because it never asks LLVM
+for anything until a loop has already gone round ten thousand times. And it beats
+compiling everything when only part of a program is worth compiling: `"whole"` compiles
+every routine because the program might call any of them, while `"hot"` is asked from
+inside one particular loop, and every call names its target, so it compiles the routines
+that loop can reach and leaves the rest alone.
 
 It is a **preference, not an instruction**. `luarust-run` has no JIT linked into it and is
 not meant to, so a chunk asking for `"whole"` or `"hot"` runs on the VM there and says
@@ -1237,200 +1218,3 @@ So it is one version, tested, until there is a reason to run two jobs instead of
 also the least costly place to be wrong: `run` and `interp` need no LLVM at all, so a
 machine with the wrong version still has the whole language, minus the fastest of the ways
 to run it.
-
-## How fast it is
-
-The benchmark is a dependent chain — `sum = (sum + i) mod 1000000007`, a hundred million
-times, in an unsigned 64-bit integer where the language has one and a signed one where it
-does not. Each value needs the one before it, so it cannot be folded into a formula,
-vectorised, or run out of order. Everybody actually loops.
-
-`bench/` holds it — the same loop in six languages, and `python3 bench/run.py` runs every
-one of them at both sizes and prints the three tables below. Both columns are the same
-commit. The x86-64 one is a GitHub runner and names its CPU because the pool is
-heterogeneous: four models turned up in one day, and a column that does not say which one
-it drew is not comparable with itself.
-
-| | 100M | vs C | | 100M | vs C |
-| --- | --- | --- | --- | --- | --- |
-| **x86-64**, AMD EPYC 9V74 | | | **Apple M5** | | |
-| C, clang -O2 | 425 ms | 1.00× | Rust, rustc -O | 201 ms | 0.90× |
-| Rust, rustc -O | 442 ms | 1.04× | C, clang -O2 | 223 ms | 1.00× |
-| Java 21 | 463 ms | 1.09× | **Luarust**, native | **224 ms** | **1.01×** |
-| **Luarust**, whole JIT | **464 ms** | **1.09×** | **Luarust**, whole JIT | **231 ms** | **1.04×** |
-| PyPy 7.3 | 506 ms | 1.19× | Java 21 | 262 ms | 1.17× |
-| Lua 5.4 | 796 ms | 1.87× | Go 1.26 | 268 ms | 1.20× |
-| LuaJIT | 882 ms | 2.08× | PyPy 7.3 | 284 ms | 1.27× |
-| Luarust, bytecode VM | 2,432 ms | 5.72× | **Luarust**, hot JIT | **289 ms** | **1.30×** |
-| CPython | 9,534 ms | 22.43× | Lua 5.5 | 393 ms | 1.76× |
-| Luarust, tree-walker | 13,350 ms | 31.41× | LuaJIT 2.1 | 452 ms | 2.03× |
-| | | | Luarust, bytecode VM | 757 ms | 3.40× |
-| | | | Luarust, tree-walker | 2,628 ms | 11.79× |
-| | | | CPython 3.14 | 3,823 ms | 17.16× |
-
-**Two machines, because one was not enough to tell the truth with.** The left column is a
-GitHub runner; the right is an idle Apple M5. Same commit, same programs, and they do not
-agree about where this language stands.
-
-**Compiled ahead of time it is level with C.** 2.17 ns an iteration against clang's 2.19 —
-the same emitter and the same passes as the JIT, with the compile paid at build time rather
-than inside the measurement. The two swap places between runs, which is the point: read it
-as *level with C*, not as beating it. What it rules out is a language that needs an
-interpreter to be understood.
-
-**Go is here for contrast**, at 1.20× C. It exposes no intrinsics at all — the supported
-way to hand-write vector code in Go is Plan 9 assembly in a separate file — and it is still
-comfortably in the compiled tier. Which is the argument against putting SIMD in a language:
-a compiler that can prove enough gets most of the way without asking the programmer for
-anything.
-
-The whole-chunk JIT survives the move: ahead of PyPy on both, level with Java on x86-64
-and ahead of it on the M5, and between 1.00× and 1.04× C once the fixed costs are taken
-out.
-
-Native and the hot JIT have no x86-64 row: the workflow that measures that column predates
-both, and a blank is more honest than a number from a different program. It used to be 1.34× C on x86-64. That gap closed when the checker learned to prove
-where a number cannot be negative — the benchmark's remainder is signed, and a signed
-remainder that is provably non-negative compiles to the unsigned instruction.
-
-**The VM used to be 9.37× C on x86-64 and is 5.72× now.** That is one change: a `Value`
-written into a register was a single sixteen-byte vector store, and the fields were read
-back out of it by narrow scalar loads a few instructions later. On x86-64 that shape
-**cannot store-forward** — the load waits for the store to reach cache. Isolated in a
-microbenchmark it costs 12× on Zen 3 and 1.2× on an M5, and it was the VM's hottest
-instruction in every profile. Writing the two fields in place instead of assigning the
-whole value took a third off the loop on both machines. `notes/x86-interpreter-gap.md` has
-the whole investigation.
-
-**The tree-walker is 31.41× C on x86-64 against 12.49× on the M5**, and it is staying
-that way. It does the same thing several times per node through its struct returns,
-and fixing it means restructuring the one implementation every other path is checked
-against. It is the oracle, not something anybody ships — it is already 3.6× the VM and 12× the
-JIT, so nobody chooses it for speed, and its own numbers only price how many programs
-the fuzzer gets through.
-
-This table used to hold the M5 column alone, and said that rankings survive a change of
-machine better than ratios do. They do not: the tree-walker is ahead of CPython on one
-machine and behind it on the other, which was a fact about one laptop reported as a fact
-about the language. It was [issue #1](https://github.com/Artificial-IntelligenceAI/Luarust/issues/1)
-that caught it, and the investigation it started is what took the VM from 9.37× to 5.72×.
-
-Both columns are best of three, every runner measured in the same sitting as every other.
-**Every one of them had to print 15000000** — the harness works the answer out from the
-closed form and refuses to report a timing for anything that did not produce it. That is not belt-and-braces: the literal syntax changed
-under the benchmark's own source file at one point, and all three Luarust rows spent a
-while reporting five milliseconds, which is what three compiler errors take to print.
-
-Some of the 231 ms is LLVM compiling the program, which happens inside the measurement.
-And some of the gap to C is a feature rather than a shortfall: a Luarust loop tests whether
-the counter has *reached* its bound before stepping, rather than stepping and then testing,
-which is what lets `[|253|, |255|]` finish in a `ui8` instead of wrapping round forever.
-That is one extra comparison per iteration, on purpose.
-
-Taking the slope between the two sizes below removes whatever a runner spends before it
-starts — a process launching, a JVM warming, LLVM compiling — and leaves what one
-iteration costs:
-
-| | M5 ns/iter | vs C | x86-64 ns/iter | vs C |
-| --- | --- | --- | --- | --- |
-| Rust, rustc -O | 2.07 | 0.94× | 4.39 | 1.04× |
-| Luarust, native | 2.17 | 0.99× | — | — |
-| C, clang -O2 | 2.19 | 1.00× | 4.22 | 1.00× |
-| Luarust, whole JIT | 2.20 | 1.00× | 4.23 | 1.00× |
-| Java 21 | 2.50 | 1.14× | 4.23 | 1.00× |
-| Go 1.26 | 2.63 | 1.20× | — | — |
-| PyPy | 2.68 | 1.22× | 4.58 | 1.09× |
-| Luarust, hot JIT | 2.75 | 1.25× | — | — |
-| Lua | 3.86 | 1.76× | 7.92 | 1.88× |
-| LuaJIT | 4.23 | 1.93× | 8.79 | 2.08× |
-| Luarust, bytecode VM | 7.37 | 3.36× | 24.20 | 5.73× |
-| Luarust, tree-walker | 25.32 | 11.55× | 133.47 | 31.63× |
-| CPython | 37.40 | 17.06× | 95.24 | 22.57× |
-
-Lua is ahead of LuaJIT on both machines for a reason worth knowing: LuaJIT is Lua 5.1,
-where every number is a double, so its `%` is floating-point, while 5.4 and 5.5 have real
-integers.
-
-The tree-walker's row is the one to look at: 26.40 ns an iteration on the M5 and 121.68 on
-x86-64, while C moves by less than a factor of two. It has been chased down — see the
-paragraph above and `notes/x86-interpreter-gap.md` — and the answer is that a sixteen-byte
-store read back narrowly cannot forward on x86-64. The VM's version of that is fixed. The
-tree-walker's is not, deliberately.
-
-That JIT row was **482 ms and 4.58 ns** until very recently, and what changed was not the
-code generator. `OptimizationLevel::Aggressive` on the execution engine sets the *codegen*
-level — instruction selection, scheduling, register allocation — and runs no IR passes at
-all. Nothing had ever told LLVM to optimise the module. Handing it `default<O3>` before
-compiling turns the emitted loop into this:
-
-```llvm
-at7:
-  %r1.0 = phi i64 [ 1, %entry ], [ %add12, %at7 ]
-  %r0.0 = phi i64 [ 0, %entry ], [ %floored, %at7 ]
-  %add = add i64 %r0.0, %r1.0
-  %rem = srem i64 %add, 1000000007
-  %signs.differ = icmp slt i64 %rem, 0
-  %corrected = add nsw i64 %rem, 1000000007
-  %floored = select i1 %signs.differ, i64 %corrected, i64 %rem
-  %rel8 = icmp eq i64 %r1.0, 100000000
-  %add12 = add nuw nsw i64 %r1.0, 1
-  br i1 %rel8, label %at12, label %at7
-```
-
-Every register was emitted as an `alloca` and every one is now a phi. Luarust's `mod` is
-**floored** by default where C's `%` is truncated, so it was emitted as nine operations around the
-`srem` — a zero test, a `-1` test with a select to dodge `INT_MIN % -1`, a sign comparison,
-a corrective add and a final select. Two of those guards tested a divisor that is a literal
-sitting in the same block, and the rest collapsed once LLVM knew the divisor was positive:
-the only remainder needing correction is a negative one. What is left is one compare and
-one select, and that is the whole distance between 2.53 ns and C's 2.50.
-
-The two slow paths have both been through a profiler since. Four things came out of it,
-in the order they were worth:
-
-| | |
-| --- | --- |
-| **A fault was eighty bytes** — two `String`s — so `Result<u64, Fault>` went back through memory on every addition to carry an eight-byte answer. Boxed, it fits in a register pair | VM 18%, tree-walker 11% |
-| **Comparing two integers asked the values what they were**, twice, and sign-extended both to 128 bits. The instruction already says what they are, and equal integers of one type have equal bits | VM 4%, tree-walker 9% |
-| **The VM found its frame before every instruction**, and matched on which routine it was in, to fetch code that only changes when a call does. Two loops now: one per call, one per instruction | VM 4% |
-| **`int_op` was a call**, and is now inlined | VM 2% |
-
-None of it changed what anything does; the profiler simply said where the time was, which
-was not where I would have guessed. The gap the JIT still has over the VM is dispatch:
-one machine instruction against a jump table and a bounds check.
-
-Before any of it means anything, each timing is checked for whether it still contains a
-loop at all — a compiler that spots the sum of 1 to n and replaces the whole thing with a
-formula reports a magnificent number for doing nothing. Ten times the work should take ten
-times the time:
-
-| | 10M | 100M | ratio |
-| --- | --- | --- | --- |
-| Rust, rustc -O | 24 ms | 202 ms | 8.6× |
-| Luarust, native | 27 ms | 222 ms | 8.4× |
-| C, clang -O2 | 26 ms | 225 ms | 8.7× |
-| Luarust, whole JIT | 30 ms | 238 ms | 7.8× |
-| Java 21 | 43 ms | 265 ms | 6.2× |
-| PyPy | 40 ms | 286 ms | 7.2× |
-| Luarust, hot JIT | 36 ms | 291 ms | 8.1× |
-| Lua 5.5 | 41 ms | 406 ms | 10.0× |
-| LuaJIT 2.1 | 46 ms | 434 ms | 9.5× |
-| Luarust VM | 81 ms | 839 ms | 10.3× |
-| Luarust tree-walker | 265 ms | 2,619 ms | 9.9× |
-| CPython 3.14 | 390 ms | 3,683 ms | 9.5× |
-
-Nobody's loop was deleted. Every ratio falls short of ten by however much of the smaller
-run was *not* the loop — a process starting, a JVM warming, LLVM compiling — and on a
-machine this quick that fixed cost is a real fraction of a 266 ms run, which is why even C
-comes in at 6.5×. The ones nearest ten are the slow ones, where the loop swamps
-everything else. A runner that had quietly replaced the loop with a formula would sit near
-1×, and none of them is close.
-
-Everything reads its `N` from the command line so it cannot be folded away, except Luarust,
-which has no argv yet and has it written into the source. The scaling table is what would
-catch that if it ever began to matter.
-
-The `benchmark` workflow in this repository is what produced the x86-64 column, on a
-shared runner whose numbers move by a third between runs; the M5 column was taken locally
-on an idle machine. Both are honest and they do not agree — see the two-column table
-above, where the JIT holds its place and the two interpreters do not.
