@@ -3,6 +3,11 @@
 Kept here rather than in a chat, because it has been lost to a context compaction twice.
 Fifteen crates, about 25,500 lines of Rust as this is written.
 
+**`[run] chunks` is settled** — see `notes/trusted-chunks-what-it-may-skip.md`. It stays,
+it travels in the chunk like `[run] mode`, and the rule is that it may skip a check whose
+failure is a wrong answer and never one whose failure is a read outside an allocation. The
+key name is still unnamed.
+
 ## Done
 
 **The hot JIT** — `[run] mode = "hot"`. Interprets, counts back edges, and when a loop
